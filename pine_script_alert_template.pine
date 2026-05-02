@@ -23,7 +23,9 @@
 //   "symbol": "BTC-USDT",
 //   "price": {{close}},
 //   "tp": <nilai_tp_anda>,
-//   "sl": <nilai_sl_anda>
+//   "sl": <nilai_sl_anda>,
+//   "leverage": 20,          // Opsional: ganti leverage default
+//   "margin_mode": "ISOLATED" // Opsional: ISOLATED atau CROSSED
 // }
 
 // ─── Cara pakai ───
@@ -32,7 +34,7 @@
 alertcondition(
     longSignal,
     title="BUY Signal",
-    message='{"secret":"YOUR_SECRET","action":"BUY","symbol":"BTC-USDT","price":{{close}},"tp":<TP_VALUE>,"sl":<SL_VALUE>}'
+    message='{"secret":"YOUR_SECRET","action":"BUY","symbol":"BTC-USDT","price":{{close}},"tp":<TP_VALUE>,"sl":<SL_VALUE>,"leverage":20}'
 )
 
 alertcondition(

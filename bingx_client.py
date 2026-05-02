@@ -83,6 +83,19 @@ def set_leverage(symbol: str, leverage: int, side: str = "LONG") -> dict:
     return result
 
 
+def set_margin_type(symbol: str, margin_type: str = "ISOLATED") -> dict:
+    """
+    Set margin type untuk symbol.
+    margin_type: "ISOLATED" atau "CROSSED"
+    """
+    params = {
+        "symbol": symbol,
+        "marginType": margin_type,
+    }
+    result = _request("POST", "/openApi/swap/v2/trade/marginType", params)
+    return result
+
+
 # ─────────────────────────────────────────────
 #  HARGA
 # ─────────────────────────────────────────────

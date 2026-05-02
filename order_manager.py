@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 SYMBOL = os.getenv("SYMBOL", "BTC-USDT")
 LEVERAGE = int(os.getenv("LEVERAGE", 10))
+MARGIN_MODE = os.getenv("MARGIN_MODE", "ISOLATED")  # "ISOLATED" atau "CROSSED"
 RISK_PERCENT = float(os.getenv("RISK_PERCENT", 1.5))
 TP_SL_MODE = os.getenv("TP_SL_MODE", "pinescript")   # "pinescript" atau "percent"
 TP_PERCENT = float(os.getenv("TP_PERCENT", 3.0))
@@ -22,7 +23,7 @@ def _round_qty(qty: float, step: float = 0.001) -> float:
     return math.floor(qty / step) * step
 
 
-def calculate_quantity(balance: float, entry_price: float, sl_price: float) -> float:
+def calculate_quantity(balance: float, entry_price: float, sl_price: float, leverage: int) -> float:
     """
     Hitung jumlah kontrak berdasarkan:
     - Balance tersedia
@@ -37,7 +38,7 @@ def calculate_quantity(balance: float, entry_price: float, sl_price: float) -> f
         raise ValueError("Entry dan SL tidak boleh sama!")
 
     # Qty = risk_amount / price_diff (dengan leverage sudah diperhitungkan)
-    qty = (risk_amount * LEVERAGE) / entry_price
+    qty = (risk_amount * leverage) / entry_price
     qty = _round_qty(qty)
 
     if qty <= 0:
@@ -72,12 +73,21 @@ def execute_signal(signal: dict) -> dict:
     position_side = "LONG" if action == "BUY" else "SHORT"
     order_side = "BUY" if action == "BUY" else "SELL"
 
-    # ── Set leverage dulu ──
+    # ── Ambil Leverage & Margin Mode dari Signal (opsional) atau .env ──
+    current_leverage = int(signal.get("leverage", LEVERAGE))
+    current_margin_mode = signal.get("margin_mode", MARGIN_MODE).upper()
+
+    # ── Set Margin Mode & Leverage ──
     try:
-        bx.set_leverage(symbol, LEVERAGE, position_side)
-        logger.info(f"Leverage set: {LEVERAGE}x {position_side}")
+        # Set Margin Mode (Isolated/Crossed)
+        bx.set_margin_type(symbol, current_margin_mode)
+        logger.info(f"Margin mode set: {current_margin_mode} for {symbol}")
+
+        # Set Leverage
+        bx.set_leverage(symbol, current_leverage, position_side)
+        logger.info(f"Leverage set: {current_leverage}x {position_side}")
     except Exception as e:
-        logger.warning(f"Gagal set leverage (mungkin sudah diset): {e}")
+        logger.warning(f"Gagal set margin/leverage (mungkin sudah sesuai atau ada posisi aktif): {e}")
 
     # ── Ambil harga entry ──
     current_price = bx.get_current_price(symbol)
@@ -112,7 +122,7 @@ def execute_signal(signal: dict) -> dict:
     logger.info(f"Balance tersedia: {balance:.2f} USDT")
 
     # ── Hitung quantity ──
-    quantity = calculate_quantity(balance, entry_price, sl_price)
+    quantity = calculate_quantity(balance, entry_price, sl_price, current_leverage)
     logger.info(f"Quantity: {quantity} kontrak")
 
     result = {
