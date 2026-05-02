@@ -1,0 +1,44 @@
+// ================================================================
+// TAMBAHKAN KODE INI KE PALING BAWAH SCRIPT TRADENTIX PRO ANDA
+// ================================================================
+
+// ── Webhook Secret ──
+bingx_secret = "Tr4d3BotBingX@2025!xK9"
+
+// ── JSON BUY ──
+bingx_buy_msg = '{"secret":"' + bingx_secret + '",' +
+     '"action":"BUY",' +
+     '"symbol":"BTC-USDT",' +
+     '"price":' + str.tostring(math.round(close, 2)) + ',' +
+     '"tp1":' + str.tostring(math.round(tpb1t, 2)) + ',' +
+     '"tp2":' + str.tostring(math.round(tpb2t, 2)) + ',' +
+     '"tp3":' + str.tostring(math.round(tpb3t, 2)) + ',' +
+     '"tp4":' + str.tostring(math.round(tpb4t, 2)) + ',' +
+     '"sl":'  + str.tostring(math.round(slbt, 2)) + '}'
+
+// ── JSON SELL ──
+bingx_sell_msg = '{"secret":"' + bingx_secret + '",' +
+     '"action":"SELL",' +
+     '"symbol":"BTC-USDT",' +
+     '"price":' + str.tostring(math.round(close, 2)) + ',' +
+     '"tp1":' + str.tostring(math.round(tps1t, 2)) + ',' +
+     '"tp2":' + str.tostring(math.round(tps2t, 2)) + ',' +
+     '"tp3":' + str.tostring(math.round(tps3t, 2)) + ',' +
+     '"tp4":' + str.tostring(math.round(tps4t, 2)) + ',' +
+     '"sl":'  + str.tostring(math.round(slst, 2)) + '}'
+
+// ── JSON CLOSE ──
+bingx_close_msg = '{"secret":"' + bingx_secret + '","action":"CLOSE","symbol":"BTC-USDT"}'
+
+// ── Kirim alert ke webhook saat sinyal muncul ──
+if buy and backtest and trendType and longside
+    alert(bingx_buy_msg, alert.freq_once_per_bar_close)
+
+if sell and backtest and trendType and shortside
+    alert(bingx_sell_msg, alert.freq_once_per_bar_close)
+
+if sellsignal1 or low < slbt
+    alert(bingx_close_msg, alert.freq_once_per_bar_close)
+
+if buysignal1 or high > slst
+    alert(bingx_close_msg, alert.freq_once_per_bar_close)

@@ -1,0 +1,9 @@
+BINGX_API_KEY
+BINGX_API_SECRET
+WEBHOOK_SECRET
+*.log
+__pycache__/
+*.pyc
+.DS_Store
+venv/
+.venv/
