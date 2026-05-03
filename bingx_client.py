@@ -145,44 +145,47 @@ def place_order(
     return result
 
 
-def set_tp_sl(
+def set_multi_tp_sl(
     symbol: str,
-    position_side: str,  # "LONG" atau "SHORT"
+    position_side: str,
     stop_price: float,
-    tp_price: float,
+    tp_levels: list,    # List of (price, qty)
+    total_qty: float
 ) -> dict:
     """
-    Pasang Take Profit dan Stop Loss setelah order masuk.
-    Menggunakan stop order terpisah.
+    Pasang Multi-Take Profit dan satu Stop Loss.
+    tp_levels: [(price1, qty1), (price2, qty2), ...]
     """
-    results = {}
+    results = {"tp": [], "sl": None}
+    side = "SELL" if position_side == "LONG" else "BUY"
 
-    # ── Take Profit ──
-    # Jika LONG: TP = SELL saat harga naik ke tp_price
-    tp_side = "SELL" if position_side == "LONG" else "BUY"
-    tp_params = {
-        "symbol": symbol,
-        "side": tp_side,
-        "positionSide": position_side,
-        "type": "TAKE_PROFIT_MARKET",
-        "stopPrice": tp_price,
-        "quantity": 0,          # 0 = tutup seluruh posisi
-        "workingType": "MARK_PRICE",
-        "closePosition": "true",
-    }
-    results["tp"] = _request("POST", "/openApi/swap/v2/trade/order", tp_params)
+    # ── Pasang Tiap Level TP ──
+    for tp_price, tp_qty in tp_levels:
+        if tp_qty <= 0: continue
+        tp_params = {
+            "symbol": symbol,
+            "side": side,
+            "positionSide": position_side,
+            "type": "TAKE_PROFIT_MARKET",
+            "stopPrice": tp_price,
+            "quantity": tp_qty,
+            "workingType": "MARK_PRICE",
+        }
+        try:
+            res = _request("POST", "/openApi/swap/v2/trade/order", tp_params)
+            results["tp"].append(res)
+        except Exception as e:
+            results["tp"].append({"error": str(e), "price": tp_price})
 
-    # ── Stop Loss ──
-    sl_side = "SELL" if position_side == "LONG" else "BUY"
+    # ── Stop Loss (Tutup Semua Sisa) ──
     sl_params = {
         "symbol": symbol,
-        "side": sl_side,
+        "side": side,
         "positionSide": position_side,
         "type": "STOP_MARKET",
         "stopPrice": stop_price,
-        "quantity": 0,
+        "quantity": total_qty, # Pasang SL untuk seluruh jumlah posisi
         "workingType": "MARK_PRICE",
-        "closePosition": "true",
     }
     results["sl"] = _request("POST", "/openApi/swap/v2/trade/order", sl_params)
 

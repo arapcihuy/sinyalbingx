@@ -4,7 +4,10 @@ import logging
 from datetime import datetime
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
+import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import order_manager
+import uuid
 
 load_dotenv()
 
@@ -24,6 +27,14 @@ app = Flask(__name__)
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 PORT = int(os.getenv("PORT", 5000))
 HOST = os.getenv("HOST", "0.0.0.0")
+
+# ── Telegram Config ──
+TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+bot = telebot.TeleBot(TG_TOKEN)
+
+# Penyimpanan sementara untuk sinyal yang menunggu konfirmasi
+pending_signals = {}
 
 
 # ─────────────────────────────────────────────
@@ -85,25 +96,104 @@ def webhook():
             logger.error(f"Gagal close: {e}")
             return jsonify({"error": str(e)}), 500
 
-    # ── Proses BUY / SELL ──
+    # ── Proses BUY / SELL (Minta Konfirmasi Telegram) ──
     try:
-        result = order_manager.execute_signal(data)
-        logger.info(f"✅ Order berhasil: {result}")
-        return jsonify({
-            "status": "success",
-            "action": action,
-            "result": {
-                "symbol": result["symbol"],
-                "quantity": result["quantity"],
-                "entry": result["entry_price"],
-                "tp": result["tp_price"],
-                "sl": result["sl_price"],
-            }
-        }), 200
+        signal_id = str(uuid.uuid4())[:8]
+        pending_signals[signal_id] = data
+        
+        # Buat Tombol
+        markup = InlineKeyboardMarkup()
+        markup.row(
+            InlineKeyboardButton("10x", callback_data=f"exec:10:{signal_id}"),
+            InlineKeyboardButton("20x", callback_data=f"exec:20:{signal_id}"),
+            InlineKeyboardButton("30x", callback_data=f"exec:30:{signal_id}")
+        )
+        markup.row(InlineKeyboardButton("❌ Batal", callback_data=f"cancel:{signal_id}"))
+
+        msg = (
+            f"🔔 *SINYAL MASUK!*\n\n"
+            f"Action: `{action}`\n"
+            f"Symbol: `{data.get('symbol', 'BTC-USDT')}`\n"
+            f"Price: `{data.get('price', 'MARKET')}`\n\n"
+            f"Pilih Leverage untuk eksekusi:"
+        )
+        
+        bot.send_message(TG_CHAT_ID, msg, parse_mode="Markdown", reply_markup=markup)
+        logger.info(f"Sinyal {signal_id} dikirim ke Telegram untuk konfirmasi.")
+        
+        return jsonify({"status": "pending", "message": "Menunggu konfirmasi Telegram", "id": signal_id}), 200
 
     except Exception as e:
-        logger.error(f"❌ Error saat eksekusi order: {e}", exc_info=True)
+        logger.error(f"❌ Error saat kirim konfirmasi: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
+
+# ─────────────────────────────────────────────
+#  TELEGRAM WEBHOOK & CALLBACK
+# ─────────────────────────────────────────────
+
+@app.route("/telegram", methods=["POST"])
+def telegram_webhook():
+    """Endpoint untuk menerima update dari Telegram."""
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return ''
+    else:
+        return jsonify({"error": "Invalid content type"}), 403
+
+
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback(call):
+    """Handle klik tombol di Telegram."""
+    data_parts = call.data.split(":")
+    cmd = data_parts[0]
+    
+    if cmd == "exec":
+        leverage = data_parts[1]
+        sid = data_parts[2]
+        
+        if sid not in pending_signals:
+            bot.answer_callback_query(call.id, "Sinyal kadaluarsa atau tidak ditemukan!")
+            return
+
+        signal = pending_signals.pop(sid)
+        signal["leverage"] = int(leverage) # Pakai leverage pilihan user
+
+        bot.edit_message_text(
+            f"⚙️ Memproses `{signal['action']}` `{signal['symbol']}` dengan leverage `{leverage}x`...",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id
+        )
+
+        try:
+            result = order_manager.execute_signal(signal)
+            bot.edit_message_text(
+                f"✅ *ORDER BERHASIL!*\n\n"
+                f"Action: `{result['action']}`\n"
+                f"Symbol: `{result['symbol']}`\n"
+                f"Leverage: `{leverage}x`\n"
+                f"Qty: `{result['quantity']}`\n"
+                f"Entry: `{result['entry_price']}`\n"
+                f"TP: `{result['tp_price']}`\n"
+                f"SL: `{result['sl_price']}`",
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            bot.edit_message_text(
+                f"❌ *GAGAL EKSEKUSI!*\n\nError: `{str(e)}`",
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                parse_mode="Markdown"
+            )
+            
+    elif cmd == "cancel":
+        sid = data_parts[1]
+        pending_signals.pop(sid, None)
+        bot.edit_message_text("🚫 Sinyal dibatalkan.", chat_id=call.message.chat.id, message_id=call.message.message_id)
 
 
 def _close_position(symbol: str, data: dict) -> dict:

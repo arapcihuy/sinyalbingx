@@ -95,44 +95,48 @@ def execute_signal(signal: dict) -> dict:
 
     # ── Hitung TP dan SL ──
     # TRADENTIX PRO mengirim: tp1, tp2, tp3, tp4, sl
-    # Gunakan tp1 sebagai TP utama untuk BingX, sl sebagai SL
-    if TP_SL_MODE == "pinescript":
-        # Cek format TRADENTIX PRO (multi-TP)
-        tp1_price = float(signal.get("tp1", signal.get("tp", 0)))
-        tp4_price = float(signal.get("tp4", tp1_price))
-        sl_price  = float(signal.get("sl", 0))
+    sl_price = float(signal.get("sl", 0))
+    tp_levels_prices = [
+        float(signal.get("tp1", 0)),
+        float(signal.get("tp2", 0)),
+        float(signal.get("tp3", 0)),
+        float(signal.get("tp4", 0))
+    ]
+    
+    if sl_price == 0 or tp_levels_prices[0] == 0:
+        raise ValueError("TP1 atau SL tidak diterima dari TradingView!")
 
-        if tp1_price == 0 or sl_price == 0:
-            raise ValueError("TP atau SL tidak diterima dari TradingView! Cek format payload.")
-
-        # Gunakan TP4 (target terbesar) untuk pemasangan TP di BingX
-        # TP1,2,3 akan dicapai secara partial — BingX tidak support multi-TP via API dasar
-        tp_price = tp4_price
-    else:
-        # Mode percent: hitung dari entry price
-        if action == "BUY":
-            tp_price = entry_price * (1 + TP_PERCENT / 100)
-            sl_price = entry_price * (1 - SL_PERCENT / 100)
-        else:
-            tp_price = entry_price * (1 - TP_PERCENT / 100)
-            sl_price = entry_price * (1 + SL_PERCENT / 100)
-
-    # ── Ambil balance ──
+    # ── Ambil balance & Hitung total quantity ──
     balance = bx.get_balance()
     logger.info(f"Balance tersedia: {balance:.2f} USDT")
 
-    # ── Hitung quantity ──
-    quantity = calculate_quantity(balance, entry_price, sl_price, current_leverage)
-    logger.info(f"Quantity: {quantity} kontrak")
+    total_quantity = calculate_quantity(balance, entry_price, sl_price, current_leverage)
+    logger.info(f"Total Quantity: {total_quantity} kontrak")
+
+    # ── Bagi Quantity ke 4 TP (Masing-masing 25%) ──
+    # Pastikan pembagian tidak membuat quantity per TP jadi 0
+    qty_per_tp = _round_qty(total_quantity / 4)
+    if qty_per_tp <= 0:
+        # Jika terlalu kecil untuk dibagi 4, gunakan 1 TP saja (TP4)
+        tp_configs = [(tp_levels_prices[3], total_quantity)]
+        logger.info("Quantity terlalu kecil untuk dibagi 4, menggunakan single TP (TP4)")
+    else:
+        # Bagi ke 4 level, sisanya masukkan ke TP terakhir
+        tp_configs = []
+        remaining_qty = total_quantity
+        for i in range(3):
+            tp_configs.append((tp_levels_prices[i], qty_per_tp))
+            remaining_qty -= qty_per_tp
+        tp_configs.append((tp_levels_prices[3], _round_qty(remaining_qty)))
 
     result = {
         "symbol": symbol,
         "action": action,
         "position_side": position_side,
         "entry_price": entry_price,
-        "tp_price": round(tp_price, 2),
-        "sl_price": round(sl_price, 2),
-        "quantity": quantity,
+        "sl_price": sl_price,
+        "total_quantity": total_quantity,
+        "tp_configs": tp_configs,
         "balance": balance,
         "orders": {}
     }
@@ -145,27 +149,28 @@ def execute_signal(signal: dict) -> dict:
         logger.warning(f"Cancel order: {e}")
 
     # ── Buka order entry ──
-    logger.info(f"Membuka order {action} {symbol} qty={quantity} entry={entry_price}")
+    logger.info(f"Membuka order {action} {symbol} qty={total_quantity}")
     order_result = bx.place_order(
         symbol=symbol,
         side=order_side,
         position_side=position_side,
-        quantity=quantity,
+        quantity=total_quantity,
         order_type=ORDER_TYPE,
         price=entry_price if ORDER_TYPE == "LIMIT" else None,
     )
     result["orders"]["entry"] = order_result
     logger.info(f"Order entry: {order_result}")
 
-    # ── Pasang TP & SL ──
-    logger.info(f"Set TP={tp_price} SL={sl_price}")
-    tpsl_result = bx.set_tp_sl(
+    # ── Pasang Multi TP & SL ──
+    logger.info(f"Set Multi-TP: {tp_configs} SL={sl_price}")
+    tpsl_result = bx.set_multi_tp_sl(
         symbol=symbol,
         position_side=position_side,
         stop_price=sl_price,
-        tp_price=tp_price,
+        tp_levels=tp_configs,
+        total_qty=total_quantity
     )
     result["orders"]["tpsl"] = tpsl_result
-    logger.info(f"TP/SL result: {tpsl_result}")
+    logger.info(f"Multi-TP/SL result: {tpsl_result}")
 
     return result
