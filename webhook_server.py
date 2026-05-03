@@ -8,6 +8,8 @@ import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import order_manager
 import uuid
+import threading
+import time
 
 load_dotenv()
 
@@ -291,6 +293,21 @@ def _close_position(symbol: str, data: dict) -> dict:
         logger.info(f"Posisi {pos_side} ditutup: {result}")
 
     return {"closed_positions": closed}
+
+
+# ── Background Monitor Thread ──
+def start_monitor():
+    logger.info("🕵️ Monitor posisi aktif dimulai (cek setiap 10 detik)...")
+    while True:
+        try:
+            order_manager.monitor_and_sync_positions()
+        except Exception as e:
+            logger.error(f"Monitor error: {e}")
+        time.sleep(10)
+
+# Jalankan monitor di background thread
+monitor_thread = threading.Thread(target=start_monitor, daemon=True)
+monitor_thread.start()
 
 
 # ─────────────────────────────────────────────

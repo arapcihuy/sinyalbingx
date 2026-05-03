@@ -230,3 +230,50 @@ def apply_tpsl_to_existing(signal: dict) -> dict:
         "tp_configs": tp_configs,
         "sl_price": sl_price
     }
+
+
+def monitor_and_sync_positions():
+    """Fungsi untuk memantau posisi aktif dan otomatis pasang TP/SL jika belum ada."""
+    try:
+        # 1. Ambil posisi aktif
+        positions = bx.get_open_positions(SYMBOL)
+        if not positions:
+            return
+
+        for pos in positions:
+            symbol = pos.get("symbol")
+            qty = abs(float(pos.get("positionAmt", 0)))
+            if qty <= 0: continue
+
+            # 2. Cek apakah sudah ada order TP/SL
+            open_orders = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
+            has_tpsl = False
+            if open_orders.get("code") == 0:
+                for order in open_orders.get("data", []):
+                    if order.get("type") in ["TAKE_PROFIT_MARKET", "STOP_MARKET"]:
+                        has_tpsl = True
+                        break
+            
+            if not has_tpsl:
+                logger.info(f"🔍 Posisi manual terdeteksi di {symbol}. Memasang TP/SL otomatis...")
+                entry_price = float(pos.get("avgPrice", 0))
+                pos_side = pos.get("positionSide", "LONG")
+                
+                # Gunakan persentase dari .env
+                if pos_side == "LONG":
+                    tp_price = entry_price * (1 + TP_PERCENT / 100)
+                    sl_price = entry_price * (1 - SL_PERCENT / 100)
+                else:
+                    tp_price = entry_price * (1 - TP_PERCENT / 100)
+                    sl_price = entry_price * (1 + SL_PERCENT / 100)
+
+                bx.set_multi_tp_sl(
+                    symbol=symbol,
+                    position_side=pos_side,
+                    stop_price=round(sl_price, 2),
+                    tp_levels=[(round(tp_price, 2), qty)],
+                    total_qty=qty
+                )
+                logger.info(f"✅ Auto-TP/SL terpasang untuk posisi manual {symbol}")
+    except Exception as e:
+        logger.error(f"Error in monitor loop: {e}")
