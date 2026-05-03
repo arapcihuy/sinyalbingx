@@ -18,8 +18,8 @@ SL_PERCENT = float(os.getenv("SL_PERCENT", 1.5))
 ORDER_TYPE = os.getenv("ORDER_TYPE", "MARKET")
 
 
-def _round_qty(qty: float, step: float = 0.001) -> float:
-    """Bulatkan quantity ke step size yang valid."""
+def _round_qty(qty: float, step: float = 0.00001) -> float:
+    """Bulatkan quantity ke step size yang valid (untuk BTC biasanya 0.0001 atau lebih kecil)."""
     return math.floor(qty / step) * step
 
 
