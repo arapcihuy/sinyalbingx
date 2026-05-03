@@ -233,47 +233,77 @@ def apply_tpsl_to_existing(signal: dict) -> dict:
 
 
 def monitor_and_sync_positions():
-    """Fungsi untuk memantau posisi aktif dan otomatis pasang TP/SL jika belum ada."""
+    """Fungsi untuk memantau SEMUA posisi aktif dan otomatis pasang TP/SL jika belum ada."""
     try:
-        # 1. Ambil posisi aktif
-        positions = bx.get_open_positions(SYMBOL)
-        if not positions:
+        # 1. Ambil SEMUA posisi aktif
+        res = bx.get_open_positions()
+        
+        if not isinstance(res, list):
+            logger.warning(f"Radar: Data posisi bukan list! Cek API Key. Res: {res}")
             return
 
-        for pos in positions:
+        if len(res) == 0:
+            # logger.info("Radar: Tidak ada posisi aktif terdeteksi.")
+            return
+
+        for pos in res:
+            if not isinstance(pos, dict): continue
             symbol = pos.get("symbol")
             qty = abs(float(pos.get("positionAmt", 0)))
-            if qty <= 0: continue
+            
+            if qty > 0:
+                logger.info(f"Radar: Menemukan posisi aktif {symbol} qty={qty}")
+            else:
+                continue
 
             # 2. Cek apakah sudah ada order TP/SL
-            open_orders = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
-            has_tpsl = False
-            if open_orders.get("code") == 0:
-                for order in open_orders.get("data", []):
-                    if order.get("type") in ["TAKE_PROFIT_MARKET", "STOP_MARKET"]:
+            try:
+                open_orders_res = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
+                if not isinstance(open_orders_res, dict) or open_orders_res.get("code") != 0:
+                    logger.warning(f"Radar: Gagal cek open orders untuk {symbol}. Res: {open_orders_res}")
+                    continue
+                
+                open_orders = open_orders_res.get("data", [])
+                logger.info(f"Radar: Terdeteksi {len(open_orders)} open order di {symbol}")
+
+                has_tpsl = False
+                for order in open_orders:
+                    if not isinstance(order, dict): continue
+                    order_type = order.get("type")
+                    if order_type in ["TAKE_PROFIT_MARKET", "STOP_MARKET", "TAKE_PROFIT", "STOP_LOSS"]:
+                        logger.info(f"Radar: {symbol} sudah punya {order_type}. Lewati.")
                         has_tpsl = True
                         break
-            
-            if not has_tpsl:
-                logger.info(f"🔍 Posisi manual terdeteksi di {symbol}. Memasang TP/SL otomatis...")
-                entry_price = float(pos.get("avgPrice", 0))
-                pos_side = pos.get("positionSide", "LONG")
                 
-                # Gunakan persentase dari .env
-                if pos_side == "LONG":
-                    tp_price = entry_price * (1 + TP_PERCENT / 100)
-                    sl_price = entry_price * (1 - SL_PERCENT / 100)
-                else:
-                    tp_price = entry_price * (1 - TP_PERCENT / 100)
-                    sl_price = entry_price * (1 + SL_PERCENT / 100)
+                if not has_tpsl:
+                    # Skip jika qty terlalu kecil (BingX punya batas minimum, misal 0.002 atau 0.001)
+                    if abs(float(qty)) < 0.001:
+                        logger.warning(f"Radar: Posisi {symbol} ({qty}) terlalu kecil untuk dipasang TP/SL otomatis. Minimal biasanya 0.001-0.002 BTC.")
+                        continue
 
-                bx.set_multi_tp_sl(
-                    symbol=symbol,
-                    position_side=pos_side,
-                    stop_price=round(sl_price, 2),
-                    tp_levels=[(round(tp_price, 2), qty)],
-                    total_qty=qty
-                )
-                logger.info(f"✅ Auto-TP/SL terpasang untuk posisi manual {symbol}")
+                    logger.info(f"Radar: {symbol} 'telanjang'. Memasang TP/SL otomatis...")
+                    entry_price = float(pos.get("avgPrice", 0))
+                    pos_side = pos.get("positionSide", "LONG")
+                    
+                    if pos_side == "LONG":
+                        tp_price = entry_price * (1 + TP_PERCENT / 100)
+                        sl_price = entry_price * (1 - SL_PERCENT / 100)
+                    else:
+                        tp_price = entry_price * (1 - TP_PERCENT / 100)
+                        sl_price = entry_price * (1 + SL_PERCENT / 100)
+
+                    # 4. Pasang TP/SL
+                    tpsl_res = bx.set_multi_tp_sl(
+                        symbol=symbol,
+                        position_side=pos_side,
+                        stop_price=round(sl_price, 2),
+                        tp_levels=[(round(tp_price, 2), qty)],
+                        total_qty=qty
+                    )
+                    logger.info(f"Radar: Jawaban BingX: {tpsl_res}")
+                    logger.info(f"✅ Auto-TP/SL selesai diproses untuk {symbol}")
+            except Exception as e:
+                logger.error(f"Gagal cek order TP/SL untuk {symbol}: {e}")
+
     except Exception as e:
         logger.error(f"Error in monitor loop: {e}")

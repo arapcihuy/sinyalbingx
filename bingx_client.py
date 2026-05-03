@@ -5,6 +5,7 @@ import requests
 import json
 import os
 import urllib3
+import urllib.parse
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,9 +18,8 @@ BINGX_API_SECRET = os.getenv("BINGX_API_SECRET")
 BASE_URL = "https://open-api.bingx.com"
 
 
-def _sign(params: dict) -> str:
-    """Buat HMAC-SHA256 signature untuk BingX API."""
-    query_string = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+def _sign(query_string: str) -> str:
+    """Buat HMAC-SHA256 signature dari query string."""
     signature = hmac.new(
         BINGX_API_SECRET.encode("utf-8"),
         query_string.encode("utf-8"),
@@ -36,22 +36,45 @@ def _get_headers() -> dict:
 
 
 def _request(method: str, path: str, params: dict = None) -> dict:
-    """Buat request ke BingX API dengan autentikasi."""
+    """Buat request ke BingX API dengan pemisahan Query vs Body untuk V2."""
+    import logging as _log
+    _logger = _log.getLogger(__name__)
+    
     if params is None:
         params = {}
 
+    # Tambahkan timestamp
     params["timestamp"] = int(time.time() * 1000)
-    params["signature"] = _sign(params)
-
-    url = BASE_URL + path
+    
+    # Buat query string murni untuk tanda tangan
+    # Pastikan boolean dikonversi ke 'true'/'false' (bukan 'True'/'False')
+    sorted_params = sorted(params.items())
+    query_parts = []
+    for k, v in sorted_params:
+        if isinstance(v, bool):
+            val = str(v).lower()
+        else:
+            val = str(v)
+        query_parts.append(f"{k}={val}")
+    
+    query_string = "&".join(query_parts)
+    
+    # Tambahkan signature ke query string
+    signature = _sign(query_string)
+    full_query_string = f"{query_string}&signature={signature}"
+    
+    # Konstruksi URL dengan query string lengkap
+    url = f"{BASE_URL}{path}?{full_query_string}"
     headers = _get_headers()
+    
+    _logger.info(f"[BingX] {method} {path} params={dict(sorted_params)}")
 
     if method == "GET":
-        response = requests.get(url, headers=headers, params=params, timeout=10, verify=False)
+        response = requests.get(url, headers=headers, timeout=10, verify=False)
     elif method == "POST":
-        response = requests.post(url, headers=headers, params=params, timeout=10, verify=False)
+        response = requests.post(url, headers=headers, timeout=10, verify=False)
     elif method == "DELETE":
-        response = requests.delete(url, headers=headers, params=params, timeout=10, verify=False)
+        response = requests.delete(url, headers=headers, timeout=10, verify=False)
     else:
         raise ValueError(f"Method tidak dikenal: {method}")
 
@@ -165,11 +188,11 @@ def set_multi_tp_sl(
         tp_params = {
             "symbol": symbol,
             "side": side,
-            "positionSide": position_side,
             "type": "TAKE_PROFIT_MARKET",
-            "stopPrice": tp_price,
-            "quantity": tp_qty,
-            "workingType": "MARK_PRICE",
+            "stopPrice": round(float(tp_price), 2),
+            "quantity": round(float(tp_qty), 4),
+            "reduceOnly": "true",
+            "priceProtect": "true"
         }
         try:
             res = _request("POST", "/openApi/swap/v2/trade/order", tp_params)
@@ -177,15 +200,15 @@ def set_multi_tp_sl(
         except Exception as e:
             results["tp"].append({"error": str(e), "price": tp_price})
 
-    # ── Stop Loss (Tutup Semua Sisa) ──
+    # ── Stop Loss (Tutup Semua Sisa Posisi) ──
     sl_params = {
         "symbol": symbol,
         "side": side,
-        "positionSide": position_side,
         "type": "STOP_MARKET",
-        "stopPrice": stop_price,
-        "quantity": total_qty, # Pasang SL untuk seluruh jumlah posisi
-        "workingType": "MARK_PRICE",
+        "stopPrice": round(float(stop_price), 2),
+        "quantity": round(float(total_qty), 4),
+        "reduceOnly": "true",
+        "priceProtect": "true"
     }
     results["sl"] = _request("POST", "/openApi/swap/v2/trade/order", sl_params)
 
@@ -198,9 +221,13 @@ def cancel_all_orders(symbol: str) -> dict:
     return result
 
 
-def get_open_positions(symbol: str) -> list:
-    """Cek posisi aktif."""
-    result = _request("GET", "/openApi/swap/v2/user/positions", {"symbol": symbol})
+def get_open_positions(symbol: str = None) -> list:
+    """Cek posisi aktif. Jika symbol None, ambil semua."""
+    params = {}
+    if symbol:
+        params["symbol"] = symbol
+        
+    result = _request("GET", "/openApi/swap/v2/user/positions", params)
     if result.get("code") == 0:
         return result.get("data", [])
     return []

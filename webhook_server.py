@@ -315,6 +315,7 @@ monitor_thread.start()
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
-    logger.info(f"🚀 BingX Webhook Bot berjalan di http://{HOST}:{PORT}")
+    logger.info(f"🚀 BingX Webhook Bot v1.2.6 berjalan di http://{HOST}:{PORT}")
     logger.info(f"   Endpoint webhook: http://{HOST}:{PORT}/webhook")
+    logger.info("   Mode: Position Monitoring + Auto TP/SL (Deep Fix)")
     app.run(host=HOST, port=PORT, debug=False)
