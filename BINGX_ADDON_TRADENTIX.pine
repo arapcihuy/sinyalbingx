@@ -1,5 +1,6 @@
 // ================================================================
 // TAMBAHKAN KODE INI KE PALING BAWAH SCRIPT TRADENTIX PRO ANDA
+// (Versi Bersih: Tanpa Plot Visual agar tidak mengganggu chart)
 // ================================================================
 
 // ── Webhook Secret ──
@@ -30,15 +31,17 @@ bingx_sell_msg = '{"secret":"' + bingx_secret + '",' +
 // ── JSON CLOSE ──
 bingx_close_msg = '{"secret":"' + bingx_secret + '","action":"CLOSE","symbol":"BTC-USDT"}'
 
-// ── Kirim alert ke webhook saat sinyal muncul ──
+// ── Kirim alert ke webhook (Background Only) ──
 if buy and backtest and trendType and longside
     alert(bingx_buy_msg, alert.freq_once_per_bar_close)
 
 if sell and backtest and trendType and shortside
     alert(bingx_sell_msg, alert.freq_once_per_bar_close)
 
-if sellsignal1 or low < slbt
+// CLOSE hanya terpicu saat ada posisi LONG aktif dan kena SL/reverse
+if strategy.position_size > 0 and (sellsignal1 or low < slbt)
     alert(bingx_close_msg, alert.freq_once_per_bar_close)
 
-if buysignal1 or high > slst
+// CLOSE hanya terpicu saat ada posisi SHORT aktif dan kena SL/reverse
+if strategy.position_size < 0 and (buysignal1 or high > slst)
     alert(bingx_close_msg, alert.freq_once_per_bar_close)
