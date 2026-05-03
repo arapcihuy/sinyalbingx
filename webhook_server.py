@@ -96,7 +96,27 @@ def webhook():
             logger.error(f"Gagal close: {e}")
             return jsonify({"error": str(e)}), 500
 
-    # ── Proses BUY / SELL (Minta Konfirmasi Telegram) ──
+    # ── Cek apakah sudah ada posisi aktif (Auto Sync TP/SL) ──
+    try:
+        import bingx_client as bx
+        positions = bx.get_open_positions(data.get("symbol", os.getenv("SYMBOL", "BTC-USDT")))
+        if positions and abs(float(positions[0].get("positionAmt", 0))) > 0:
+            logger.info("Posisi sudah aktif. Mengotomatiskan sinkronisasi TP/SL...")
+            bot.send_message(TG_CHAT_ID, f"🔄 *Posisi aktif terdeteksi untuk {data.get('symbol')}*\nSinkronisasi TP/SL otomatis dijalankan...", parse_mode="Markdown")
+            result = order_manager.apply_tpsl_to_existing(data)
+            bot.send_message(
+                TG_CHAT_ID,
+                f"✅ *TP/SL DISINKRONKAN!*\n\n"
+                f"Symbol: `{result['symbol']}`\n"
+                f"Qty: `{result['total_quantity']}`\n"
+                f"TP1-TP4 telah dipasang.",
+                parse_mode="Markdown"
+            )
+            return jsonify({"status": "success", "message": "Auto-sync TP/SL berhasil"}), 200
+    except Exception as e:
+        logger.warning(f"Gagal auto-sync: {e}")
+
+    # ── Jika belum ada posisi, Minta Konfirmasi Telegram untuk Entry Baru ──
     try:
         signal_id = str(uuid.uuid4())[:8]
         pending_signals[signal_id] = data
@@ -108,6 +128,7 @@ def webhook():
             InlineKeyboardButton("20x", callback_data=f"exec:20:{signal_id}"),
             InlineKeyboardButton("30x", callback_data=f"exec:30:{signal_id}")
         )
+        markup.row(InlineKeyboardButton("🛠️ Hanya Pasang TP/SL (No Entry)", callback_data=f"tpsl_only:{signal_id}"))
         markup.row(InlineKeyboardButton("❌ Batal", callback_data=f"cancel:{signal_id}"))
 
         msg = (
@@ -190,6 +211,36 @@ def handle_callback(call):
                 parse_mode="Markdown"
             )
             
+    elif cmd == "tpsl_only":
+        sid = data_parts[1]
+        if sid not in pending_signals:
+            bot.answer_callback_query(call.id, "Sinyal kadaluarsa!")
+            return
+        
+        signal = pending_signals.pop(sid)
+        bot.edit_message_text(
+            f"⚙️ Menghitung & Memasang TP/SL untuk posisi `{signal['symbol']}` aktif...",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id
+        )
+
+        try:
+            # Panggil fungsi baru untuk set TP/SL saja
+            result = order_manager.apply_tpsl_to_existing(signal)
+            bot.edit_message_text(
+                f"✅ *TP/SL TERPASANG!*\n\n"
+                f"Symbol: `{result['symbol']}`\n"
+                f"Qty Terdeteksi: `{result['total_quantity']}`\n"
+                f"TP1: `{result['tp_configs'][0][0]}`\n"
+                f"TP4: `{result['tp_configs'][3][0] if len(result['tp_configs']) > 3 else '-'}`\n"
+                f"SL: `{result['sl_price']}`",
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            bot.edit_message_text(f"❌ *GAGAL!*\n\nError: `{str(e)}`", chat_id=call.message.chat.id, message_id=call.message.message_id)
+
     elif cmd == "cancel":
         sid = data_parts[1]
         pending_signals.pop(sid, None)

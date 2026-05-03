@@ -174,3 +174,59 @@ def execute_signal(signal: dict) -> dict:
     logger.info(f"Multi-TP/SL result: {tpsl_result}")
 
     return result
+
+
+def apply_tpsl_to_existing(signal: dict) -> dict:
+    """Hanya pasang TP/SL untuk posisi yang sudah terbuka."""
+    symbol = signal.get("symbol", SYMBOL)
+    
+    # ── Cek posisi aktif ──
+    positions = bx.get_open_positions(symbol)
+    if not positions:
+        raise ValueError(f"Tidak ada posisi aktif untuk {symbol}!")
+    
+    # Ambil posisi pertama
+    pos = positions[0]
+    position_side = pos.get("positionSide", "LONG")
+    total_quantity = abs(float(pos.get("positionAmt", 0)))
+    
+    if total_quantity == 0:
+        raise ValueError(f"Posisi {symbol} ditemukan tapi jumlahnya 0.")
+
+    # ── Hitung TP dan SL dari sinyal ──
+    sl_price = float(signal.get("sl", 0))
+    tp_levels_prices = [
+        float(signal.get("tp1", 0)),
+        float(signal.get("tp2", 0)),
+        float(signal.get("tp3", 0)),
+        float(signal.get("tp4", 0))
+    ]
+
+    # ── Bagi Quantity ke 4 TP ──
+    qty_per_tp = _round_qty(total_quantity / 4)
+    if qty_per_tp <= 0:
+        tp_configs = [(tp_levels_prices[3], total_quantity)]
+    else:
+        tp_configs = []
+        remaining_qty = total_quantity
+        for i in range(3):
+            tp_configs.append((tp_levels_prices[i], qty_per_tp))
+            remaining_qty -= qty_per_tp
+        tp_configs.append((tp_levels_prices[3], _round_qty(remaining_qty)))
+
+    # ── Pasang ke BingX ──
+    bx.cancel_all_orders(symbol) # Bersihkan TP/SL lama
+    bx.set_multi_tp_sl(
+        symbol=symbol,
+        position_side=position_side,
+        stop_price=sl_price,
+        tp_levels=tp_configs,
+        total_qty=total_quantity
+    )
+
+    return {
+        "symbol": symbol,
+        "total_quantity": total_quantity,
+        "tp_configs": tp_configs,
+        "sl_price": sl_price
+    }
