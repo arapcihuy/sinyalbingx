@@ -99,22 +99,37 @@ def webhook():
     # ── Cek apakah sudah ada posisi aktif (Auto Sync TP/SL) ──
     try:
         import bingx_client as bx
-        positions = bx.get_open_positions(data.get("symbol", os.getenv("SYMBOL", "BTC-USDT")))
-        if positions and abs(float(positions[0].get("positionAmt", 0))) > 0:
-            logger.info("Posisi sudah aktif. Mengotomatiskan sinkronisasi TP/SL...")
-            bot.send_message(TG_CHAT_ID, f"🔄 *Posisi aktif terdeteksi untuk {data.get('symbol')}*\nSinkronisasi TP/SL otomatis dijalankan...", parse_mode="Markdown")
+        symbol_to_check = data.get("symbol", os.getenv("SYMBOL", "BTC-USDT"))
+        positions = bx.get_open_positions(symbol_to_check)
+        
+        logger.info(f"Mengecek posisi untuk {symbol_to_check}. Ditemukan: {len(positions)} data.")
+        
+        active_pos = None
+        for p in positions:
+            qty = abs(float(p.get("positionAmt", 0)))
+            if qty > 0:
+                active_pos = p
+                break
+        
+        if active_pos:
+            logger.info(f"✅ Posisi aktif ditemukan: {active_pos.get('positionSide')} {active_pos.get('positionAmt')}")
+            bot.send_message(TG_CHAT_ID, f"🔄 *Posisi aktif terdeteksi untuk {symbol_to_check}*\nSinkronisasi TP/SL otomatis dijalankan...", parse_mode="Markdown")
             result = order_manager.apply_tpsl_to_existing(data)
+            
             bot.send_message(
                 TG_CHAT_ID,
                 f"✅ *TP/SL DISINKRONKAN!*\n\n"
                 f"Symbol: `{result['symbol']}`\n"
                 f"Qty: `{result['total_quantity']}`\n"
-                f"TP1-TP4 telah dipasang.",
+                f"TP1: `{result['tp_configs'][0][0]}`\n"
+                f"SL: `{result['sl_price']}`",
                 parse_mode="Markdown"
             )
             return jsonify({"status": "success", "message": "Auto-sync TP/SL berhasil"}), 200
+        else:
+            logger.info("ℹ️ Tidak ada posisi aktif. Lanjut ke mode konfirmasi entry baru.")
     except Exception as e:
-        logger.warning(f"Gagal auto-sync: {e}")
+        logger.error(f"❌ Gagal auto-sync: {e}", exc_info=True)
 
     # ── Jika belum ada posisi, Minta Konfirmasi Telegram untuk Entry Baru ──
     try:
