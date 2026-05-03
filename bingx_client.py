@@ -4,9 +4,13 @@ import time
 import requests
 import json
 import os
+import urllib3
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Disable SSL warning untuk lokal Mac (Railway tidak punya masalah ini)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 BINGX_API_KEY = os.getenv("BINGX_API_KEY")
 BINGX_API_SECRET = os.getenv("BINGX_API_SECRET")
@@ -43,11 +47,11 @@ def _request(method: str, path: str, params: dict = None) -> dict:
     headers = _get_headers()
 
     if method == "GET":
-        response = requests.get(url, headers=headers, params=params, timeout=10)
+        response = requests.get(url, headers=headers, params=params, timeout=10, verify=False)
     elif method == "POST":
-        response = requests.post(url, headers=headers, params=params, timeout=10)
+        response = requests.post(url, headers=headers, params=params, timeout=10, verify=False)
     elif method == "DELETE":
-        response = requests.delete(url, headers=headers, params=params, timeout=10)
+        response = requests.delete(url, headers=headers, params=params, timeout=10, verify=False)
     else:
         raise ValueError(f"Method tidak dikenal: {method}")
 
