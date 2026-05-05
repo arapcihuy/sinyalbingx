@@ -44,7 +44,6 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 # Set menu perintah bot
 try:
     bot.set_my_commands([
-        telebot.types.BotCommand("start", "Mulai / Reset Menu Bot"),
         telebot.types.BotCommand("status", "Cek posisi & balance aktif"),
         telebot.types.BotCommand("report", "Laporan profit 24 jam terakhir"),
         telebot.types.BotCommand("tpsl", "Pasang Auto TP/SL (Manual Entry)"),
@@ -116,10 +115,6 @@ def webhook():
     if data.get("price"):
         initial_msg += f"Price: `{data.get('price')}`\n"
     threading.Thread(target=send_notif_bg, args=(initial_msg,), daemon=True).start()
-
-    # ── Jika hanya sinyal INFO (Heartbeat), berhenti di sini ──
-    if action == "INFO":
-        return jsonify({"status": "success", "message": "Heartbeat received"}), 200
 
     # ── Cek Mode Otomatis ──
     AUTO_ENTRY = os.getenv("AUTO_ENTRY", "false").lower() == "true"
