@@ -9,7 +9,8 @@ SETTINGS_FILE = "bot_settings.json"
 def load_settings():
     """Load settings from JSON file."""
     default_settings = {
-        "leverage": int(os.getenv("LEVERAGE", 40))
+        "leverage": int(os.getenv("LEVERAGE", 40)),
+        "auto_entry": os.getenv("AUTO_ENTRY", "false").lower() == "true"
     }
     
     if not os.path.exists(SETTINGS_FILE):

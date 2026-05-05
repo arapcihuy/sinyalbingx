@@ -44,12 +44,16 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 # Set menu perintah bot
 try:
     bot.set_my_commands([
+        telebot.types.BotCommand("start", "Mulai / Reset Menu Bot"),
         telebot.types.BotCommand("status", "Cek posisi & balance aktif"),
+        telebot.types.BotCommand("market", "Cek harga pasar saat ini"),
+        telebot.types.BotCommand("settings", "Cek konfigurasi bot"),
         telebot.types.BotCommand("report", "Laporan profit 24 jam terakhir"),
         telebot.types.BotCommand("tpsl", "Pasang Auto TP/SL (Manual Entry)"),
         telebot.types.BotCommand("leverage", "Ganti leverage (1x - 150x)"),
         telebot.types.BotCommand("panic", "Tutup semua posisi & cancel order"),
-        telebot.types.BotCommand("log", "Cek 15 baris log terakhir"),
+        telebot.types.BotCommand("reset", "Muat ulang menu bot"),
+        telebot.types.BotCommand("help", "Panduan penggunaan bot"),
     ])
 except Exception as e:
     logger.error(f"Gagal set menu perintah: {e}")
@@ -117,7 +121,8 @@ def webhook():
     threading.Thread(target=send_notif_bg, args=(initial_msg,), daemon=True).start()
 
     # ── Cek Mode Otomatis ──
-    AUTO_ENTRY = os.getenv("AUTO_ENTRY", "false").lower() == "true"
+    current_settings = settings_manager.load_settings()
+    AUTO_ENTRY = current_settings.get("auto_entry", False)
     
     if AUTO_ENTRY:
         try:
@@ -185,21 +190,74 @@ def telegram_webhook():
 def cekbot_cmd(message):
     bot.reply_to(message, "✅ Bot versi TERBARU sudah berjalan!", parse_mode="HTML")
 
-@bot.message_handler(commands=['clearmenu', 'start'])
+@bot.message_handler(commands=['clearmenu', 'start', 'reset'])
 def clear_menu(message):
     markup = telebot.types.ReplyKeyboardRemove()
+    current_settings = settings_manager.load_settings()
+    auto_mode = "AKTIF 🟢" if current_settings.get("auto_entry") else "MATI 🔴 (Konfirmasi Manual)"
+    
     welcome_msg = (
         "🤖 *BingX Auto-Trading Bot Aktif!*\n\n"
         f"Leverage Default: `{CURRENT_LEVERAGE}x`\n"
-        f"Mode: `AUTO-ENTRY 🟢`\n\n"
-        "📜 *Perintah Tersedia:*\n"
-        "• /status - Cek saldo & posisi aktif\n"
-        "• /leverage - Ganti leverage (pilih tombol)\n"
-        "• /log - Lihat log aktivitas terakhir\n"
-        "• /panic - Tutup SEMUA posisi segera\n\n"
+        f"Mode Auto-Entry: `{auto_mode}`\n\n"
+        "📜 *Perintah Utama:*\n"
+        "• /status - Cek saldo & posisi\n"
+        "• /market - Cek harga koin\n"
+        "• /settings - Lihat config bot\n"
+        "• /help - Panduan penggunaan\n"
+        "• /panic - Tutup SEMUA posisi\n\n"
         "Bot siap menerima sinyal dari TradingView."
     )
     bot.send_message(message.chat.id, welcome_msg, reply_markup=markup, parse_mode="Markdown")
+
+@bot.message_handler(commands=['market', 'price'])
+def market_price_cmd(message):
+    try:
+        args = message.text.split()
+        symbol = args[1].upper() if len(args) > 1 else "BTC-USDT"
+        if "-" not in symbol: symbol += "-USDT"
+        
+        import bingx_client as bx
+        price = bx.get_current_price(symbol)
+        
+        msg = f"📊 *MARKET PRICE*\n\nCoin: `{symbol}`\nPrice: `{price:.2f} USDT`"
+        bot.send_message(message.chat.id, msg, parse_mode="Markdown")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Gagal ambil harga: `{str(e)}`")
+
+@bot.message_handler(commands=['help', 'bantuan'])
+def help_cmd(message):
+    help_text = (
+        "📖 *PANDUAN BINGX BOT*\n\n"
+        "• /status - Menampilkan saldo USDT dan detail posisi yang sedang terbuka.\n"
+        "• /market [KODE] - Cek harga koin. Contoh: `/market btc` atau `/market eth`.\n"
+        "• /settings - Melihat pengaturan leverage dan mode trading saat ini.\n"
+        "• /leverage - Mengubah leverage default melalui tombol.\n"
+        "• /tpsl [HARGA_SL] - Memasang TP/SL otomatis untuk posisi manual.\n"
+        "• /report - Melihat ringkasan Profit/Loss (PnL) 24 jam terakhir.\n"
+        "• /panic - Menutup SEMUA posisi dan membatalkan semua order secara instan.\n"
+        "• /reset - Memuat ulang menu utama bot.\n\n"
+        "💡 *Tips:* Bot ini otomatis trading 24/7 jika sinyal dari TradingView masuk."
+    )
+    bot.send_message(message.chat.id, help_text, parse_mode="Markdown")
+
+@bot.message_handler(commands=['settings', 'config'])
+def settings_cmd(message):
+    current_settings = settings_manager.load_settings()
+    risk = os.getenv("RISK_PERCENT", "1.5")
+    mode = "Otomatis" if current_settings.get("auto_entry") else "Manual (Konfirmasi)"
+    
+    msg = (
+        "⚙️ *KONFIGURASI BOT SAAT INI*\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🤖 *Mode:* `{mode}`\n"
+        f"⚖️ *Leverage:* `{current_settings.get('leverage')}x`\n"
+        f"💰 *Risk per Trade:* `{risk}% dari saldo`\n"
+        f"🎯 *Mode TP/SL:* `{os.getenv('TP_SL_MODE', 'pinescript')}`\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "Gunakan /leverage untuk mengubah."
+    )
+    bot.send_message(message.chat.id, msg, parse_mode="Markdown")
 
 @bot.message_handler(commands=['tpsl'])
 def tpsl_cmd(message):
