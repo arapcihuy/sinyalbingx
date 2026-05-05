@@ -89,11 +89,11 @@ def _request(method: str, path: str, params: dict = None) -> dict:
     for attempt in range(max_retries):
         try:
             if method == "GET":
-                response = _SESSION.get(url, headers=headers, timeout=10)
+                response = _SESSION.get(url, headers=headers, timeout=10, verify=False)
             elif method == "POST":
-                response = _SESSION.post(url, headers=headers, timeout=10)
+                response = _SESSION.post(url, headers=headers, timeout=10, verify=False)
             elif method == "DELETE":
-                response = _SESSION.delete(url, headers=headers, timeout=10)
+                response = _SESSION.delete(url, headers=headers, timeout=10, verify=False)
             else:
                 raise ValueError(f"Method tidak dikenal: {method}")
 
@@ -301,13 +301,3 @@ def cancel_all_orders(symbol: str) -> dict:
     return result
 
 
-def get_open_positions(symbol: str = None) -> list:
-    """Cek posisi aktif. Jika symbol None, ambil semua."""
-    params = {}
-    if symbol:
-        params["symbol"] = symbol
-        
-    result = _request("GET", "/openApi/swap/v2/user/positions", params)
-    if result.get("code") == 0:
-        return result.get("data", [])
-    return []

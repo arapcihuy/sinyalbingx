@@ -47,6 +47,14 @@ def execute_signal(data: dict) -> dict:
     sl_price = float(data.get("sl", 0))
     tp_levels_prices = [float(data.get(f"tp{i}", 0)) for i in range(1, 5)]
 
+    # 3. Cek posisi yang sudah ada (Auto-Reversal)
+    existing_positions = bx.get_open_positions(symbol)
+    for pos in existing_positions:
+        if pos.get("positionSide") != pos_side:
+            logger.info(f"🔄 Reversal terdeteksi! Menutup posisi {pos.get('positionSide')} sebelum membuka {pos_side}")
+            _close_position(symbol)
+            break
+
     balance = bx.get_balance()
     total_quantity = calculate_quantity(balance, entry_price, sl_price, current_leverage, symbol)
     

@@ -104,15 +104,17 @@ def webhook():
     logger.info("==================================================")
     logger.info(f"Payload diterima: {data}")
 
-    # ── Notifikasi Awal ke Telegram ──
-    try:
-        msg = f"🔔 *SINYAL MASUK: {symbol}*\n"
-        msg += f"Action: `{action}`\n"
-        if data.get("price"):
-            msg += f"Price: `{data.get('price')}`\n"
-        bot.send_message(TG_CHAT_ID, msg, parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"Gagal kirim notif telegram: {e}")
+    # ── Notifikasi Awal ke Telegram (Asynchronous) ──
+    def send_notif_bg(text):
+        try:
+            bot.send_message(TG_CHAT_ID, text, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Gagal kirim notif telegram: {e}")
+
+    initial_msg = f"🔔 *SINYAL MASUK: {symbol}*\nAction: `{action}`\n"
+    if data.get("price"):
+        initial_msg += f"Price: `{data.get('price')}`\n"
+    threading.Thread(target=send_notif_bg, args=(initial_msg,), daemon=True).start()
 
     # ── Cek Mode Otomatis ──
     AUTO_ENTRY = os.getenv("AUTO_ENTRY", "false").lower() == "true"
@@ -123,24 +125,24 @@ def webhook():
             data["leverage"] = CURRENT_LEVERAGE
             result = order_manager.execute_signal(data)
             
-            # Notifikasi Sukses / Warning
+            # Notifikasi Sukses / Warning (Asynchronous)
             status_text = "BERHASIL"
             if "warning" in result.get("status", ""):
                 status_text = "BERHASIL (⚠️ TP/SL GAGAL)"
-                
-            bot.send_message(
-                TG_CHAT_ID, 
+            
+            exec_msg = (
                 f"⚡ *EKSEKUSI OTOMATIS {status_text}*\n"
                 f"Symbol: `{symbol}`\n"
                 f"Action: `{action}`\n"
                 f"Qty: `{result.get('total_quantity', 'N/A')}`\n"
-                f"Status: `{result.get('status')}`", 
-                parse_mode="Markdown"
+                f"Status: `{result.get('status')}`"
             )
+            threading.Thread(target=send_notif_bg, args=(exec_msg,), daemon=True).start()
             return jsonify({"status": "success", "message": status_text}), 200
         except Exception as e:
             logger.error(f"❌ Gagal eksekusi otomatis: {e}")
-            bot.send_message(TG_CHAT_ID, f"❌ *GAGAL EKSEKUSI OTOMATIS!*\n\nError: `{str(e)}`", parse_mode="Markdown")
+            fail_msg = f"❌ *GAGAL EKSEKUSI OTOMATIS!*\n\nError: `{str(e)}`"
+            threading.Thread(target=send_notif_bg, args=(fail_msg,), daemon=True).start()
             return jsonify({"error": str(e)}), 500
 
     # ── Jika Mode Otomatis Mati, Minta Konfirmasi Telegram ──
