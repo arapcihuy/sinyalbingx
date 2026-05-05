@@ -301,3 +301,13 @@ def cancel_all_orders(symbol: str) -> dict:
     return result
 
 
+def cancel_order(symbol: str, order_id: str) -> dict:
+    """Batalkan satu order spesifik berdasarkan Order ID."""
+    params = {
+        "symbol": symbol,
+        "orderId": order_id
+    }
+    result = _request("DELETE", "/openApi/swap/v2/trade/order", params)
+    return result
+
+
