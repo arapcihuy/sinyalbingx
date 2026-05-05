@@ -5,6 +5,7 @@ Sistem penghubung sinyal **Pine Script TradingView** ke **BingX Futures** secara
 ---
 
 ## ✨ Fitur Utama
+
 - **⚡ Eksekusi Instan:** Menghubungkan webhook TradingView langsung ke API BingX V2.
 - **🔄 Auto-Reversal:** Menutup posisi berlawanan secara otomatis sebelum membuka posisi baru.
 - **📱 Telegram Control:** Pantau saldo, ubah leverage, dan terima laporan PnL langsung di Telegram.
@@ -14,6 +15,7 @@ Sistem penghubung sinyal **Pine Script TradingView** ke **BingX Futures** secara
 ---
 
 ## 📁 Struktur Proyek
+
 ```text
 sinyalbingx/
 ├── webhook_server.py    ← Server Flask & Handler Webhook
@@ -32,9 +34,11 @@ sinyalbingx/
 Gunakan **Railway** untuk kestabilan 24/7 dan menghindari pemblokiran API oleh ISP lokal.
 
 ### 1) Persiapan Environment Variables
+
 Atur variabel berikut di Dashboard Railway:
+
 | Key | Contoh Nilai | Deskripsi |
-|---|---|---|
+| --- | --- | --- |
 | `BINGX_API_KEY` | `...` | API Key dari BingX |
 | `BINGX_API_SECRET` | `...` | API Secret dari BingX |
 | `WEBHOOK_SECRET` | `Tr4d3Bot...` | Password untuk keamanan webhook |
@@ -44,7 +48,9 @@ Atur variabel berikut di Dashboard Railway:
 | `AUTO_ENTRY` | `true` | Set true untuk eksekusi otomatis |
 
 ### 2) Deployment Otomatis
+
 Jalankan script berikut di terminal lokal Anda:
+
 ```bash
 chmod +x deploy_railway.sh
 ./deploy_railway.sh
@@ -55,10 +61,12 @@ chmod +x deploy_railway.sh
 ## 🔔 Integrasi TradingView
 
 ### 1) Tambahkan Addon Webhook ke Pine Script
+
 Pastikan strategi Anda mengirim payload JSON ke URL Webhook Railway Anda:
 `https://app-name.up.railway.app/webhook`
 
 ### 2) Format Payload JSON (Contoh BUY)
+
 ```json
 {
   "secret": "YOUR_SECRET",
@@ -73,6 +81,7 @@ Pastikan strategi Anda mengirim payload JSON ke URL Webhook Railway Anda:
 ---
 
 ## 📱 Perintah Telegram
+
 - `/status` — Cek saldo USDT dan posisi aktif saat ini.
 - `/leverage <angka>` — Ubah leverage secara dinamis (1x - 150x).
 - `/report` — Laporan performa trading 24 jam terakhir.
@@ -82,6 +91,7 @@ Pastikan strategi Anda mengirim payload JSON ke URL Webhook Railway Anda:
 ---
 
 ## ⚠️ Disclaimer
+
 Gunakan bot ini dengan bijak. Selalu uji coba di akun **Demo/Testnet** sebelum menggunakan dana riil. Penulis tidak bertanggung jawab atas kerugian finansial yang mungkin terjadi akibat kesalahan konfigurasi atau malfungsi sistem.
 
 ---
