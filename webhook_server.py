@@ -1,144 +1,153 @@
 import os
-import json
 import logging
-from datetime import datetime
+import uuid
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import order_manager
-import uuid
+import settings_manager
+
+# Load initial settings
+settings = settings_manager.load_settings()
+CURRENT_LEVERAGE = settings.get("leverage", 40)
 import threading
 import time
 
+# Load environment variables
 load_dotenv()
 
-# ── Setup logging ──
+# Konfigurasi Logging
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
         logging.FileHandler("bot.log"),
-        logging.StreamHandler(),
-    ],
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# Konfigurasi Utama
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 PORT = int(os.getenv("PORT", 5000))
 HOST = os.getenv("HOST", "0.0.0.0")
+DUPLICATE_SIGNAL_TTL = int(os.getenv("WEBHOOK_DEDUP_TTL_SECONDS", 45))
 
 # ── Telegram Config ──
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-bot = telebot.TeleBot(TG_TOKEN)
+bot = telebot.TeleBot(TG_TOKEN, threaded=True)
+WEBHOOK_URL = os.getenv("WEBHOOK_URL") 
+# Set menu perintah bot
+try:
+    bot.set_my_commands([
+        telebot.types.BotCommand("status", "Cek posisi & balance aktif"),
+        telebot.types.BotCommand("report", "Laporan profit 24 jam terakhir"),
+        telebot.types.BotCommand("tpsl", "Pasang Auto TP/SL (Manual Entry)"),
+        telebot.types.BotCommand("leverage", "Ganti leverage (1x - 150x)"),
+        telebot.types.BotCommand("panic", "Tutup semua posisi & cancel order"),
+        telebot.types.BotCommand("log", "Cek 15 baris log terakhir"),
+    ])
+except Exception as e:
+    logger.error(f"Gagal set menu perintah: {e}")
 
-# Penyimpanan sementara untuk sinyal yang menunggu konfirmasi
+# CURRENT_LEVERAGE sudah di-load di atas
+
+# ── Cache untuk deduplikasi sinyal ──
+processed_signals = {}
 pending_signals = {}
 
+# ── Set Webhook Otomatis jika ada URL ──
+if WEBHOOK_URL:
+    try:
+        tg_webhook_url = WEBHOOK_URL.rstrip('/')
+        if not tg_webhook_url.endswith('/telegram'):
+            tg_webhook_url += '/telegram'
+        bot.remove_webhook()
+        bot.set_webhook(url=tg_webhook_url)
+        logger.info(f"✅ Telegram Webhook berhasil diset ke: {tg_webhook_url}")
+    except Exception as e:
+        logger.error(f"❌ Gagal set webhook: {e}")
 
-# ─────────────────────────────────────────────
-#  HEALTH CHECK
-# ─────────────────────────────────────────────
 
-@app.route("/", methods=["GET"])
+@app.route("/health", methods=["GET"])
 def health():
-    return jsonify({
-        "status": "running",
-        "time": datetime.now().isoformat(),
-        "message": "BingX Webhook Bot aktif ✅"
-    })
-
-
-# ─────────────────────────────────────────────
-#  WEBHOOK ENDPOINT
-# ─────────────────────────────────────────────
+    return jsonify({"status": "healthy", "bot": "active"}), 200
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    logger.info("=" * 50)
-    logger.info("📡 Sinyal masuk dari TradingView")
-
-    # ── Parse payload ──
-    try:
-        if request.is_json:
-            data = request.get_json()
-        else:
-            # TradingView kadang kirim sebagai text biasa
-            raw = request.data.decode("utf-8")
-            data = json.loads(raw)
-    except Exception as e:
-        logger.error(f"Gagal parse payload: {e}")
-        return jsonify({"error": "Payload tidak valid"}), 400
-
-    logger.info(f"Payload diterima: {json.dumps(data, indent=2)}")
-
-    # ── Verifikasi secret ──
-    if WEBHOOK_SECRET:
-        received_secret = data.get("secret", "")
-        if received_secret != WEBHOOK_SECRET:
-            logger.warning("❌ Secret tidak cocok! Request ditolak.")
-            return jsonify({"error": "Unauthorized"}), 401
-
-    # ── Validasi field wajib ──
+    """Endpoint untuk menerima sinyal dari TradingView."""
+    if not request.json:
+        return jsonify({"error": "Invalid JSON"}), 400
+        
+    # Konversi semua key ke lowercase agar aman (TP1 -> tp1)
+    data = {k.lower(): v for k, v in request.json.items()}
+    
+    if data.get("secret") != os.getenv("WEBHOOK_SECRET"):
+        return jsonify({"error": "Unauthorized"}), 401
+        
     action = data.get("action", "").upper()
-    if action not in ["BUY", "SELL", "CLOSE"]:
-        logger.warning(f"Action tidak dikenal: {action}")
-        return jsonify({"error": f"Action tidak valid: {action}"}), 400
+    symbol = data.get("symbol", "BTC-USDT")
+    
+    # 2. Deduplikasi Sinyal (Cegah double execution)
+    signal_key = f"{symbol}_{action}_{data.get('price')}"
+    now = time.time()
+    if signal_key in processed_signals:
+        if now - processed_signals[signal_key] < DUPLICATE_SIGNAL_TTL:
+            logger.info(f"Sinyal duplikat diabaikan: {signal_key}")
+            return jsonify({"status": "ignored", "reason": "duplicate"}), 200
+    processed_signals[signal_key] = now
 
-    # ── Proses CLOSE ──
-    if action == "CLOSE":
-        try:
-            symbol = data.get("symbol", os.getenv("SYMBOL", "BTC-USDT"))
-            result = _close_position(symbol, data)
-            return jsonify({"status": "success", "action": "CLOSE", "result": result}), 200
-        except Exception as e:
-            logger.error(f"Gagal close: {e}")
-            return jsonify({"error": str(e)}), 500
+    logger.info("==================================================")
+    logger.info(f"Payload diterima: {data}")
 
-    # ── Cek apakah sudah ada posisi aktif (Auto Sync TP/SL) ──
+    # ── Notifikasi Awal ke Telegram ──
     try:
-        import bingx_client as bx
-        symbol_to_check = data.get("symbol", os.getenv("SYMBOL", "BTC-USDT"))
-        positions = bx.get_open_positions(symbol_to_check)
-        
-        logger.info(f"Mengecek posisi untuk {symbol_to_check}. Ditemukan: {len(positions)} data.")
-        
-        active_pos = None
-        for p in positions:
-            qty = abs(float(p.get("positionAmt", 0)))
-            if qty > 0:
-                active_pos = p
-                break
-        
-        if active_pos:
-            logger.info(f"✅ Posisi aktif ditemukan: {active_pos.get('positionSide')} {active_pos.get('positionAmt')}")
-            bot.send_message(TG_CHAT_ID, f"🔄 *Posisi aktif terdeteksi untuk {symbol_to_check}*\nSinkronisasi TP/SL otomatis dijalankan...", parse_mode="Markdown")
-            result = order_manager.apply_tpsl_to_existing(data)
+        msg = f"🔔 *SINYAL MASUK: {symbol}*\n"
+        msg += f"Action: `{action}`\n"
+        if data.get("price"):
+            msg += f"Price: `{data.get('price')}`\n"
+        bot.send_message(TG_CHAT_ID, msg, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Gagal kirim notif telegram: {e}")
+
+    # ── Cek Mode Otomatis ──
+    AUTO_ENTRY = os.getenv("AUTO_ENTRY", "false").lower() == "true"
+    
+    if AUTO_ENTRY:
+        try:
+            logger.info(f"⚡ Mode OTOMATIS aktif. Leverage: {CURRENT_LEVERAGE}x. Eksekusi...")
+            data["leverage"] = CURRENT_LEVERAGE
+            result = order_manager.execute_signal(data)
             
+            # Notifikasi Sukses / Warning
+            status_text = "BERHASIL"
+            if "warning" in result.get("status", ""):
+                status_text = "BERHASIL (⚠️ TP/SL GAGAL)"
+                
             bot.send_message(
-                TG_CHAT_ID,
-                f"✅ *TP/SL DISINKRONKAN!*\n\n"
-                f"Symbol: `{result['symbol']}`\n"
-                f"Qty: `{result['total_quantity']}`\n"
-                f"TP1: `{result['tp_configs'][0][0]}`\n"
-                f"SL: `{result['sl_price']}`",
+                TG_CHAT_ID, 
+                f"⚡ *EKSEKUSI OTOMATIS {status_text}*\n"
+                f"Symbol: `{symbol}`\n"
+                f"Action: `{action}`\n"
+                f"Qty: `{result.get('total_quantity', 'N/A')}`\n"
+                f"Status: `{result.get('status')}`", 
                 parse_mode="Markdown"
             )
-            return jsonify({"status": "success", "message": "Auto-sync TP/SL berhasil"}), 200
-        else:
-            logger.info("ℹ️ Tidak ada posisi aktif. Lanjut ke mode konfirmasi entry baru.")
-    except Exception as e:
-        logger.error(f"❌ Gagal auto-sync: {e}", exc_info=True)
+            return jsonify({"status": "success", "message": status_text}), 200
+        except Exception as e:
+            logger.error(f"❌ Gagal eksekusi otomatis: {e}")
+            bot.send_message(TG_CHAT_ID, f"❌ *GAGAL EKSEKUSI OTOMATIS!*\n\nError: `{str(e)}`", parse_mode="Markdown")
+            return jsonify({"error": str(e)}), 500
 
-    # ── Jika belum ada posisi, Minta Konfirmasi Telegram untuk Entry Baru ──
+    # ── Jika Mode Otomatis Mati, Minta Konfirmasi Telegram ──
     try:
         signal_id = str(uuid.uuid4())[:8]
         pending_signals[signal_id] = data
         
-        # Buat Tombol
         markup = InlineKeyboardMarkup()
         markup.row(
             InlineKeyboardButton("10x", callback_data=f"exec:10:{signal_id}"),
@@ -151,171 +160,340 @@ def webhook():
         msg = (
             f"🔔 *SINYAL MASUK!*\n\n"
             f"Action: `{action}`\n"
-            f"Symbol: `{data.get('symbol', 'BTC-USDT')}`\n"
+            f"Symbol: `{symbol}`\n"
             f"Price: `{data.get('price', 'MARKET')}`\n\n"
             f"Pilih Leverage untuk eksekusi:"
         )
-        
         bot.send_message(TG_CHAT_ID, msg, parse_mode="Markdown", reply_markup=markup)
-        logger.info(f"Sinyal {signal_id} dikirim ke Telegram untuk konfirmasi.")
-        
         return jsonify({"status": "pending", "message": "Menunggu konfirmasi Telegram", "id": signal_id}), 200
-
     except Exception as e:
-        logger.error(f"❌ Error saat kirim konfirmasi: {e}", exc_info=True)
+        logger.error(f"❌ Error saat kirim konfirmasi: {e}")
         return jsonify({"error": str(e)}), 500
-
-
-# ─────────────────────────────────────────────
-#  TELEGRAM WEBHOOK & CALLBACK
-# ─────────────────────────────────────────────
 
 @app.route("/telegram", methods=["POST"])
 def telegram_webhook():
-    """Endpoint untuk menerima update dari Telegram."""
     if request.headers.get('content-type') == 'application/json':
         json_string = request.get_data().decode('utf-8')
         update = telebot.types.Update.de_json(json_string)
         bot.process_new_updates([update])
         return ''
-    else:
-        return jsonify({"error": "Invalid content type"}), 403
+    return jsonify({"error": "Invalid content type"}), 403
 
+@bot.message_handler(commands=['cekbot'])
+def cekbot_cmd(message):
+    bot.reply_to(message, "✅ Bot versi TERBARU sudah berjalan!", parse_mode="HTML")
+
+@bot.message_handler(commands=['clearmenu', 'start'])
+def clear_menu(message):
+    markup = telebot.types.ReplyKeyboardRemove()
+    welcome_msg = (
+        "🤖 *BingX Auto-Trading Bot Aktif!*\n\n"
+        f"Leverage Default: `{CURRENT_LEVERAGE}x`\n"
+        f"Mode: `AUTO-ENTRY 🟢`\n\n"
+        "📜 *Perintah Tersedia:*\n"
+        "• /status - Cek saldo & posisi aktif\n"
+        "• /leverage - Ganti leverage (pilih tombol)\n"
+        "• /log - Lihat log aktivitas terakhir\n"
+        "• /panic - Tutup SEMUA posisi segera\n\n"
+        "Bot siap menerima sinyal dari TradingView."
+    )
+    bot.send_message(message.chat.id, welcome_msg, reply_markup=markup, parse_mode="Markdown")
+
+@bot.message_handler(commands=['tpsl'])
+def tpsl_cmd(message):
+    try:
+        args = message.text.split()
+        
+        if len(args) == 2:
+            # Format: /tpsl 80000 (Otomatis BTC-USDT)
+            symbol = "BTC-USDT"
+            sl_price = float(args[1])
+        elif len(args) == 3:
+            # Format: /tpsl ETH-USDT 3000
+            symbol = args[1].upper()
+            sl_price = float(args[2])
+        else:
+            bot.reply_to(message, "❌ <b>Format Salah!</b>\n\nGunakan: <code>/tpsl [HARGA_SL]</code>\nContoh: <code>/tpsl 80000</code>", parse_mode="HTML")
+            return
+            
+        bot.reply_to(message, f"⏳ Sedang menghitung & memasang TP/SL untuk <b>{symbol}</b>...", parse_mode="HTML")
+        
+        import order_manager
+        res = order_manager.apply_manual_tpsl(symbol, sl_price)
+        
+        tps = res["tps"]
+        msg = f"✅ <b>AUTO TP/SL BERHASIL!</b>\n"
+        msg += f"━━━━━━━━━━━━━━━━━━\n"
+        msg += f"🎯 TP Utama (100%): <code>{tps[0]:.2f}</code>\n"
+        msg += f"🛑 Stop Loss: <code>{res['sl']:.2f}</code>\n"
+        msg += f"━━━━━━━━━━━━━━━━━━\n"
+        msg += f"<i>Strategi aktif: Tembak Cepat (Opsi 1)</i>\n"
+        
+        bot.send_message(message.chat.id, msg, parse_mode="HTML")
+    except ValueError as ve:
+        bot.reply_to(message, f"❌ <b>Gagal:</b> {str(ve)}", parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Gagal set tpsl manual: {e}")
+        bot.reply_to(message, f"❌ <b>System Error:</b> {str(e)}", parse_mode="HTML")
+
+@bot.message_handler(commands=['leverage', 'setleverage'])
+def set_leverage_cmd(message):
+    global CURRENT_LEVERAGE
+    try:
+        args = message.text.split()
+        if len(args) == 2:
+            new_lev = int(args[1])
+            if 1 <= new_lev <= 150:
+                CURRENT_LEVERAGE = new_lev
+                bot.reply_to(message, f"✅ *Leverage Berhasil Diubah!*\nSekarang: `{CURRENT_LEVERAGE}x`", parse_mode="Markdown")
+                return
+
+        markup = InlineKeyboardMarkup(row_width=4)
+        options = [1, 2, 5, 10, 20, 30, 40, 50, 60, 75, 100, 125, 150]
+        buttons = [InlineKeyboardButton(f"{opt}x", callback_data=f"setlev:{opt}") for opt in options]
+        markup.add(*buttons)
+        bot.send_message(message.chat.id, f"⚙️ *PILIH LEVERAGE DEFAULT*\nLeverage saat ini: `{CURRENT_LEVERAGE}x`", reply_markup=markup, parse_mode="Markdown")
+    except Exception as e:
+        bot.reply_to(message, "❌ Gagal memuat menu leverage.")
+
+@bot.message_handler(commands=['status', 'cek'])
+def status_cmd(message):
+    try:
+        logger.info(f"⏳ Memulai pengambilan status untuk {message.chat.id}...")
+        import bingx_client as bx
+        
+        # 1. Ambil Balance
+        balance = bx.get_balance()
+        logger.info("✅ Balance berhasil diambil")
+        
+        # 2. Ambil Posisi
+        positions = bx.get_open_positions()
+        logger.info(f"✅ {len(positions)} posisi aktif ditemukan")
+        
+        status_msg = f"<b>📊 [ SYSTEM STATUS ]</b>\n"
+        status_msg += f"━━━━━━━━━━━━━━━━━━━━━\n"
+        status_msg += f"💰 <b>Balance:</b> <code>{balance:.2f} USDT</code>\n"
+        status_msg += f"⚙️ <b>Leverage:</b> <code>{CURRENT_LEVERAGE}x</code>\n"
+        status_msg += f"🤖 <b>Mode:</b> <code>AUTO-ENTRY (Active) 🟢</code>\n"
+        status_msg += f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        if not positions:
+            status_msg += "📭 <b>Posisi Aktif:</b> <code>None</code>"
+        else:
+            status_msg += "<b>📝 Posisi Terbuka:</b>\n"
+            for pos in positions:
+                sym = pos.get("symbol")
+                side = pos.get("positionSide")
+                amt = abs(float(pos.get("positionAmt", 0)))
+                pnl = float(pos.get("unrealizedProfit", "0"))
+                pos_lev = pos.get("leverage", "-")
+                
+                avg_p = float(pos.get("avgPrice", 0))
+                mark_p = float(pos.get("markPrice", 0))
+                liq_p = float(pos.get("liquidationPrice", 0))
+                margin_raw = pos.get("initialMargin", pos.get("margin", 0))
+                margin = float(margin_raw)
+
+                roe = (pnl / margin * 100) if margin > 0 else 0
+                pnl_icon = "📈" if pnl >= 0 else "📉"
+                
+                status_msg += f"• <b>{sym}</b> ({side}) - <code>{pos_lev}x</code>\n"
+                status_msg += f"  💰 Margin: <code>{margin:.2f}</code> | Size: <code>{amt}</code>\n"
+                status_msg += f"  📥 Entry: <code>{avg_p:.2f}</code> | Mark: <code>{mark_p:.2f}</code>\n"
+                status_msg += f"  💀 Liq: <code>{liq_p:.2f}</code>\n"
+                
+                # Cek data TPs dari memori bot
+                trade_data = order_manager.active_trade_data.get(sym, {})
+                tps = trade_data.get("tps", [])
+                if tps: 
+                    status_msg += f"  🎯 TPs: <code>{', '.join(map(str, tps))}</code>\n"
+                
+                status_msg += f"  💵 PnL: <b>{pnl:+.2f} USDT</b> (<code>{roe:+.2f}%</code>) {pnl_icon}\n"
+                status_msg += "━━━━━━━━━━━━━━━━━━━━━\n"
+                
+        logger.info("📤 Mengirim pesan HTML ke Telegram...")
+        bot.send_message(message.chat.id, status_msg, parse_mode="HTML")
+        logger.info("✅ Pesan terhasil dikirim!")
+    except Exception as e:
+        logger.error(f"❌ Gagal status: {e}")
+        bot.send_message(message.chat.id, f"❌ <b>Gagal ambil status</b>\nError: <code>{str(e)}</code>", parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Gagal status: {e}")
+        bot.send_message(message.chat.id, f"❌ *Gagal ambil status*\nError: `{str(e)}`", parse_mode="Markdown")
+
+@bot.message_handler(commands=['panic', 'closeall'])
+def panic_cmd(message):
+    try:
+        result = _close_all_positions()
+        closed_count = len(result.get("closed_positions", []))
+        bot.send_message(message.chat.id, f"🛑 *PANIC MODE AKTIF*\n\nPosisi ditutup: `{closed_count}`", parse_mode="Markdown")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Gagal: `{str(e)}`", parse_mode="Markdown")
+
+@bot.message_handler(commands=['log'])
+def log_cmd(message):
+    try:
+        if not os.path.exists("bot.log"):
+            bot.send_message(message.chat.id, "❌ File bot.log tidak ditemukan.")
+            return
+        with open("bot.log", "r") as f:
+            lines = f.readlines()
+            last_lines = lines[-15:] if len(lines) > 15 else lines
+            log_text = "".join(last_lines)
+        bot.send_message(message.chat.id, f"📜 *LOG TERAKHIR:*\n\n```\n{log_text}\n```", parse_mode="Markdown")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Gagal baca log: `{str(e)}`", parse_mode="Markdown")
+
+@bot.message_handler(commands=['report', 'pnl'])
+def report_cmd(message):
+    """Kirim laporan performa (PnL) merangkum 24 Jam, 7 Hari, dan 30 Hari."""
+    try:
+        import bingx_client as bx
+        import time
+        
+        bot.reply_to(message, "⏳ Sedang merekap data laporan 30 hari terakhir...", parse_mode="HTML")
+        
+        # 1. Ambil Balance & Unrealized PnL
+        balance = bx.get_balance()
+        positions = bx.get_open_positions()
+        unrealized_pnl = sum(float(pos.get("unrealizedProfit", 0)) for pos in positions)
+        total_aset = balance + unrealized_pnl
+        
+        # 2. Ambil Income 30 Hari (Sekali panggil API)
+        incomes = bx.get_income_history(days=30)
+        
+        now_ms = int(time.time() * 1000)
+        day_ms = 24 * 60 * 60 * 1000
+        
+        # Siapkan wadah (Realized + Fees)
+        pnl_1d = 0; pnl_7d = 0; pnl_30d = 0
+        
+        for inc in incomes:
+            inc_type = inc.get("incomeType", "")
+            val = float(inc.get("income", 0))
+            inc_time = int(inc.get("time", 0))
+            
+            # Hanya peduli Realized PnL & Fee
+            if inc_type in ["REALIZED_PNL", "COMMISSION", "FUNDING_FEE"]:
+                # Tambahkan ke 30 Hari
+                pnl_30d += val
+                
+                # Cek apakah masuk 7 Hari
+                if now_ms - inc_time <= 7 * day_ms:
+                    pnl_7d += val
+                    
+                # Cek apakah masuk 24 Jam
+                if now_ms - inc_time <= 1 * day_ms:
+                    pnl_1d += val
+                    
+        # 3. Gabungkan dengan Unrealized (Hanya yang 24 Jam/Saat ini)
+        tot_1d = pnl_1d + unrealized_pnl
+        tot_7d = pnl_7d + unrealized_pnl
+        tot_30d = pnl_30d + unrealized_pnl
+        
+        msg = f"<b>📊 [ REKAP PnL FUTURES ]</b>\n"
+        msg += f"━━━━━━━━━━━━━━━━━━━━━\n"
+        msg += f"🏦 <b>Total Nilai Aset:</b> <code>{total_aset:.2f} USDT</code>\n"
+        msg += f"<i>*Termasuk Unrealized PnL: {unrealized_pnl:+.2f} USDT</i>\n"
+        msg += f"━━━━━━━━━━━━━━━━━━━━━\n"
+        msg += f"<b>📈 Profit / Loss Bersih:</b>\n"
+        msg += f"   ├ <b>24 Jam:</b> <code>{tot_1d:+.2f} USDT</code>\n"
+        msg += f"   ├ <b>7 Hari:</b> <code>{tot_7d:+.2f} USDT</code>\n"
+        msg += f"   └ <b>30 Hari:</b> <code>{tot_30d:+.2f} USDT</code>\n"
+        
+        bot.send_message(message.chat.id, msg, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Gagal buat laporan: {e}")
+        bot.send_message(message.chat.id, f"❌ <b>Gagal mengambil data laporan.</b>\nError: <code>{str(e)}</code>", parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
-    """Handle klik tombol di Telegram."""
     data_parts = call.data.split(":")
     cmd = data_parts[0]
     
-    if cmd == "exec":
-        leverage = data_parts[1]
-        sid = data_parts[2]
+    if cmd == "setlev":
+        new_lev = int(data_parts[1])
+        global CURRENT_LEVERAGE
+        CURRENT_LEVERAGE = new_lev
         
-        if sid not in pending_signals:
-            bot.answer_callback_query(call.id, "Sinyal kadaluarsa atau tidak ditemukan!")
-            return
-
-        signal = pending_signals.pop(sid)
-        signal["leverage"] = int(leverage) # Pakai leverage pilihan user
-
+        # Simpan ke settings agar tidak hilang saat restart
+        settings_manager.save_settings({"leverage": CURRENT_LEVERAGE})
+        
         bot.edit_message_text(
-            f"⚙️ Memproses `{signal['action']}` `{signal['symbol']}` dengan leverage `{leverage}x`...",
+            f"✅ *Leverage Berhasil Diubah!*\nSekarang Bot menggunakan: `{CURRENT_LEVERAGE}x`",
             chat_id=call.message.chat.id,
-            message_id=call.message.message_id
+            message_id=call.message.message_id,
+            parse_mode="Markdown"
         )
-
-        try:
-            result = order_manager.execute_signal(signal)
-            bot.edit_message_text(
-                f"✅ *ORDER BERHASIL!*\n\n"
-                f"Action: `{result['action']}`\n"
-                f"Symbol: `{result['symbol']}`\n"
-                f"Leverage: `{leverage}x`\n"
-                f"Qty: `{result['quantity']}`\n"
-                f"Entry: `{result['entry_price']}`\n"
-                f"TP: `{result['tp_price']}`\n"
-                f"SL: `{result['sl_price']}`",
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            bot.edit_message_text(
-                f"❌ *GAGAL EKSEKUSI!*\n\nError: `{str(e)}`",
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                parse_mode="Markdown"
-            )
-            
-    elif cmd == "tpsl_only":
-        sid = data_parts[1]
+        status_cmd(call.message)
+        return
+        
+    if cmd == "exec":
+        leverage = int(data_parts[1])
+        sid = data_parts[2]
         if sid not in pending_signals:
             bot.answer_callback_query(call.id, "Sinyal kadaluarsa!")
             return
-        
         signal = pending_signals.pop(sid)
-        bot.edit_message_text(
-            f"⚙️ Menghitung & Memasang TP/SL untuk posisi `{signal['symbol']}` aktif...",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id
-        )
-
+        signal["leverage"] = leverage
+        bot.edit_message_text(f"⚙️ Memproses `{signal['action']}` `{signal['symbol']}`...", chat_id=call.message.chat.id, message_id=call.message.message_id)
         try:
-            # Panggil fungsi baru untuk set TP/SL saja
-            result = order_manager.apply_tpsl_to_existing(signal)
-            bot.edit_message_text(
-                f"✅ *TP/SL TERPASANG!*\n\n"
-                f"Symbol: `{result['symbol']}`\n"
-                f"Qty Terdeteksi: `{result['total_quantity']}`\n"
-                f"TP1: `{result['tp_configs'][0][0]}`\n"
-                f"TP4: `{result['tp_configs'][3][0] if len(result['tp_configs']) > 3 else '-'}`\n"
-                f"SL: `{result['sl_price']}`",
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                parse_mode="Markdown"
-            )
+            result = order_manager.execute_signal(signal)
+            bot.edit_message_text(f"✅ *ORDER BERHASIL!*\nSymbol: `{result['symbol']}`", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="Markdown")
         except Exception as e:
-            bot.edit_message_text(f"❌ *GAGAL!*\n\nError: `{str(e)}`", chat_id=call.message.chat.id, message_id=call.message.message_id)
+            bot.edit_message_text(f"❌ *GAGAL*\nError: `{str(e)}`", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="Markdown")
 
-    elif cmd == "cancel":
+    if cmd == "cancel":
         sid = data_parts[1]
         pending_signals.pop(sid, None)
-        bot.edit_message_text("🚫 Sinyal dibatalkan.", chat_id=call.message.chat.id, message_id=call.message.message_id)
+        bot.edit_message_text("❌ Sinyal dibatalkan.", chat_id=call.message.chat.id, message_id=call.message.message_id)
 
-
-def _close_position(symbol: str, data: dict) -> dict:
-    """Tutup semua posisi aktif untuk symbol."""
+def _close_all_positions():
     import bingx_client as bx
-
-    positions = bx.get_open_positions(symbol)
-    if not positions:
-        return {"message": "Tidak ada posisi aktif"}
-
+    positions = bx.get_open_positions()
     closed = []
+    symbols = []
     for pos in positions:
-        pos_side = pos.get("positionSide", "LONG")
-        qty = abs(float(pos.get("positionAmt", 0)))
+        symbol = pos["symbol"]
+        side = pos["positionSide"]
+        qty = abs(float(pos["positionAmt"]))
+        close_side = "SELL" if side == "LONG" else "BUY"
+        res = bx.place_order(symbol, close_side, side, qty, reduce_only=True)
+        bx.cancel_all_orders(symbol)
+        closed.append(res)
+        symbols.append(symbol)
+    return {"closed_positions": closed, "symbols": list(set(symbols))}
 
-        if qty == 0:
-            continue
-
-        close_side = "SELL" if pos_side == "LONG" else "BUY"
-        result = bx.place_order(
-            symbol=symbol,
-            side=close_side,
-            position_side=pos_side,
-            quantity=qty,
-            order_type="MARKET",
-        )
-        bx.cancel_all_orders(symbol)  # batalkan TP/SL sisa
-        closed.append(result)
-        logger.info(f"Posisi {pos_side} ditutup: {result}")
-
-    return {"closed_positions": closed}
-
-
-# ── Background Monitor Thread ──
 def start_monitor():
+    """Jalankan monitor sinkronisasi posisi di background."""
     logger.info("🕵️ Monitor posisi aktif dimulai (cek setiap 10 detik)...")
+    last_report_date = None
+    
     while True:
         try:
+            # --- 1. Sinkronisasi Posisi & Trailing SL ---
             order_manager.monitor_and_sync_positions()
+            
+            # --- 2. Kirim Laporan Harian Otomatis (Jam 7 Pagi WIB / 00:00 UTC) ---
+            now_utc = time.gmtime()
+            today_str = time.strftime("%Y-%m-%d", now_utc)
+            
+            if now_utc.tm_hour == 0 and last_report_date != today_str:
+                logger.info("📢 Mengirim Laporan Performa Harian Otomatis...")
+                # Panggil fungsi report secara internal
+                class DummyMsg: chat = type('obj', (object,), {'id': TG_CHAT_ID})
+                report_cmd(DummyMsg())
+                last_report_date = today_str
+
         except Exception as e:
-            logger.error(f"Monitor error: {e}")
+            logger.error(f"Error di monitor thread: {e}")
         time.sleep(10)
 
-# Jalankan monitor di background thread
+# ── Jalankan Monitor (Radar) di Background ──
+# Ini harus di luar __main__ agar jalan saat dideploy lewat Gunicorn
 monitor_thread = threading.Thread(target=start_monitor, daemon=True)
 monitor_thread.start()
-
-
-# ─────────────────────────────────────────────
-#  JALANKAN SERVER
-# ─────────────────────────────────────────────
+logger.info("🚀 Background Monitor (Radar) Started")
 
 if __name__ == "__main__":
-    logger.info(f"🚀 BingX Webhook Bot v1.2.6 berjalan di http://{HOST}:{PORT}")
-    logger.info(f"   Endpoint webhook: http://{HOST}:{PORT}/webhook")
-    logger.info("   Mode: Position Monitoring + Auto TP/SL (Deep Fix)")
-    app.run(host=HOST, port=PORT, debug=False)
+    app.run(host=HOST, port=PORT)

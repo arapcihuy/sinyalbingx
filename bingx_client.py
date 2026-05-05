@@ -7,6 +7,8 @@ import os
 import urllib3
 import urllib.parse
 from dotenv import load_dotenv
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 load_dotenv()
 
@@ -16,6 +18,18 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 BINGX_API_KEY = os.getenv("BINGX_API_KEY")
 BINGX_API_SECRET = os.getenv("BINGX_API_SECRET")
 BASE_URL = "https://open-api.bingx.com"
+_SESSION = requests.Session()
+_RETRY = Retry(
+    total=3,
+    connect=3,
+    read=3,
+    status=3,
+    backoff_factor=0.6,
+    status_forcelist=(429, 500, 502, 503, 504),
+    allowed_methods=frozenset(["GET", "POST", "DELETE"]),
+)
+_SESSION.mount("https://", HTTPAdapter(max_retries=_RETRY))
+_SESSION.mount("http://", HTTPAdapter(max_retries=_RETRY))
 
 
 def _sign(query_string: str) -> str:
@@ -65,21 +79,59 @@ def _request(method: str, path: str, params: dict = None) -> dict:
     
     # Konstruksi URL dengan query string lengkap
     url = f"{BASE_URL}{path}?{full_query_string}"
+    # Gunakan header yang lebih lengkap agar tidak diblokir
     headers = _get_headers()
+    headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     
     _logger.info(f"[BingX] {method} {path} params={dict(sorted_params)}")
 
-    if method == "GET":
-        response = requests.get(url, headers=headers, timeout=10, verify=False)
-    elif method == "POST":
-        response = requests.post(url, headers=headers, timeout=10, verify=False)
-    elif method == "DELETE":
-        response = requests.delete(url, headers=headers, timeout=10, verify=False)
-    else:
-        raise ValueError(f"Method tidak dikenal: {method}")
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            if method == "GET":
+                response = _SESSION.get(url, headers=headers, timeout=10)
+            elif method == "POST":
+                response = _SESSION.post(url, headers=headers, timeout=10)
+            elif method == "DELETE":
+                response = _SESSION.delete(url, headers=headers, timeout=10)
+            else:
+                raise ValueError(f"Method tidak dikenal: {method}")
 
-    response.raise_for_status()
-    return response.json()
+            # Jika rate limit (429), tunggu sebentar lalu retry
+            if response.status_code == 429:
+                _logger.warning(f"⚠️ Rate Limit (429). Retry {attempt+1}/{max_retries}...")
+                time.sleep(2)
+                continue
+
+            response.raise_for_status()
+            break # Sukses
+            
+        except requests.exceptions.RequestException as e:
+            if attempt == max_retries - 1:
+                _logger.error(f"❌ HTTP Request Error ({method} {path}) setelah {max_retries} percobaan: {e}")
+                if hasattr(e, 'response') and e.response is not None:
+                    _logger.error(f"   Status: {e.response.status_code} | Body: {e.response.text[:200]}")
+                raise
+            _logger.warning(f"⚠️ Request gagal ({e}). Retry {attempt+1}/{max_retries}...")
+            time.sleep(1)
+
+    response_text = response.text.strip()
+    if not response_text:
+        _logger.error(f"⚠️ BingX mengembalikan body KOSONG untuk {method} {path}")
+        return {"code": -1, "msg": "Empty response from server"}
+
+    try:
+        return response.json()
+    except Exception:
+        # Jika bukan JSON, coba cek apakah terlihat seperti JSON
+        if response_text.startswith("{") or response_text.startswith("["):
+            try:
+                import json
+                return json.loads(response_text)
+            except:
+                pass
+        _logger.error(f"❌ Gagal parse JSON. Status: {response.status_code} | Body: {response_text[:200]}")
+        raise RuntimeError(f"BingX mengembalikan non-JSON response (status {response.status_code})")
 
 
 # ─────────────────────────────────────────────
@@ -87,11 +139,12 @@ def _request(method: str, path: str, params: dict = None) -> dict:
 # ─────────────────────────────────────────────
 
 def get_balance(currency: str = "USDT") -> float:
-    """Ambil balance USDT dari akun Futures."""
+    """Ambil total Equity (Saldo + PnL Mengambang) dari akun Futures."""
     result = _request("GET", "/openApi/swap/v2/user/balance", {})
     if result.get("code") == 0:
+        # 'equity' adalah Saldo + PnL yang sedang jalan (lebih realtime)
         data = result.get("data", {}).get("balance", {})
-        return float(data.get("availableMargin", 0))
+        return float(data.get("equity", 0))
     raise Exception(f"Gagal ambil balance: {result}")
 
 
@@ -123,6 +176,19 @@ def set_margin_type(symbol: str, margin_type: str = "ISOLATED") -> dict:
     return result
 
 
+def get_income_history(symbol: str = None, days: int = 1) -> list:
+    """Ambil riwayat pendapatan (Profit/Loss) dalam kurun waktu tertentu."""
+    start_time = int((time.time() - (days * 24 * 3600)) * 1000)
+    params = {"startTime": start_time, "timestamp": int(time.time() * 1000)}
+    if symbol:
+        params["symbol"] = symbol
+        
+    result = _request("GET", "/openApi/swap/v2/user/income", params)
+    if result.get("code") == 0:
+        return result.get("data", [])
+    return []
+
+
 # ─────────────────────────────────────────────
 #  HARGA
 # ─────────────────────────────────────────────
@@ -133,6 +199,18 @@ def get_current_price(symbol: str) -> float:
     if result.get("code") == 0:
         return float(result["data"]["price"])
     raise Exception(f"Gagal ambil harga: {result}")
+
+
+def get_open_positions(symbol: str = None) -> list:
+    """Ambil daftar posisi aktif. Jika symbol diisi, hanya ambil posisi symbol tersebut."""
+    result = _request("GET", "/openApi/swap/v2/user/positions", {"timestamp": int(time.time() * 1000)})
+    if result.get("code") == 0:
+        positions = result.get("data", [])
+        if symbol:
+            # Filter posisi berdasarkan symbol (misal: 'BTC-USDT')
+            return [p for p in positions if p.get("symbol") == symbol and abs(float(p.get("positionAmt", 0))) > 0]
+        return [p for p in positions if abs(float(p.get("positionAmt", 0))) > 0]
+    return []
 
 
 # ─────────────────────────────────────────────
@@ -146,11 +224,10 @@ def place_order(
     quantity: float,
     order_type: str = "MARKET",
     price: float = None,
+    reduce_only: bool = False,
 ) -> dict:
     """
-    Buka order Futures di BingX.
-    - side=BUY + position_side=LONG  → buka posisi LONG
-    - side=SELL + position_side=SHORT → buka posisi SHORT
+    Buka/Tutup order Futures di BingX.
     """
     params = {
         "symbol": symbol,
@@ -159,6 +236,9 @@ def place_order(
         "type": order_type,
         "quantity": quantity,
     }
+    
+    if reduce_only:
+        params["reduceOnly"] = "true"
 
     if order_type == "LIMIT" and price:
         params["price"] = price
