@@ -62,6 +62,13 @@ def execute_signal(data: dict) -> dict:
     bx.set_margin_type(symbol, "ISOLATED")
 
     order_res = bx.place_order(symbol, order_side, pos_side, total_quantity, "MARKET")
+    
+    # Fallback untuk One-Way Mode: Jika Hedge Mode (LONG/SHORT) ditolak, gunakan BOTH
+    if order_res.get("code") == 109400:
+        logger.warning("109400: Mencoba ulang dengan positionSide='BOTH' (One-Way Mode)")
+        order_res = bx.place_order(symbol, order_side, "BOTH", total_quantity, "MARKET")
+        pos_side = "BOTH" # Update state agar TP/SL juga menyesuaikan
+        
     if order_res.get("code") != 0: 
         raise Exception(f"Gagal buka posisi: {order_res}. Params: symbol={symbol}, side={order_side}, pos_side={pos_side}, qty={total_quantity}")
 
