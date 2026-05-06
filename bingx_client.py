@@ -233,11 +233,13 @@ def place_order(
     params = {
         "symbol": symbol,
         "side": side,
-        "positionSide": position_side,
         "type": order_type,
         "quantity": quantity,
     }
     
+    if position_side:
+        params["positionSide"] = position_side
+        
     if reduce_only:
         params["reduceOnly"] = "true"
 
