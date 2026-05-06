@@ -91,7 +91,8 @@ def _request(method: str, path: str, params: dict = None) -> dict:
             if method == "GET":
                 response = _SESSION.get(url, headers=headers, timeout=10, verify=False)
             elif method == "POST":
-                response = _SESSION.post(url, headers=headers, timeout=10, verify=False)
+                # Kirim empty JSON object agar API tidak gagal parse saat Content-Type adalah application/json
+                response = _SESSION.post(url, headers=headers, json={}, timeout=10, verify=False)
             elif method == "DELETE":
                 response = _SESSION.delete(url, headers=headers, timeout=10, verify=False)
             else:
