@@ -62,7 +62,8 @@ def execute_signal(data: dict) -> dict:
     bx.set_margin_type(symbol, "ISOLATED")
 
     order_res = bx.place_order(symbol, order_side, pos_side, total_quantity, "MARKET")
-    if order_res.get("code") != 0: raise Exception(f"Gagal buka posisi: {order_res}")
+    if order_res.get("code") != 0: 
+        raise Exception(f"Gagal buka posisi: {order_res}. Params: symbol={symbol}, side={order_side}, pos_side={pos_side}, qty={total_quantity}")
 
     # 6. Pasang TP/SL (Logika OPSI 1: Tutup 100% di TP1)
     status_msg = "success"
