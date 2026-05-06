@@ -374,6 +374,10 @@ def status_cmd(message):
                 if tps: 
                     status_msg += f"  🎯 TPs: <code>{', '.join(map(str, tps))}</code>\n"
                 
+                sl = trade_data.get("sl")
+                if sl:
+                    status_msg += f"  🛑 SL: <code>{sl}</code>\n"
+                
                 status_msg += f"  💵 PnL: <b>{pnl:+.2f} USDT</b> (<code>{roe:+.2f}%</code>) {pnl_icon}\n"
                 status_msg += "━━━━━━━━━━━━━━━━━━━━━\n"
                 
