@@ -305,6 +305,8 @@ def set_leverage_cmd(message):
             new_lev = int(args[1])
             if 1 <= new_lev <= 150:
                 CURRENT_LEVERAGE = new_lev
+                # Simpan ke file agar tidak hilang saat restart
+                settings_manager.save_settings({"leverage": CURRENT_LEVERAGE})
                 bot.reply_to(message, f"✅ *Leverage Berhasil Diubah!*\nSekarang: `{CURRENT_LEVERAGE}x`", parse_mode="Markdown")
                 return
 
@@ -330,10 +332,14 @@ def status_cmd(message):
         positions = bx.get_open_positions()
         logger.info(f"✅ {len(positions)} posisi aktif ditemukan")
         
+        # Ambil leverage dari file settings (bukan global variable)
+        current_settings = settings_manager.load_settings()
+        leverage_display = current_settings.get("leverage", 40)
+        
         status_msg = f"<b>📊 [ SYSTEM STATUS ]</b>\n"
         status_msg += f"━━━━━━━━━━━━━━━━━━━━━\n"
         status_msg += f"💰 <b>Balance:</b> <code>{balance:.2f} USDT</code>\n"
-        status_msg += f"⚙️ <b>Leverage:</b> <code>{CURRENT_LEVERAGE}x</code>\n"
+        status_msg += f"⚙️ <b>Leverage:</b> <code>{leverage_display}x</code>\n"
         status_msg += f"🤖 <b>Mode:</b> <code>AUTO-ENTRY (Active) 🟢</code>\n"
         status_msg += f"━━━━━━━━━━━━━━━━━━━━━\n\n"
         
