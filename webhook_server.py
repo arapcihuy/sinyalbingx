@@ -411,7 +411,7 @@ def report_cmd(message):
         import bingx_client as bx
         import time
         
-        bot.reply_to(message, "⏳ Sedang merekap data laporan 30 hari terakhir...", parse_mode="HTML")
+        bot.send_message(message.chat.id, "⏳ Sedang merekap data laporan 30 hari terakhir...", parse_mode="HTML")
         
         # 1. Ambil Balance & Unrealized PnL
         balance = bx.get_balance()
