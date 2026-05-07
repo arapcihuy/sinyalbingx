@@ -132,16 +132,20 @@ def apply_manual_tpsl(symbol: str, tp_price: float, sl_price: float) -> dict:
     sl_side = "SELL" if pos_side == "LONG" else "BUY"
     
     # Pasang SL Baru
-    bx._request("POST", "/openApi/swap/v2/trade/order", {
+    sl_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
         "symbol": symbol, "side": sl_side, "positionSide": pos_side,
         "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": total_quantity, "reduceOnly": "true"
     })
+    if sl_res.get("code", 0) != 0:
+        raise ValueError(f"SL Ditolak BingX: {sl_res.get('msg')}")
     
     # Pasang TP1 Baru (100% Quantity)
-    bx._request("POST", "/openApi/swap/v2/trade/order", {
+    tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
         "symbol": symbol, "side": sl_side, "positionSide": pos_side,
         "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price, "quantity": total_quantity, "reduceOnly": "true"
     })
+    if tp_res.get("code", 0) != 0:
+        raise ValueError(f"TP Ditolak BingX: {tp_res.get('msg')}")
         
     # Update state bot
     active_trade_data[symbol] = {
