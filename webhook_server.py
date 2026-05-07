@@ -84,11 +84,16 @@ def health():
 @app.route("/webhook", methods=["POST"])
 def webhook():
     """Endpoint untuk menerima sinyal dari TradingView."""
-    if not request.json:
-        return jsonify({"error": "Invalid JSON"}), 400
+    # Tangkap semua request (walaupun text biasa dari alert asli) agar tidak error merah di TV
+    if not request.is_json:
+        return jsonify({"status": "ignored", "reason": "Bukan format JSON. Diabaikan."}), 200
+        
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"status": "ignored", "reason": "Format JSON tidak valid."}), 200
         
     # Konversi semua key ke lowercase agar aman (TP1 -> tp1)
-    data = {k.lower(): v for k, v in request.json.items()}
+    data = {k.lower(): v for k, v in data.items()}
     
     if data.get("secret") != os.getenv("WEBHOOK_SECRET"):
         return jsonify({"error": "Unauthorized"}), 401
