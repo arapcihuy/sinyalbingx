@@ -300,17 +300,13 @@ def tpsl_cmd(message):
             bot.reply_to(message, "❌ <b>Format Salah!</b>\nContoh: <code>/tpsl 90 87</code>\nAtau: <code>/tpsl SOL-USDT 90 87</code>", parse_mode="HTML")
             return
             
-        bot.reply_to(message, f"⏳ Sedang memasang TP/SL manual untuk <b>{symbol}</b>...", parse_mode="HTML")
+        bot.reply_to(message, f"⏳ Memasang TP/SL...", parse_mode="HTML")
         
         import order_manager
         res = order_manager.apply_manual_tpsl(symbol, tp_price, sl_price)
         
         tps = res["tps"]
-        msg = f"✅ <b>MANUAL TP/SL BERHASIL!</b>\n"
-        msg += f"━━━━━━━━━━━━━━━━━━\n"
-        msg += f"🎯 Take Profit: <code>{tps[0]:.2f}</code>\n"
-        msg += f"🛑 Stop Loss: <code>{res['sl']:.2f}</code>\n"
-        msg += f"━━━━━━━━━━━━━━━━━━\n"
+        msg = f"✅ <b>Sukses!</b> TP: <code>{tps[0]:.2f}</code> | SL: <code>{res['sl']:.2f}</code>"
         
         bot.send_message(message.chat.id, msg, parse_mode="HTML")
     except ValueError as ve:
