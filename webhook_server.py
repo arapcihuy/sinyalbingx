@@ -306,7 +306,7 @@ def tpsl_cmd(message):
         res = order_manager.apply_manual_tpsl(symbol, tp_price, sl_price)
         
         tps = res["tps"]
-        msg = f"✅ <b>Sukses!</b> TP: <code>{tps[0]:.2f}</code> | SL: <code>{res['sl']:.2f}</code>"
+        msg = f"✅ <b>{symbol}</b> | TP: <code>{tps[0]:.2f}</code> | SL: <code>{res['sl']:.2f}</code>"
         
         bot.send_message(message.chat.id, msg, parse_mode="HTML")
     except ValueError as ve:
