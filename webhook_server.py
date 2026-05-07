@@ -269,30 +269,48 @@ def tpsl_cmd(message):
     try:
         args = message.text.split()
         
-        if len(args) == 2:
-            # Format: /tpsl 80000 (Otomatis BTC-USDT)
-            symbol = "BTC-USDT"
-            sl_price = float(args[1])
-        elif len(args) == 3:
-            # Format: /tpsl ETH-USDT 3000
+        # Deteksi posisi aktif jika symbol tidak disebutkan
+        import bingx_client as bx
+        open_positions = bx.get_open_positions()
+        
+        symbol = None
+        tp_price = None
+        sl_price = None
+        
+        if len(args) == 3:
+            # Format: /tpsl [TP] [SL] (Auto-detect symbol)
+            if len(open_positions) == 1:
+                symbol = open_positions[0]["symbol"]
+                tp_price = float(args[1])
+                sl_price = float(args[2])
+            elif len(open_positions) == 0:
+                bot.reply_to(message, "❌ Tidak ada posisi aktif untuk dipasang TP/SL.")
+                return
+            else:
+                bot.reply_to(message, "❌ Ada lebih dari 1 posisi aktif. Tolong sebutkan symbolnya!\nContoh: `/tpsl SOL-USDT 90 87`", parse_mode="Markdown")
+                return
+                
+        elif len(args) == 4:
+            # Format: /tpsl [SYMBOL] [TP] [SL]
             symbol = args[1].upper()
-            sl_price = float(args[2])
+            if "-" not in symbol: symbol += "-USDT"
+            tp_price = float(args[2])
+            sl_price = float(args[3])
         else:
-            bot.reply_to(message, "❌ <b>Format Salah!</b>\n\nGunakan: <code>/tpsl [HARGA_SL]</code>\nContoh: <code>/tpsl 80000</code>", parse_mode="HTML")
+            bot.reply_to(message, "❌ <b>Format Salah!</b>\n\nGunakan:\n<code>/tpsl [HARGA_TP] [HARGA_SL]</code> (jika hanya ada 1 posisi)\nAtau:\n<code>/tpsl [SYMBOL] [HARGA_TP] [HARGA_SL]</code>\n\nContoh: <code>/tpsl SOL-USDT 90 87</code>", parse_mode="HTML")
             return
             
-        bot.reply_to(message, f"⏳ Sedang menghitung & memasang TP/SL untuk <b>{symbol}</b>...", parse_mode="HTML")
+        bot.reply_to(message, f"⏳ Sedang memasang TP/SL manual untuk <b>{symbol}</b>...", parse_mode="HTML")
         
         import order_manager
-        res = order_manager.apply_manual_tpsl(symbol, sl_price)
+        res = order_manager.apply_manual_tpsl(symbol, tp_price, sl_price)
         
         tps = res["tps"]
-        msg = f"✅ <b>AUTO TP/SL BERHASIL!</b>\n"
+        msg = f"✅ <b>MANUAL TP/SL BERHASIL!</b>\n"
         msg += f"━━━━━━━━━━━━━━━━━━\n"
-        msg += f"🎯 TP Utama (100%): <code>{tps[0]:.2f}</code>\n"
+        msg += f"🎯 Take Profit: <code>{tps[0]:.2f}</code>\n"
         msg += f"🛑 Stop Loss: <code>{res['sl']:.2f}</code>\n"
         msg += f"━━━━━━━━━━━━━━━━━━\n"
-        msg += f"<i>Strategi aktif: Tembak Cepat (Opsi 1)</i>\n"
         
         bot.send_message(message.chat.id, msg, parse_mode="HTML")
     except ValueError as ve:

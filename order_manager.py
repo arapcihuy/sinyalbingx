@@ -99,7 +99,7 @@ def execute_signal(data: dict) -> dict:
     }
     return {"status": status_msg, "total_quantity": total_quantity, "symbol": symbol, "action": action}
 
-def apply_manual_tpsl(symbol: str, sl_price: float) -> dict:
+def apply_manual_tpsl(symbol: str, tp_price: float, sl_price: float) -> dict:
     """Otomatis hitung & pasang TP/SL untuk posisi manual yang sudah terbuka."""
     positions = bx.get_open_positions()
     target_pos = next((p for p in positions if p.get("symbol") == symbol and abs(float(p.get("positionAmt", 0))) > 0), None)
@@ -111,13 +111,8 @@ def apply_manual_tpsl(symbol: str, sl_price: float) -> dict:
     entry_price = float(target_pos.get("avgPrice"))
     total_quantity = abs(float(target_pos.get("positionAmt")))
     
-    if sl_price == 0 or entry_price == 0:
-        raise ValueError("Harga Entry atau SL tidak valid.")
-        
-    # Hitung Jarak SL (Risk)
-    risk_dist = abs(entry_price - sl_price)
-    if risk_dist == 0:
-        raise ValueError("Harga SL tidak boleh sama dengan Entry.")
+    if sl_price == 0 or entry_price == 0 or tp_price == 0:
+        raise ValueError("Harga TP, SL, atau Entry tidak valid.")
         
     # Validasi arah SL
     if pos_side == "LONG" and sl_price >= entry_price:
@@ -125,11 +120,11 @@ def apply_manual_tpsl(symbol: str, sl_price: float) -> dict:
     if pos_side == "SHORT" and sl_price <= entry_price:
         raise ValueError(f"SL ({sl_price}) harus di atas Entry ({entry_price}) untuk posisi SHORT.")
         
-    # Hitung 1 TP utama (Risk Reward 1:1.5 agar profit lebih terasa)
-    if pos_side == "LONG":
-        tp1_price = entry_price + (risk_dist * 1.5)
-    else:
-        tp1_price = entry_price - (risk_dist * 1.5)
+    # Validasi arah TP
+    if pos_side == "LONG" and tp_price <= entry_price:
+        raise ValueError(f"TP ({tp_price}) harus di atas Entry ({entry_price}) untuk posisi LONG.")
+    if pos_side == "SHORT" and tp_price >= entry_price:
+        raise ValueError(f"TP ({tp_price}) harus di bawah Entry ({entry_price}) untuk posisi SHORT.")
         
     # Hapus semua TP/SL lama
     bx.cancel_all_orders(symbol)
@@ -145,16 +140,16 @@ def apply_manual_tpsl(symbol: str, sl_price: float) -> dict:
     # Pasang TP1 Baru (100% Quantity)
     bx._request("POST", "/openApi/swap/v2/trade/order", {
         "symbol": symbol, "side": sl_side, "positionSide": pos_side,
-        "type": "TAKE_PROFIT_MARKET", "stopPrice": tp1_price, "quantity": total_quantity, "reduceOnly": "true"
+        "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price, "quantity": total_quantity, "reduceOnly": "true"
     })
         
     # Update state bot
     active_trade_data[symbol] = {
-        "entry": entry_price, "tps": [tp1_price],
+        "entry": entry_price, "tps": [tp_price],
         "sl": sl_price, "side": pos_side, "last_tp_hit": 0
     }
     
-    return {"status": "success", "tps": [tp1_price], "sl": sl_price}
+    return {"status": "success", "tps": [tp_price], "sl": sl_price}
 
 def _close_position(symbol: str) -> dict:
     positions = bx.get_open_positions(symbol)
