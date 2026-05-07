@@ -218,14 +218,25 @@ def clear_menu(message):
 @bot.message_handler(commands=['market', 'price'])
 def market_price_cmd(message):
     try:
-        args = message.text.split()
-        symbol = args[1].upper() if len(args) > 1 else "BTC-USDT"
-        if "-" not in symbol: symbol += "-USDT"
-        
         import bingx_client as bx
-        price = bx.get_current_price(symbol)
+        args = message.text.split()
         
-        msg = f"📊 *MARKET PRICE*\n\nCoin: `{symbol}`\nPrice: `{price:.2f} USDT`"
+        def format_price(p):
+            return f"{float(p):.5f}".rstrip('0').rstrip('.') if '.' in f"{float(p):.5f}" else str(p)
+
+        if len(args) > 1:
+            symbol = args[1].upper()
+            if "-" not in symbol: symbol += "-USDT"
+            price = bx.get_current_price(symbol)
+            msg = f"📊 *MARKET PRICE*\n\nCoin: `{symbol}`\nPrice: `{format_price(price)} USDT`"
+        else:
+            msg = "📊 *MARKET PRICE*\n\n"
+            for sym in ["BTC-USDT", "ETH-USDT", "SOL-USDT"]:
+                try:
+                    price = bx.get_current_price(sym)
+                    msg += f"• `{sym}` : `{format_price(price)} USDT`\n"
+                except:
+                    pass
         bot.send_message(message.chat.id, msg, parse_mode="Markdown")
     except Exception as e:
         bot.reply_to(message, f"❌ Gagal ambil harga: `{str(e)}`")
@@ -382,20 +393,24 @@ def status_cmd(message):
                 roe = (pnl / margin * 100) if margin > 0 else 0
                 pnl_icon = "📈" if pnl >= 0 else "📉"
                 
+                def format_price(p):
+                    return f"{float(p):.5f}".rstrip('0').rstrip('.') if '.' in f"{float(p):.5f}" else str(p)
+
                 status_msg += f"• <b>{sym}</b> ({side}) - <code>{pos_lev}x</code>\n"
                 status_msg += f"  💰 Margin: <code>{margin:.2f}</code> | Size: <code>{amt}</code>\n"
-                status_msg += f"  📥 Entry: <code>{avg_p:.2f}</code> | Mark: <code>{mark_p:.2f}</code>\n"
-                status_msg += f"  💀 Liq: <code>{liq_p:.2f}</code>\n"
+                status_msg += f"  📥 Entry: <code>{format_price(avg_p)}</code> | Mark: <code>{format_price(mark_p)}</code>\n"
+                status_msg += f"  💀 Liq: <code>{format_price(liq_p)}</code>\n"
                 
                 # Cek data TPs dari memori bot
                 trade_data = order_manager.active_trade_data.get(sym, {})
                 tps = trade_data.get("tps", [])
                 if tps: 
-                    status_msg += f"  🎯 TPs: <code>{', '.join(map(str, tps))}</code>\n"
+                    tps_str = ', '.join([format_price(tp) for tp in tps])
+                    status_msg += f"  🎯 TPs: <code>{tps_str}</code>\n"
                 
                 sl = trade_data.get("sl")
                 if sl:
-                    status_msg += f"  🛑 SL: <code>{sl}</code>\n"
+                    status_msg += f"  🛑 SL: <code>{format_price(sl)}</code>\n"
                 
                 status_msg += f"  💵 PnL: <b>{pnl:+.2f} USDT</b> (<code>{roe:+.2f}%</code>) {pnl_icon}\n"
                 status_msg += "━━━━━━━━━━━━━━━━━━━━━\n"
