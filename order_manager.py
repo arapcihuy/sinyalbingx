@@ -161,7 +161,7 @@ def _close_position(symbol: str) -> dict:
     for pos in positions:
         side, qty = pos["positionSide"], abs(float(pos["positionAmt"]))
         close_side = "SELL" if side == "LONG" else "BUY"
-        bx.place_order(symbol, close_side, side, qty, reduce_only=True)
+        bx.place_order(symbol, close_side, side, qty)
     bx.cancel_all_orders(symbol)
     active_trade_data.pop(symbol, None)
     return {"msg": f"Closed {symbol}"}
@@ -262,5 +262,5 @@ def _update_sl(symbol, side, new_price, qty, current_sl_orders):
     sl_side = "SELL" if side == "LONG" else "BUY"
     bx._request("POST", "/openApi/swap/v2/trade/order", {
         "symbol": symbol, "side": sl_side, "positionSide": side,
-        "type": "STOP_MARKET", "stopPrice": new_price, "quantity": qty, "reduceOnly": "true"
+        "type": "STOP_MARKET", "stopPrice": new_price, "quantity": qty
     })
