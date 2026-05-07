@@ -297,7 +297,7 @@ def tpsl_cmd(message):
             tp_price = float(args[2])
             sl_price = float(args[3])
         else:
-            bot.reply_to(message, "❌ <b>Format Salah!</b>\n\nGunakan:\n<code>/tpsl [HARGA_TP] [HARGA_SL]</code> (jika hanya ada 1 posisi)\nAtau:\n<code>/tpsl [SYMBOL] [HARGA_TP] [HARGA_SL]</code>\n\nContoh: <code>/tpsl SOL-USDT 90 87</code>", parse_mode="HTML")
+            bot.reply_to(message, "❌ <b>Format Salah!</b>\nContoh: <code>/tpsl 90 87</code>\nAtau: <code>/tpsl SOL-USDT 90 87</code>", parse_mode="HTML")
             return
             
         bot.reply_to(message, f"⏳ Sedang memasang TP/SL manual untuk <b>{symbol}</b>...", parse_mode="HTML")
