@@ -72,17 +72,23 @@ def execute_signal(data: dict) -> dict:
     time.sleep(1.0) # Jeda 1 detik agar order settle di BingX
     try:
         sl_side = "SELL" if pos_side == "LONG" else "BUY"
-        bx._request("POST", "/openApi/swap/v2/trade/order", {
+        
+        sl_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": symbol, "side": sl_side, "positionSide": pos_side,
             "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": total_quantity, "reduceOnly": "true"
         })
+        if sl_res.get("code", 0) != 0:
+            raise Exception(f"SL Ditolak BingX: {sl_res.get('msg')}")
 
         tp1_price = tp_levels_prices[0]
         if tp1_price > 0:
-            bx._request("POST", "/openApi/swap/v2/trade/order", {
+            tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
                 "symbol": symbol, "side": sl_side, "positionSide": pos_side,
                 "type": "TAKE_PROFIT_MARKET", "stopPrice": tp1_price, "quantity": total_quantity, "reduceOnly": "true"
             })
+            if tp_res.get("code", 0) != 0:
+                raise Exception(f"TP Ditolak BingX: {tp_res.get('msg')}")
+                
     except Exception as e:
         logger.error(f"⚠️ Posisi terbuka tapi TP/SL gagal dipasang: {e}")
         status_msg = f"warning: TP/SL Gagal ({str(e)})"
