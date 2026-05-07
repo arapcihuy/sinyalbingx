@@ -75,7 +75,7 @@ def execute_signal(data: dict) -> dict:
         
         sl_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": symbol, "side": sl_side, "positionSide": pos_side,
-            "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": total_quantity, "reduceOnly": "true"
+            "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": total_quantity
         })
         if sl_res.get("code", 0) != 0:
             raise Exception(f"SL Ditolak BingX: {sl_res.get('msg')}")
@@ -84,7 +84,7 @@ def execute_signal(data: dict) -> dict:
         if tp1_price > 0:
             tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
                 "symbol": symbol, "side": sl_side, "positionSide": pos_side,
-                "type": "TAKE_PROFIT_MARKET", "stopPrice": tp1_price, "quantity": total_quantity, "reduceOnly": "true"
+                "type": "TAKE_PROFIT_MARKET", "stopPrice": tp1_price, "quantity": total_quantity
             })
             if tp_res.get("code", 0) != 0:
                 raise Exception(f"TP Ditolak BingX: {tp_res.get('msg')}")
@@ -134,7 +134,7 @@ def apply_manual_tpsl(symbol: str, tp_price: float, sl_price: float) -> dict:
     # Pasang SL Baru
     sl_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
         "symbol": symbol, "side": sl_side, "positionSide": pos_side,
-        "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": total_quantity, "reduceOnly": "true"
+        "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": total_quantity
     })
     if sl_res.get("code", 0) != 0:
         raise ValueError(f"SL Ditolak BingX: {sl_res.get('msg')}")
@@ -142,7 +142,7 @@ def apply_manual_tpsl(symbol: str, tp_price: float, sl_price: float) -> dict:
     # Pasang TP1 Baru (100% Quantity)
     tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
         "symbol": symbol, "side": sl_side, "positionSide": pos_side,
-        "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price, "quantity": total_quantity, "reduceOnly": "true"
+        "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price, "quantity": total_quantity
     })
     if tp_res.get("code", 0) != 0:
         raise ValueError(f"TP Ditolak BingX: {tp_res.get('msg')}")
