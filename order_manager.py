@@ -68,6 +68,8 @@ def execute_signal(data: dict) -> dict:
 
     # 6. Pasang TP/SL (Logika OPSI 1: Tutup 100% di TP1)
     status_msg = "success"
+    import time
+    time.sleep(1.0) # Jeda 1 detik agar order settle di BingX
     try:
         sl_side = "SELL" if pos_side == "LONG" else "BUY"
         bx._request("POST", "/openApi/swap/v2/trade/order", {
