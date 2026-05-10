@@ -90,6 +90,7 @@ def execute_signal(data: dict) -> dict:
 
     # 6. Pasang TP/SL (Logika OPSI 1: Tutup 100% di TP1)
     status_msg = "success"
+    tp1_price = tp_levels_prices[0] if tp_levels_prices else 0  # Init di luar try agar selalu terdefinisi
     import time
     time.sleep(1.0) # Jeda 1 detik agar order settle di BingX
     try:
@@ -102,7 +103,6 @@ def execute_signal(data: dict) -> dict:
         if sl_res.get("code", 0) != 0:
             raise Exception(f"SL Ditolak BingX: {sl_res.get('msg')}")
 
-        tp1_price = tp_levels_prices[0]
         if tp1_price > 0:
             tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
                 "symbol": symbol, "side": sl_side, "positionSide": pos_side,
