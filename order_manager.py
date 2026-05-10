@@ -194,8 +194,8 @@ def monitor_and_sync_positions():
                 logger.warning(f"Radar: open_orders bukan list: {open_orders}")
                 continue
 
-            tp_orders = [o for o in open_orders if isinstance(o, dict) and o.get("type") == "TAKE_PROFIT_MARKET"]
-            sl_orders = [o for o in open_orders if isinstance(o, dict) and o.get("type") == "STOP_MARKET"]
+            tp_orders = [o for o in open_orders if isinstance(o, dict) and "TAKE_PROFIT" in o.get("type", "")]
+            sl_orders = [o for o in open_orders if isinstance(o, dict) and "STOP" in o.get("type", "")]
 
             # 2. FITUR ADOPT: Jika posisi belum tercatat, ambil data dari BingX
             if symbol not in active_trade_data:
@@ -215,11 +215,15 @@ def monitor_and_sync_positions():
             data = active_trade_data[symbol]
             rem_tps, orig_tps = len(tp_orders), len(data["tps"])
             
-            # Update SL jika TP kena
+            # Update SL jika TP kena (Hanya jika posisi qty berkurang)
+            # Jika qty masih utuh, berarti TP1 belum hit (mungkin API openOrders delay atau TP order terhapus manual)
             if rem_tps < orig_tps and data["last_tp_hit"] < 1:
-                logger.info(f"🎯 {symbol} TP1 Hit! SL -> Entry ({entry})")
-                _update_sl(symbol, side, entry, qty, sl_orders)
-                data["last_tp_hit"] = 1
+                logger.info(f"🤔 Radar: TP terdeteksi berkurang ({rem_tps}/{orig_tps}) namun posisi masih ada. Melewati Trailing SL untuk mencegah close otomatis.")
+                # Update tps tracking agar tidak terus trigger message ini
+                data["tps"] = data["tps"][:rem_tps] if rem_tps > 0 else []
+                # JANGAN update SL ke entry karena TP belum hit
+                # _update_sl(symbol, side, entry, qty, sl_orders)
+                # data["last_tp_hit"] = 1
             elif rem_tps < orig_tps - 1 and data["last_tp_hit"] < 2:
                 new_sl = data["tps"][0]
                 logger.info(f"🎯 {symbol} TP2 Hit! SL -> TP1 ({new_sl})")
