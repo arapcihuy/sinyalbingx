@@ -18,6 +18,8 @@ ORDER_TYPE = os.getenv("ORDER_TYPE", "MARKET")
 
 # State untuk menyimpan data TP/SL per symbol
 active_trade_data = {}
+latest_signals = {}  # Menyimpan sinyal terakhir per koin untuk re-entry
+
 
 def _round_qty(qty: float, symbol: str = "BTC-USDT") -> float:
     """Bulatkan quantity ke step size yang valid sesuai symbol."""
@@ -165,6 +167,46 @@ def _close_position(symbol: str) -> dict:
     bx.cancel_all_orders(symbol)
     active_trade_data.pop(symbol, None)
     return {"msg": f"Closed {symbol}"}
+
+def reentry_signal(symbol: str) -> dict:
+    """Melakukan re-entry berdasarkan sinyal terakhir jika masih valid."""
+    if symbol not in latest_signals:
+        raise ValueError(f"Tidak ada histori sinyal untuk {symbol}.")
+        
+    data = latest_signals[symbol]
+    action = data.get("action", "").upper()
+    
+    # Jangan re-entry jika sinyal terakhir adalah CLOSE
+    if action == "CLOSE":
+        raise ValueError(f"Sinyal terakhir untuk {symbol} adalah CLOSE. Tidak dapat re-entry.")
+        
+    current_price = bx.get_current_price(symbol)
+    tp1 = float(data.get("tp1", 0))
+    sl = float(data.get("sl", 0))
+    
+    if sl == 0 or tp1 == 0:
+        raise ValueError("Sinyal terakhir tidak memiliki data TP1 atau SL yang valid.")
+        
+    # Validasi harga saat ini
+    if action in ["BUY", "LONG"]:
+        if current_price >= tp1:
+            raise ValueError(f"Terlambat: Harga saat ini ({current_price}) sudah di atas/mencapai TP1 ({tp1}).")
+        if current_price <= sl:
+            raise ValueError(f"Berbahaya: Harga saat ini ({current_price}) sudah menyentuh/di bawah SL ({sl}).")
+    else: # SHORT
+        if current_price <= tp1:
+            raise ValueError(f"Terlambat: Harga saat ini ({current_price}) sudah di bawah/mencapai TP1 ({tp1}).")
+        if current_price >= sl:
+            raise ValueError(f"Berbahaya: Harga saat ini ({current_price}) sudah menyentuh/di atas SL ({sl}).")
+            
+    # Hapus TP/SL lama jika ada
+    bx.cancel_all_orders(symbol)
+    
+    # Eksekusi ulang sinyal tersebut dengan harga sekarang
+    logger.info(f"🔄 Mengeksekusi Re-Entry otomatis untuk {symbol} di harga {current_price}")
+    # Mengabaikan harga entry asli agar bot menghitung ulang berdasarkan harga saat ini (MARKET)
+    data["price"] = current_price 
+    return execute_signal(data)
 
 def monitor_and_sync_positions():
     """Radar: Memantau posisi, adopsi posisi lama, dan trailing SL."""

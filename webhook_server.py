@@ -50,6 +50,7 @@ try:
         telebot.types.BotCommand("settings", "Cek konfigurasi bot"),
         telebot.types.BotCommand("report", "Laporan profit 24 jam terakhir"),
         telebot.types.BotCommand("tpsl", "Pasang Auto TP/SL (Manual Entry)"),
+        telebot.types.BotCommand("susul", "Re-entry sinyal terakhir jika belum kena TP1"),
         telebot.types.BotCommand("leverage", "Ganti leverage (1x - 150x)"),
         telebot.types.BotCommand("panic", "Tutup semua posisi & cancel order"),
         telebot.types.BotCommand("reset", "Muat ulang menu bot"),
@@ -112,6 +113,9 @@ def webhook():
 
     logger.info("==================================================")
     logger.info(f"Payload diterima: {data}")
+    
+    # ── Simpan Sinyal Terakhir untuk Keperluan Re-Entry ──
+    order_manager.latest_signals[symbol] = data
 
     # ── Notifikasi Awal ke Telegram (Asynchronous) ──
     def send_notif_bg(text):
@@ -250,6 +254,7 @@ def help_cmd(message):
         "• /settings - Melihat pengaturan leverage dan mode trading saat ini.\n"
         "• /leverage - Mengubah leverage default melalui tombol.\n"
         "• /tpsl [HARGA_SL] - Memasang TP/SL otomatis untuk posisi manual.\n"
+        "• /susul [KODE] - Re-entry otomatis menggunakan sinyal terakhir.\n"
         "• /report - Melihat ringkasan Profit/Loss (PnL) 24 jam terakhir.\n"
         "• /panic - Menutup SEMUA posisi dan membatalkan semua order secara instan.\n"
         "• /reset - Memuat ulang menu utama bot.\n\n"
@@ -325,6 +330,44 @@ def tpsl_cmd(message):
     except Exception as e:
         logger.error(f"Gagal set tpsl manual: {e}")
         bot.reply_to(message, f"❌ <b>System Error:</b> {str(e)}", parse_mode="HTML")
+
+@bot.message_handler(commands=['susul', 'reentry'])
+def reentry_cmd(message):
+    try:
+        args = message.text.split()
+        if len(args) < 2:
+            bot.reply_to(message, "❌ *Format Salah!*\nContoh: `/susul ETH` atau `/susul BTC-USDT`", parse_mode="Markdown")
+            return
+            
+        symbol = args[1].upper()
+        if "-" not in symbol: 
+            symbol += "-USDT"
+            
+        bot.reply_to(message, f"⏳ Memeriksa keamanan re-entry untuk `{symbol}`...", parse_mode="Markdown")
+        
+        import order_manager
+        result = order_manager.reentry_signal(symbol)
+        
+        # Notifikasi Sukses
+        status_text = "BERHASIL RE-ENTRY"
+        if "warning" in result.get("status", ""):
+            status_text += " (⚠️ TP/SL GAGAL)"
+            
+        exec_msg = (
+            f"⚡ *EKSEKUSI RE-ENTRY {status_text}*\n"
+            f"Symbol: `{result.get('symbol')}`\n"
+            f"Action: `{result.get('action')}`\n"
+            f"Qty: `{result.get('total_quantity', 'N/A')}`\n"
+            f"Status: `{result.get('status')}`"
+        )
+        bot.send_message(message.chat.id, exec_msg, parse_mode="Markdown")
+        
+    except ValueError as ve:
+        bot.reply_to(message, f"❌ *Ditolak:* {str(ve)}", parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Gagal re-entry: {e}")
+        bot.reply_to(message, f"❌ *System Error:* `{str(e)}`", parse_mode="Markdown")
+
 
 @bot.message_handler(commands=['leverage', 'setleverage'])
 def set_leverage_cmd(message):
