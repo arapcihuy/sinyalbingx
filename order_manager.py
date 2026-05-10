@@ -1,6 +1,7 @@
 import os
 import math
 import logging
+import json
 from dotenv import load_dotenv
 import bingx_client as bx
 
@@ -18,7 +19,26 @@ ORDER_TYPE = os.getenv("ORDER_TYPE", "MARKET")
 
 # State untuk menyimpan data TP/SL per symbol
 active_trade_data = {}
-latest_signals = {}  # Menyimpan sinyal terakhir per koin untuk re-entry
+
+# Menyimpan sinyal terakhir per koin untuk re-entry
+LATEST_SIGNALS_FILE = "latest_signals.json"
+def load_latest_signals():
+    if os.path.exists(LATEST_SIGNALS_FILE):
+        try:
+            with open(LATEST_SIGNALS_FILE, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Gagal load latest signals: {e}")
+    return {}
+
+latest_signals = load_latest_signals()
+
+def save_latest_signals():
+    try:
+        with open(LATEST_SIGNALS_FILE, "w") as f:
+            json.dump(latest_signals, f)
+    except Exception as e:
+        logger.error(f"Gagal save latest signals: {e}")
 
 
 def _round_qty(qty: float, symbol: str = "BTC-USDT") -> float:

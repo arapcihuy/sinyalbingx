@@ -116,6 +116,7 @@ def webhook():
     
     # ── Simpan Sinyal Terakhir untuk Keperluan Re-Entry ──
     order_manager.latest_signals[symbol] = data
+    order_manager.save_latest_signals()
 
     # ── Notifikasi Awal ke Telegram (Asynchronous) ──
     def send_notif_bg(text):

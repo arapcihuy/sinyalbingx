@@ -1,0 +1,13 @@
+{
+  "ETH-USDT": {
+    "secret": "Tr4d3BotBingX@2025!xK9",
+    "action": "BUY",
+    "symbol": "ETH-USDT",
+    "price": 2373.78,
+    "tp1": 2390.5762,
+    "tp2": 2407.3724,
+    "tp3": 2429.7673,
+    "tp4": 2474.5573,
+    "sl": 2306.5951
+  }
+}
