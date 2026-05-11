@@ -136,8 +136,8 @@ def webhook():
     
     if AUTO_ENTRY:
         try:
-            logger.info(f"⚡ Mode OTOMATIS aktif. Leverage: {CURRENT_LEVERAGE}x. Eksekusi...")
-            data["leverage"] = CURRENT_LEVERAGE
+            lev_from_signal = data.get("leverage", os.getenv("LEVERAGE", "10"))
+            logger.info(f"⚡ Mode OTOMATIS aktif. Leverage dari sinyal: {lev_from_signal}x. Eksekusi...")
             result = order_manager.execute_signal(data)
             
             # Notifikasi Sukses / Warning (Asynchronous)
