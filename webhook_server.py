@@ -254,6 +254,7 @@ def help_cmd(message):
         "• /market [KODE] - Cek harga koin. Contoh: `/market btc` atau `/market eth`.\n"
         "• /settings - Melihat pengaturan leverage dan mode trading saat ini.\n"
         "• /leverage - Mengubah leverage default melalui tombol.\n"
+        "• /tpmode - Mengganti mode TP (Scalping atau Trend).\n"
         "• /tpsl [HARGA_SL] - Memasang TP/SL otomatis untuk posisi manual.\n"
         "• /susul [KODE] - Re-entry otomatis menggunakan sinyal terakhir.\n"
         "• /report - Melihat ringkasan Profit/Loss (PnL) 24 jam terakhir.\n"
@@ -275,9 +276,9 @@ def settings_cmd(message):
         f"🤖 *Mode:* `{mode}`\n"
         f"⚖️ *Leverage:* `{current_settings.get('leverage')}x`\n"
         f"💰 *Risk per Trade:* `{risk}% dari saldo`\n"
-        f"🎯 *Mode TP/SL:* `{os.getenv('TP_SL_MODE', 'pinescript')}`\n"
+        f"🎯 *Mode TP:* `{ 'Scalping (TP1 Only)' if current_settings.get('tp_mode') == 'tp1_only' else 'Trend (Multi-TP)' }`\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
-        "Gunakan /leverage untuk mengubah."
+        "Gunakan /leverage atau /tpmode untuk mengubah."
     )
     bot.send_message(message.chat.id, msg, parse_mode="Markdown")
 
@@ -406,15 +407,18 @@ def status_cmd(message):
         positions = bx.get_open_positions()
         logger.info(f"✅ {len(positions)} posisi aktif ditemukan")
         
-        # Ambil leverage dari file settings (bukan global variable)
+        # Ambil leverage dan TP mode dari file settings
         current_settings = settings_manager.load_settings()
         leverage_display = current_settings.get("leverage", 40)
+        tp_mode = current_settings.get("tp_mode", "tp1_only")
+        tp_mode_display = "Scalping (TP1 Only) 🎯" if tp_mode == "tp1_only" else "Trend (Multi-TP) 🚀"
         
         status_msg = f"<b>📊 [ SYSTEM STATUS ]</b>\n"
         status_msg += f"━━━━━━━━━━━━━━━━━━━━━\n"
         status_msg += f"💰 <b>Balance:</b> <code>{balance:.2f} USDT</code>\n"
         status_msg += f"⚙️ <b>Leverage:</b> <code>{leverage_display}x</code>\n"
-        status_msg += f"🤖 <b>Mode:</b> <code>AUTO-ENTRY (Active) 🟢</code>\n"
+        status_msg += f"🤖 <b>Mode Entry:</b> <code>AUTO-ENTRY 🟢</code>\n"
+        status_msg += f"🎯 <b>Mode TP:</b> <code>{tp_mode_display}</code>\n"
         status_msg += f"━━━━━━━━━━━━━━━━━━━━━\n\n"
         
         if not positions:
@@ -465,6 +469,43 @@ def status_cmd(message):
     except Exception as e:
         logger.error(f"❌ Gagal status: {e}")
         bot.send_message(message.chat.id, f"❌ <b>Gagal ambil status</b>\nError: <code>{str(e)}</code>", parse_mode="HTML")
+
+@bot.message_handler(commands=['tpmode'])
+def tpmode_cmd(message):
+    try:
+        current_settings = settings_manager.load_settings()
+        current_mode = current_settings.get("tp_mode", "tp1_only")
+        
+        # Jika user kirim "/tpmode 1" atau "/tpmode multi"
+        cmd_text = message.text.split()
+        if len(cmd_text) > 1:
+            val = cmd_text[1].lower()
+            if val in ['1', 'tp1', 'scalping']:
+                new_mode = "tp1_only"
+            elif val in ['4', 'multi', 'trend']:
+                new_mode = "multi_tp"
+            else:
+                bot.reply_to(message, "❌ Gunakan: `/tpmode 1` (TP1 Only) atau `/tpmode multi` (Semua TP)", parse_mode="Markdown")
+                return
+            
+            current_settings["tp_mode"] = new_mode
+            settings_manager.save_settings(current_settings)
+            msg = "🎯 *Mode TP1 Only Aktif* (Scalping)" if new_mode == "tp1_only" else "🚀 *Mode Multi-TP Aktif* (Trend)"
+            bot.send_message(message.chat.id, f"✅ *Setting Berhasil Diubah!*\n{msg}", parse_mode="Markdown")
+            return
+
+        # Menu Interaktif
+        markup = InlineKeyboardMarkup()
+        markup.add(
+            InlineKeyboardButton("🎯 TP1 ONLY (Scalping)", callback_data="settpmode:tp1_only"),
+            InlineKeyboardButton("🚀 MULTI-TP (Trend)", callback_data="settpmode:multi_tp")
+        )
+        
+        mode_text = "Scalping (TP1 Only)" if current_mode == "tp1_only" else "Trend (Multi-TP)"
+        bot.send_message(message.chat.id, f"⚙️ *PILIH MODE TAKE PROFIT*\nSaat ini: `{mode_text}`", reply_markup=markup, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error tpmode_cmd: {e}")
+        bot.reply_to(message, "❌ Gagal memuat menu TP mode.")
 
 @bot.message_handler(commands=['panic', 'closeall'])
 def panic_cmd(message):
@@ -561,11 +602,29 @@ def handle_callback(call):
         global CURRENT_LEVERAGE
         CURRENT_LEVERAGE = new_lev
         
-        # Simpan ke settings agar tidak hilang saat restart
-        settings_manager.save_settings({"leverage": CURRENT_LEVERAGE})
+        # Simpan ke settings agar tidak hilang saat restart (merge with existing)
+        current_settings = settings_manager.load_settings()
+        current_settings["leverage"] = CURRENT_LEVERAGE
+        settings_manager.save_settings(current_settings)
         
         bot.edit_message_text(
             f"✅ *Leverage Berhasil Diubah!*\nSekarang Bot menggunakan: `{CURRENT_LEVERAGE}x`",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            parse_mode="Markdown"
+        )
+        status_cmd(call.message)
+        return
+
+    if cmd == "settpmode":
+        new_mode = data_parts[1]
+        current_settings = settings_manager.load_settings()
+        current_settings["tp_mode"] = new_mode
+        settings_manager.save_settings(current_settings)
+        
+        mode_text = "🎯 *Mode TP1 Only Aktif* (Scalping)" if new_mode == "tp1_only" else "🚀 *Mode Multi-TP Aktif* (Trend)"
+        bot.edit_message_text(
+            f"✅ *Setting Berhasil Diubah!*\n{mode_text}",
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
             parse_mode="Markdown"

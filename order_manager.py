@@ -5,12 +5,18 @@ import json
 from dotenv import load_dotenv
 import bingx_client as bx
 import time
+import settings_manager
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Config
 RISK_PERCENT = float(os.getenv("RISK_PERCENT", "10"))
+
+# ── Mode TP: Baca dari settings_manager ──
+def get_tp_mode():
+    settings = settings_manager.load_settings()
+    return settings.get("tp_mode", "tp1_only") == "tp1_only"
 
 # State posisi aktif
 active_trade_data = {}
@@ -96,12 +102,13 @@ def execute_signal(data: dict) -> dict:
     # Filter hanya TP yang valid (price > 0 dan qty > 0)
     tp_levels = [t for t in tp_levels_raw if t["price"] > 0 and t["qty_pct"] > 0]
 
-    # ── Mode TP1 Only: hanya eksekusi TP1 dengan 100% quantity ──
-    # Ubah ke False jika ingin multi-TP aktif kembali
-    TP1_ONLY_MODE = True
-    if TP1_ONLY_MODE and tp_levels:
+    # ── Terapkan mode TP dari setting global ──
+    tp_mode_is_tp1_only = get_tp_mode()
+    if tp_mode_is_tp1_only and tp_levels:
         tp_levels = [{"price": tp_levels[0]["price"], "qty_pct": 100.0}]
-        logger.info(f"📌 Mode TP1 Only aktif → Close semua di TP1: {tp_levels[0]['price']}")
+        logger.info(f"📌 Mode TP1 Only → Close semua di TP1: {tp_levels[0]['price']}")
+    else:
+        logger.info(f"📊 Mode Multi-TP → {len(tp_levels)} level aktif")
 
     # ── Validasi wajib ──
     if sl_price == 0:

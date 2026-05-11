@@ -10,7 +10,8 @@ def load_settings():
     """Load settings from JSON file."""
     default_settings = {
         "leverage": int(os.getenv("LEVERAGE", 40)),
-        "auto_entry": os.getenv("AUTO_ENTRY", "false").lower() == "true"
+        "auto_entry": os.getenv("AUTO_ENTRY", "false").lower() == "true",
+        "tp_mode": "tp1_only" # Pilihan: tp1_only, multi_tp
     }
     
     if not os.path.exists(SETTINGS_FILE):
