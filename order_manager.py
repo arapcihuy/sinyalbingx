@@ -6,20 +6,16 @@ from dotenv import load_dotenv
 import bingx_client as bx
 import time
 
-# Load environment variables
 load_dotenv()
-
-# Konfigurasi Logging
 logger = logging.getLogger(__name__)
 
 # Config
 RISK_PERCENT = float(os.getenv("RISK_PERCENT", "10"))
-ORDER_TYPE = os.getenv("ORDER_TYPE", "MARKET")
 
-# State untuk menyimpan data TP/SL per symbol
+# State posisi aktif
 active_trade_data = {}
 
-# ── Simpan sinyal terakhir per koin untuk /susul ──
+# ── Sinyal terakhir untuk /susul ──
 LATEST_SIGNALS_FILE = "latest_signals.json"
 
 def load_latest_signals():
@@ -42,14 +38,14 @@ def save_latest_signals():
 
 
 def _round_qty(qty: float, symbol: str = "BTC-USDT") -> float:
-    """Bulatkan quantity ke step size yang valid sesuai symbol."""
     precisions = {"BTC-USDT": 4, "ETH-USDT": 3, "SOL-USDT": 2}
     p = precisions.get(symbol, 2)
     factor = 10 ** p
     return math.floor(qty * factor) / factor
 
-def calculate_quantity(balance: float, entry_price: float, leverage: int, symbol: str = "BTC-USDT") -> float:
-    """Hitung quantity berdasarkan RISK_PERCENT dari balance."""
+
+def calculate_quantity(balance: float, entry_price: float, leverage: int, symbol: str) -> float:
+    """Hitung total quantity dari RISK_PERCENT balance."""
     margin_amount = balance * (RISK_PERCENT / 100)
     qty = (margin_amount * leverage) / entry_price
     qty = _round_qty(qty, symbol)
@@ -57,11 +53,12 @@ def calculate_quantity(balance: float, entry_price: float, leverage: int, symbol
         raise ValueError(f"Quantity terlalu kecil: {qty}")
     return qty
 
+
 def execute_signal(data: dict) -> dict:
     """
-    Eksekusi sinyal dari TradingView.
-    Semua parameter (leverage, tp1, sl) diambil LANGSUNG dari payload sinyal.
-    Tidak ada override dari sisi bot.
+    Eksekusi sinyal dari TradingView / Tradentix Pro.
+    Semua parameter (leverage, tp1-4, qty_tp1-4, sl) dari payload sinyal.
+    Margin mode dari env (ISOLATED).
     """
     action = data.get("action", "").upper()
     symbol = data.get("symbol", "BTC-USDT")
@@ -69,41 +66,55 @@ def execute_signal(data: dict) -> dict:
     if action == "CLOSE":
         return _close_position(symbol)
 
-    pos_side = "LONG" if action in ["BUY", "LONG"] else "SHORT"
+    pos_side  = "LONG" if action in ["BUY", "LONG"] else "SHORT"
     order_side = "BUY" if pos_side == "LONG" else "SELL"
+    sl_side    = "SELL" if pos_side == "LONG" else "BUY"
 
     # ── Ambil semua parameter dari sinyal ──
     entry_price = float(data.get("price", 0)) or bx.get_current_price(symbol)
     sl_price    = float(data.get("sl", 0))
-    tp1_price   = float(data.get("tp1", 0))
     leverage    = int(data.get("leverage", int(os.getenv("LEVERAGE", 10))))
+
+    # Kumpulkan TP levels + qty dari sinyal
+    tp_levels = []
+    for i in range(1, 5):
+        tp_price = float(data.get(f"tp{i}", 0))
+        tp_qty_pct = float(data.get(f"qty_tp{i}", 0))
+        if tp_price > 0 and tp_qty_pct > 0:
+            tp_levels.append({"price": tp_price, "qty_pct": tp_qty_pct})
 
     # ── Validasi wajib ──
     if sl_price == 0:
         raise ValueError("❌ SL tidak ada di sinyal. Eksekusi dibatalkan.")
-    if tp1_price == 0:
-        raise ValueError("❌ TP1 tidak ada di sinyal. Eksekusi dibatalkan.")
+    if not tp_levels:
+        raise ValueError("❌ Tidak ada TP valid di sinyal. Eksekusi dibatalkan.")
     if entry_price == 0:
         raise ValueError("❌ Harga entry tidak valid.")
 
-    logger.info(f"📊 Signal: {symbol} {pos_side} | Leverage: {leverage}x | Entry: {entry_price} | TP1: {tp1_price} | SL: {sl_price}")
+    # Normalisasi total qty_pct agar selalu 100%
+    total_pct = sum(t["qty_pct"] for t in tp_levels)
+    for t in tp_levels:
+        t["qty_pct"] = t["qty_pct"] / total_pct  # 0.0 - 1.0
+
+    logger.info(f"📊 {symbol} {pos_side} | Leverage: {leverage}x | Entry: {entry_price} | SL: {sl_price}")
+    for i, t in enumerate(tp_levels, 1):
+        logger.info(f"   TP{i}: {t['price']} ({t['qty_pct']*100:.0f}%)")
 
     # ── Auto-Reversal: tutup posisi berlawanan jika ada ──
     existing_positions = bx.get_open_positions(symbol)
     for pos in existing_positions:
         if pos.get("positionSide") != pos_side:
-            logger.info(f"🔄 Reversal: Menutup posisi {pos.get('positionSide')} sebelum buka {pos_side}")
+            logger.info(f"🔄 Reversal: Tutup {pos.get('positionSide')} → buka {pos_side}")
             _close_position(symbol)
-            time.sleep(1.0)
+            time.sleep(1.5)
             break
 
-    # ── Hitung quantity dari RISK_PERCENT env ──
+    # ── Hitung total quantity ──
     balance = bx.get_balance()
     total_quantity = calculate_quantity(balance, entry_price, leverage, symbol)
+    logger.info(f"💰 Balance: {balance:.2f} USDT | Risk: {RISK_PERCENT}% | Total Qty: {total_quantity}")
 
-    logger.info(f"💰 Balance: {balance:.2f} USDT | Risk: {RISK_PERCENT}% | Qty: {total_quantity}")
-
-    # ── Set leverage & margin mode ISOLATED ──
+    # ── Set leverage & margin ISOLATED ──
     margin_mode = os.getenv("MARGIN_MODE", "ISOLATED").upper()
     bx.set_leverage(symbol, leverage, pos_side)
     bx.set_margin_type(symbol, margin_mode)
@@ -112,45 +123,60 @@ def execute_signal(data: dict) -> dict:
     order_res = bx.place_order(symbol, order_side, pos_side, total_quantity, "MARKET")
     if order_res.get("code") != 0:
         raise Exception(f"Gagal buka posisi: {order_res}")
-
     logger.info(f"✅ Posisi {pos_side} {symbol} terbuka | Qty: {total_quantity}")
 
-    # ── Pasang TP1 + SL dari sinyal ──
+    # ── Pasang SL + semua TP dengan qty split ──
     status_msg = "success"
-    time.sleep(1.5)  # Jeda agar order settle di BingX
+    time.sleep(1.5)  # Jeda agar posisi settle
 
     try:
-        sl_side = "SELL" if pos_side == "LONG" else "BUY"
-
-        # Pasang Stop Loss
+        # Pasang Stop Loss (full quantity)
         sl_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": symbol, "side": sl_side, "positionSide": pos_side,
             "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": total_quantity
         })
         if sl_res.get("code", 0) != 0:
             raise Exception(f"SL Ditolak: {sl_res.get('msg')}")
-        logger.info(f"🛑 SL terpasang di {sl_price}")
+        logger.info(f"🛑 SL terpasang di {sl_price} (qty: {total_quantity})")
 
-        # Pasang Take Profit 1 (hanya TP1)
-        tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
-            "symbol": symbol, "side": sl_side, "positionSide": pos_side,
-            "type": "TAKE_PROFIT_MARKET", "stopPrice": tp1_price, "quantity": total_quantity
-        })
-        if tp_res.get("code", 0) != 0:
-            raise Exception(f"TP1 Ditolak: {tp_res.get('msg')}")
-        logger.info(f"🎯 TP1 terpasang di {tp1_price}")
+        # Pasang setiap TP dengan quantity proporsional
+        remaining_qty = total_quantity
+        for i, tp in enumerate(tp_levels):
+            is_last = (i == len(tp_levels) - 1)
+
+            # TP terakhir pakai sisa qty agar tidak ada selisih pembulatan
+            if is_last:
+                tp_qty = remaining_qty
+            else:
+                tp_qty = _round_qty(total_quantity * tp["qty_pct"], symbol)
+                tp_qty = min(tp_qty, remaining_qty)
+
+            if tp_qty <= 0:
+                logger.warning(f"   TP{i+1}: qty 0, dilewati")
+                continue
+
+            tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
+                "symbol": symbol, "side": sl_side, "positionSide": pos_side,
+                "type": "TAKE_PROFIT_MARKET", "stopPrice": tp["price"], "quantity": tp_qty
+            })
+            if tp_res.get("code", 0) != 0:
+                raise Exception(f"TP{i+1} Ditolak: {tp_res.get('msg')}")
+
+            logger.info(f"🎯 TP{i+1} terpasang di {tp['price']} (qty: {tp_qty}, {tp['qty_pct']*100:.0f}%)")
+            remaining_qty = _round_qty(remaining_qty - tp_qty, symbol)
 
     except Exception as e:
         logger.error(f"⚠️ Posisi terbuka TAPI TP/SL gagal: {e}")
         status_msg = f"warning: TP/SL Gagal ({str(e)})"
 
-    # ── Simpan data posisi aktif ──
+    # ── Simpan state ──
     active_trade_data[symbol] = {
         "entry": entry_price,
-        "tps": [tp1_price],
+        "tps": [t["price"] for t in tp_levels],
         "sl": sl_price,
         "side": pos_side,
-        "leverage": leverage
+        "leverage": leverage,
+        "total_qty": total_quantity
     }
 
     return {
@@ -159,7 +185,7 @@ def execute_signal(data: dict) -> dict:
         "symbol": symbol,
         "action": action,
         "leverage": leverage,
-        "tp1": tp1_price,
+        "tp_levels": tp_levels,
         "sl": sl_price
     }
 
@@ -178,10 +204,9 @@ def apply_manual_tpsl(symbol: str, tp_price: float, sl_price: float) -> dict:
     entry_price = float(target_pos.get("avgPrice"))
     total_quantity = abs(float(target_pos.get("positionAmt")))
 
-    if sl_price == 0 or entry_price == 0 or tp_price == 0:
-        raise ValueError("Harga TP, SL, atau Entry tidak valid.")
+    if sl_price == 0 or tp_price == 0:
+        raise ValueError("Harga TP atau SL tidak valid.")
 
-    # Validasi arah
     if pos_side == "LONG" and sl_price >= entry_price:
         raise ValueError(f"SL ({sl_price}) harus di bawah Entry ({entry_price}) untuk LONG.")
     if pos_side == "SHORT" and sl_price <= entry_price:
@@ -191,7 +216,6 @@ def apply_manual_tpsl(symbol: str, tp_price: float, sl_price: float) -> dict:
     if pos_side == "SHORT" and tp_price >= entry_price:
         raise ValueError(f"TP ({tp_price}) harus di bawah Entry ({entry_price}) untuk SHORT.")
 
-    # Hapus TP/SL lama & pasang baru
     bx.cancel_all_orders(symbol)
     sl_side = "SELL" if pos_side == "LONG" else "BUY"
 
@@ -217,7 +241,6 @@ def apply_manual_tpsl(symbol: str, tp_price: float, sl_price: float) -> dict:
 
 
 def _close_position(symbol: str) -> dict:
-    """Tutup semua posisi untuk symbol tertentu."""
     positions = bx.get_open_positions(symbol)
     if not positions:
         return {"msg": "No active position"}
@@ -233,7 +256,6 @@ def _close_position(symbol: str) -> dict:
 
 
 def reentry_signal(symbol: str) -> dict:
-    """Re-entry berdasarkan sinyal terakhir jika masih valid."""
     if symbol not in latest_signals:
         raise ValueError(f"Tidak ada histori sinyal untuk {symbol}.")
 
@@ -241,7 +263,7 @@ def reentry_signal(symbol: str) -> dict:
     action = data.get("action", "").upper()
 
     if action == "CLOSE":
-        raise ValueError(f"Sinyal terakhir untuk {symbol} adalah CLOSE. Tidak bisa re-entry.")
+        raise ValueError(f"Sinyal terakhir untuk {symbol} adalah CLOSE.")
 
     current_price = bx.get_current_price(symbol)
     tp1 = float(data.get("tp1", 0))
@@ -250,7 +272,6 @@ def reentry_signal(symbol: str) -> dict:
     if sl == 0 or tp1 == 0:
         raise ValueError("Sinyal terakhir tidak punya TP1 atau SL valid.")
 
-    # Validasi harga saat ini masih dalam range yang aman
     if action in ["BUY", "LONG"]:
         if current_price >= tp1:
             raise ValueError(f"Terlambat: Harga ({current_price}) sudah di atas TP1 ({tp1}).")
@@ -262,10 +283,7 @@ def reentry_signal(symbol: str) -> dict:
         if current_price >= sl:
             raise ValueError(f"Berbahaya: Harga ({current_price}) sudah di atas SL ({sl}).")
 
-    # Cancel order lama jika ada
     bx.cancel_all_orders(symbol)
-
-    # Re-entry dengan harga market saat ini
     data["price"] = current_price
     logger.info(f"🔄 Re-Entry {symbol} di harga market {current_price}")
     return execute_signal(data)
@@ -273,8 +291,8 @@ def reentry_signal(symbol: str) -> dict:
 
 def monitor_and_sync_positions():
     """
-    Monitor sederhana: adopsi posisi yang tidak tercatat di memori bot.
-    Tidak ada trailing SL otomatis — biarkan BingX TP/SL yang handle.
+    Monitor ringan: adopsi posisi yang tidak tercatat di memori.
+    TP/SL sudah dipasang native di BingX — tidak perlu trailing dari bot.
     """
     try:
         positions = bx.get_open_positions()
@@ -286,11 +304,9 @@ def monitor_and_sync_positions():
             side   = pos["positionSide"]
             entry  = float(pos["avgPrice"])
             qty    = abs(float(pos["positionAmt"]))
-
             if qty == 0:
                 continue
 
-            # Jika posisi belum tercatat di bot, adopsi dari BingX
             if symbol not in active_trade_data:
                 orders_res = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
                 open_orders_raw = orders_res.get("data", [])
@@ -299,17 +315,21 @@ def monitor_and_sync_positions():
                 else:
                     open_orders = open_orders_raw if isinstance(open_orders_raw, list) else []
 
-                tp_orders = [o for o in open_orders if isinstance(o, dict) and "TAKE_PROFIT" in o.get("type", "")]
+                tp_orders = sorted(
+                    [o for o in open_orders if isinstance(o, dict) and "TAKE_PROFIT" in o.get("type", "")],
+                    key=lambda o: float(o.get("stopPrice", 0)),
+                    reverse=(side == "SHORT")
+                )
                 sl_orders = [o for o in open_orders if isinstance(o, dict) and "STOP" in o.get("type", "")]
 
-                tp_price = float(tp_orders[0]["stopPrice"]) if tp_orders else 0
-                sl_price = float(sl_orders[0]["stopPrice"]) if sl_orders else 0
+                tp_prices = [float(o["stopPrice"]) for o in tp_orders]
+                sl_price  = float(sl_orders[0]["stopPrice"]) if sl_orders else 0
 
                 active_trade_data[symbol] = {
-                    "entry": entry, "tps": [tp_price] if tp_price else [],
+                    "entry": entry, "tps": tp_prices,
                     "sl": sl_price, "side": side
                 }
-                logger.info(f"🛡️ Radar: Posisi {symbol} ({side}) diadopsi | TP1: {tp_price} | SL: {sl_price}")
+                logger.info(f"🛡️ Radar: {symbol} ({side}) diadopsi | TPs: {tp_prices} | SL: {sl_price}")
 
     except Exception as e:
         logger.error(f"Radar Error: {e}")

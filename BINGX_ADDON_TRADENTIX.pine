@@ -1,19 +1,26 @@
 // ================================================================
 // TAMBAHKAN KODE INI KE PALING BAWAH SCRIPT TRADENTIX PRO ANDA
-// (Versi Simple: Leverage dari sinyal, hanya TP1 + SL)
+// (Versi Full: Semua TP level + qty dari setting Tradentix Pro)
 // ================================================================
 
 // ── Webhook Secret ──
 bingx_secret = "Tr4d3BotBingX@2025!xK9"
 
 // ── JSON BUY ──
-// Kirim: action, symbol, price, leverage (dari setting Tradentix), tp1, sl
+// Kirim: action, symbol, price, leverage, tp1-4 + qty masing2, sl
 bingx_buy_msg = '{"secret":"' + bingx_secret + '",' +
      '"action":"BUY",' +
      '"symbol":"' + syminfo.basecurrency + '-USDT",' +
      '"price":' + str.tostring(math.round(close, 2)) + ',' +
      '"leverage":' + str.tostring(lev) + ',' +
      '"tp1":' + str.tostring(math.round(tpb1t, 2)) + ',' +
+     '"tp2":' + str.tostring(math.round(tpb2t, 2)) + ',' +
+     '"tp3":' + str.tostring(math.round(tpb3t, 2)) + ',' +
+     '"tp4":' + str.tostring(math.round(tpb4t, 2)) + ',' +
+     '"qty_tp1":' + str.tostring(qtytp1) + ',' +
+     '"qty_tp2":' + str.tostring(qtytp2) + ',' +
+     '"qty_tp3":' + str.tostring(qtytp3) + ',' +
+     '"qty_tp4":' + str.tostring(qtytp4) + ',' +
      '"sl":'  + str.tostring(math.round(slbt, 2)) + '}'
 
 // ── JSON SELL ──
@@ -23,31 +30,35 @@ bingx_sell_msg = '{"secret":"' + bingx_secret + '",' +
      '"price":' + str.tostring(math.round(close, 2)) + ',' +
      '"leverage":' + str.tostring(lev) + ',' +
      '"tp1":' + str.tostring(math.round(tps1t, 2)) + ',' +
+     '"tp2":' + str.tostring(math.round(tps2t, 2)) + ',' +
+     '"tp3":' + str.tostring(math.round(tps3t, 2)) + ',' +
+     '"tp4":' + str.tostring(math.round(tps4t, 2)) + ',' +
+     '"qty_tp1":' + str.tostring(qtytp1) + ',' +
+     '"qty_tp2":' + str.tostring(qtytp2) + ',' +
+     '"qty_tp3":' + str.tostring(qtytp3) + ',' +
+     '"qty_tp4":' + str.tostring(qtytp4) + ',' +
      '"sl":'  + str.tostring(math.round(slst, 2)) + '}'
 
 // ── JSON CLOSE ──
 bingx_close_msg = '{"secret":"' + bingx_secret + '","action":"CLOSE","symbol":"' + syminfo.basecurrency + '-USDT"}'
 
-// ── Variabel untuk mencegah SPAM Alert CLOSE ──
+// ── Anti-spam untuk CLOSE ──
 var bool close_sent = false
 
-// Reset status spam jika ada sinyal baru masuk
 if (buy and backtest and trendType and longside) or (sell and backtest and trendType and shortside)
     close_sent := false
 
-// ── Kirim alert ke webhook (Background Only) ──
+// ── Kirim alert ke webhook ──
 if buy and backtest and trendType and longside
     alert(bingx_buy_msg, alert.freq_once_per_bar_close)
 
 if sell and backtest and trendType and shortside
     alert(bingx_sell_msg, alert.freq_once_per_bar_close)
 
-// CLOSE hanya terpicu saat ada posisi LONG aktif dan kena SL/reverse, HANYA SEKALI
 if strategy.position_size > 0 and (sellsignal1 or low < slbt) and not close_sent
     alert(bingx_close_msg, alert.freq_once_per_bar_close)
     close_sent := true
 
-// CLOSE hanya terpicu saat ada posisi SHORT aktif dan kena SL/reverse, HANYA SEKALI
 if strategy.position_size < 0 and (buysignal1 or high > slst) and not close_sent
     alert(bingx_close_msg, alert.freq_once_per_bar_close)
     close_sent := true
