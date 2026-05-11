@@ -75,13 +75,26 @@ def execute_signal(data: dict) -> dict:
     sl_price    = float(data.get("sl", 0))
     leverage    = int(data.get("leverage", int(os.getenv("LEVERAGE", 10))))
 
-    # Kumpulkan TP levels + qty dari sinyal
-    tp_levels = []
+    # Kumpulkan TP levels dari sinyal
+    # Support 2 format:
+    # - Format baru: tp1+qty_tp1, tp2+qty_tp2, dst (dari Pine Script terbaru)
+    # - Format lama: hanya tp1 tanpa qty (qty otomatis dibagi rata)
+    tp_levels_raw = []
     for i in range(1, 5):
         tp_price = float(data.get(f"tp{i}", 0))
-        tp_qty_pct = float(data.get(f"qty_tp{i}", 0))
-        if tp_price > 0 and tp_qty_pct > 0:
-            tp_levels.append({"price": tp_price, "qty_pct": tp_qty_pct})
+        if tp_price > 0:
+            tp_qty_pct = float(data.get(f"qty_tp{i}", 0))
+            tp_levels_raw.append({"price": tp_price, "qty_pct": tp_qty_pct})
+
+    # Jika tidak ada qty_tp sama sekali → bagi rata ke semua TP yang ada
+    has_qty = any(t["qty_pct"] > 0 for t in tp_levels_raw)
+    if not has_qty and tp_levels_raw:
+        equal_pct = 100.0 / len(tp_levels_raw)
+        for t in tp_levels_raw:
+            t["qty_pct"] = equal_pct
+
+    # Filter hanya TP yang valid (price > 0 dan qty > 0)
+    tp_levels = [t for t in tp_levels_raw if t["price"] > 0 and t["qty_pct"] > 0]
 
     # ── Validasi wajib ──
     if sl_price == 0:
