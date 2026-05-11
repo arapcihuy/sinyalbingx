@@ -81,7 +81,8 @@ def execute_signal(data: dict) -> dict:
     total_quantity = calculate_quantity(balance, entry_price, sl_price, current_leverage, symbol)
     
     bx.set_leverage(symbol, current_leverage, pos_side)
-    bx.set_margin_type(symbol, "CROSSED")
+    margin_mode = os.getenv("MARGIN_MODE", "ISOLATED").upper()
+    bx.set_margin_type(symbol, margin_mode)
 
     order_res = bx.place_order(symbol, order_side, pos_side, total_quantity, "MARKET")
     
