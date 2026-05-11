@@ -465,9 +465,6 @@ def status_cmd(message):
     except Exception as e:
         logger.error(f"❌ Gagal status: {e}")
         bot.send_message(message.chat.id, f"❌ <b>Gagal ambil status</b>\nError: <code>{str(e)}</code>", parse_mode="HTML")
-    except Exception as e:
-        logger.error(f"Gagal status: {e}")
-        bot.send_message(message.chat.id, f"❌ *Gagal ambil status*\nError: `{str(e)}`", parse_mode="Markdown")
 
 @bot.message_handler(commands=['panic', 'closeall'])
 def panic_cmd(message):
