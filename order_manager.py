@@ -73,7 +73,7 @@ def execute_signal(data: dict) -> dict:
     # ── Ambil semua parameter dari sinyal ──
     entry_price = float(data.get("price", 0)) or bx.get_current_price(symbol)
     sl_price    = float(data.get("sl", 0))
-    leverage    = int(data.get("leverage", int(os.getenv("LEVERAGE", 10))))
+    leverage    = int(data.get("leverage", int(os.getenv("LEVERAGE", 20))))
 
     # Kumpulkan TP levels dari sinyal
     # Support 2 format:
