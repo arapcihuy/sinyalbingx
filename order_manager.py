@@ -96,6 +96,13 @@ def execute_signal(data: dict) -> dict:
     # Filter hanya TP yang valid (price > 0 dan qty > 0)
     tp_levels = [t for t in tp_levels_raw if t["price"] > 0 and t["qty_pct"] > 0]
 
+    # ── Mode TP1 Only: hanya eksekusi TP1 dengan 100% quantity ──
+    # Ubah ke False jika ingin multi-TP aktif kembali
+    TP1_ONLY_MODE = True
+    if TP1_ONLY_MODE and tp_levels:
+        tp_levels = [{"price": tp_levels[0]["price"], "qty_pct": 100.0}]
+        logger.info(f"📌 Mode TP1 Only aktif → Close semua di TP1: {tp_levels[0]['price']}")
+
     # ── Validasi wajib ──
     if sl_price == 0:
         raise ValueError("❌ SL tidak ada di sinyal. Eksekusi dibatalkan.")
