@@ -11,7 +11,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Config
-RISK_PERCENT = float(os.getenv("RISK_PERCENT", "10"))
+RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE_PERCENT", "2")) # Mau rugi berapa % dari total saldo per trade
 
 # ── Mode TP: Baca dari settings_manager ──
 def get_tp_mode():
@@ -50,13 +50,23 @@ def _round_qty(qty: float, symbol: str = "BTC-USDT") -> float:
     return math.floor(qty * factor) / factor
 
 
-def calculate_quantity(balance: float, entry_price: float, leverage: int, symbol: str) -> float:
-    """Hitung total quantity dari RISK_PERCENT balance."""
-    margin_amount = balance * (RISK_PERCENT / 100)
-    qty = (margin_amount * leverage) / entry_price
+def calculate_quantity_risk_based(balance: float, entry_price: float, sl_price: float, symbol: str) -> float:
+    """Hitung quantity berdasarkan nominal kerugian yang diinginkan (Risk per Trade)."""
+    if entry_price == sl_price:
+        return 0
+        
+    # Nominal USDT yang siap dirugikan (misal 2% dari $100 = $2)
+    risk_amount_usdt = balance * (RISK_PER_TRADE / 100)
+    
+    # Jarak SL dalam harga
+    price_diff = abs(entry_price - sl_price)
+    
+    # Qty = Risk USDT / Jarak Harga
+    qty = risk_amount_usdt / price_diff
+    
     qty = _round_qty(qty, symbol)
     if qty <= 0:
-        raise ValueError(f"Quantity terlalu kecil: {qty}")
+        raise ValueError(f"Quantity terlalu kecil untuk risk {RISK_PER_TRADE}%")
     return qty
 
 
@@ -136,10 +146,16 @@ def execute_signal(data: dict) -> dict:
             time.sleep(1.5)
             break
 
-    # ── Hitung total quantity ──
+    # ── Hitung total quantity berdasarkan RISK PER TRADE ──
     balance = bx.get_balance()
-    total_quantity = calculate_quantity(balance, entry_price, leverage, symbol)
-    logger.info(f"💰 Balance: {balance:.2f} USDT | Risk: {RISK_PERCENT}% | Total Qty: {total_quantity}")
+    try:
+        total_quantity = calculate_quantity_risk_based(balance, entry_price, sl_price, symbol)
+        logger.info(f"💰 Balance: {balance:.2f} USDT | Risk: {RISK_PER_TRADE}% (${balance * RISK_PER_TRADE / 100}) | Qty: {total_quantity}")
+    except Exception as e:
+        logger.warning(f"⚠️ Gagal hitung risk-based qty: {e}. Pakai fallback margin 5%.")
+        # Fallback jika SL terlalu dekat/jauh
+        margin_fallback = balance * 0.05
+        total_quantity = _round_qty((margin_fallback * leverage) / entry_price, symbol)
 
     # ── Set leverage & margin ISOLATED ──
     margin_mode = os.getenv("MARGIN_MODE", "ISOLATED").upper()
@@ -150,24 +166,32 @@ def execute_signal(data: dict) -> dict:
     order_res = bx.place_order(symbol, order_side, pos_side, total_quantity, "MARKET")
     if order_res.get("code") != 0:
         raise Exception(f"Gagal buka posisi: {order_res}")
-    logger.info(f"✅ Posisi {pos_side} {symbol} terbuka | Qty: {total_quantity}")
+    
+    # ── AMBIL QUANTITY AKTUAL (Fix Bug SL Ditolak) ──
+    time.sleep(1.5) # Jeda agar posisi settle di BingX
+    actual_pos = next((p for p in bx.get_open_positions(symbol) if p.get("positionSide") == pos_side), None)
+    
+    if not actual_pos:
+        raise Exception("Gagal verifikasi posisi yang baru dibuka.")
+        
+    actual_quantity = abs(float(actual_pos.get("positionAmt", total_quantity)))
+    logger.info(f"✅ Posisi {pos_side} {symbol} terbuka | Qty Aktual: {actual_quantity}")
 
     # ── Pasang SL + semua TP dengan qty split ──
     status_msg = "success"
-    time.sleep(1.5)  # Jeda agar posisi settle
-
+    
     try:
-        # Pasang Stop Loss (full quantity)
+        # Pasang Stop Loss (pakai actual_quantity)
         sl_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": symbol, "side": sl_side, "positionSide": pos_side,
-            "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": total_quantity
+            "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": actual_quantity
         })
         if sl_res.get("code", 0) != 0:
             raise Exception(f"SL Ditolak: {sl_res.get('msg')}")
-        logger.info(f"🛑 SL terpasang di {sl_price} (qty: {total_quantity})")
+        logger.info(f"🛑 SL terpasang di {sl_price} (qty: {actual_quantity})")
 
-        # Pasang setiap TP dengan quantity proporsional
-        remaining_qty = total_quantity
+        # Pasang setiap TP dengan quantity proporsional (pakai actual_quantity)
+        remaining_qty = actual_quantity
         for i, tp in enumerate(tp_levels):
             is_last = (i == len(tp_levels) - 1)
 
@@ -175,7 +199,7 @@ def execute_signal(data: dict) -> dict:
             if is_last:
                 tp_qty = remaining_qty
             else:
-                tp_qty = _round_qty(total_quantity * tp["qty_pct"], symbol)
+                tp_qty = _round_qty(actual_quantity * tp["qty_pct"], symbol)
                 tp_qty = min(tp_qty, remaining_qty)
 
             if tp_qty <= 0:

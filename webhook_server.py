@@ -267,7 +267,7 @@ def help_cmd(message):
 @bot.message_handler(commands=['settings', 'config'])
 def settings_cmd(message):
     current_settings = settings_manager.load_settings()
-    risk = os.getenv("RISK_PERCENT", "1.5")
+    risk = os.getenv("RISK_PER_TRADE_PERCENT", "2")
     mode = "Otomatis" if current_settings.get("auto_entry") else "Manual (Konfirmasi)"
     
     msg = (
@@ -275,7 +275,7 @@ def settings_cmd(message):
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"🤖 *Mode:* `{mode}`\n"
         f"⚖️ *Leverage:* `{current_settings.get('leverage')}x`\n"
-        f"💰 *Risk per Trade:* `{risk}% dari saldo`\n"
+        f"💰 *Risk per Trade:* `{risk}% dari total saldo` (kerugian saat SL)\n"
         f"🎯 *Mode TP:* `{ 'Scalping (TP1 Only)' if current_settings.get('tp_mode') == 'tp1_only' else 'Trend (Multi-TP)' }`\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         "Gunakan /leverage atau /tpmode untuk mengubah."
