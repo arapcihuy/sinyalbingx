@@ -369,19 +369,29 @@ def sync_missing_tpsl():
             if not has_tpsl:
                 logger.info(f"⚠️ {symbol} tidak punya TP/SL. Memasang via Sync...")
                 
-                # Ambil dari sinyal terakhir jika ada
+                # Ambil dari sinyal terakhir jika ada dan SIDE-nya cocok
                 latest = load_latest_signals()
-                if symbol in latest:
-                    sl_price = float(latest[symbol].get("sl", 0))
-                    tp_price = float(latest[symbol].get("tp1", 0))
+                signal = latest.get(symbol)
+                
+                # Cek apakah side sinyal cocok dengan side posisi
+                # (Sinyal BUY cocok dengan posisi LONG, SELL cocok dengan SHORT)
+                signal_action = signal.get("action", "").upper() if signal else ""
+                side_matches = (side == "LONG" and signal_action in ["BUY", "LONG"]) or \
+                               (side == "SHORT" and signal_action in ["SELL", "SHORT"])
+
+                if side_matches:
+                    sl_price = float(signal.get("sl", 0))
+                    tp_price = float(signal.get("tp1", 0))
+                    logger.info(f"🎯 Sync {symbol}: Menggunakan data sinyal yang cocok.")
                 else:
-                    # Estimasi aman jika data sinyal hilang
+                    # Estimasi aman jika data sinyal tidak cocok atau tidak ada
+                    logger.info(f"⚠️ Sync {symbol}: Arah sinyal tidak cocok, gunakan estimasi aman.")
                     if side == "LONG":
-                        sl_price = round(entry * 0.98, 2)
-                        tp_price = round(entry * 1.02, 2)
+                        sl_price = round(entry * 0.985, 2) # 1.5% SL
+                        tp_price = round(entry * 1.01, 2)  # 1% TP
                     else:
-                        sl_price = round(entry * 1.02, 2)
-                        tp_price = round(entry * 0.98, 2)
+                        sl_price = round(entry * 1.015, 2)
+                        tp_price = round(entry * 0.99, 2)
 
                 apply_manual_tpsl(symbol, tp_price, sl_price)
                 results.append(f"✅ {symbol}: TP/SL dipasang ({tp_price}/{sl_price})")
