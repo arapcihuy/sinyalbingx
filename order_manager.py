@@ -340,47 +340,55 @@ def reentry_signal(symbol: str) -> dict:
     return execute_signal(data)
 
 
-def monitor_and_sync_positions():
-    """
-    Monitor ringan: adopsi posisi yang tidak tercatat di memori.
-    TP/SL sudah dipasang native di BingX — tidak perlu trailing dari bot.
-    """
+def sync_missing_tpsl():
+    """Cek semua posisi aktif, jika ada yang tidak punya TP/SL, pasang otomatis."""
     try:
         positions = bx.get_open_positions()
         if not positions:
-            return
+            return "📭 Tidak ada posisi aktif untuk di-sync."
 
+        results = []
         for pos in positions:
             symbol = pos["symbol"]
-            side   = pos["positionSide"]
-            entry  = float(pos["avgPrice"])
-            qty    = abs(float(pos["positionAmt"]))
-            if qty == 0:
-                continue
+            side = pos["positionSide"]
+            amt = abs(float(pos["positionAmt"]))
+            entry = float(pos["avgPrice"])
+            
+            if amt == 0: continue
 
-            if symbol not in active_trade_data:
-                orders_res = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
-                open_orders_raw = orders_res.get("data", [])
-                if isinstance(open_orders_raw, dict):
-                    open_orders = open_orders_raw.get("orders", [])
+            # Cek order yang ada
+            orders_res = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
+            open_orders_raw = orders_res.get("data", [])
+            if isinstance(open_orders_raw, dict):
+                open_orders = open_orders_raw.get("orders", [])
+            else:
+                open_orders = open_orders_raw if isinstance(open_orders_raw, list) else []
+
+            has_tpsl = any("STOP" in o.get("type", "") or "TAKE_PROFIT" in o.get("type", "") for o in open_orders)
+            
+            if not has_tpsl:
+                logger.info(f"⚠️ {symbol} tidak punya TP/SL. Memasang via Sync...")
+                
+                # Ambil dari sinyal terakhir jika ada
+                latest = load_latest_signals()
+                if symbol in latest:
+                    sl_price = float(latest[symbol].get("sl", 0))
+                    tp_price = float(latest[symbol].get("tp1", 0))
                 else:
-                    open_orders = open_orders_raw if isinstance(open_orders_raw, list) else []
+                    # Estimasi aman jika data sinyal hilang
+                    if side == "LONG":
+                        sl_price = round(entry * 0.98, 2)
+                        tp_price = round(entry * 1.02, 2)
+                    else:
+                        sl_price = round(entry * 1.02, 2)
+                        tp_price = round(entry * 0.98, 2)
 
-                tp_orders = sorted(
-                    [o for o in open_orders if isinstance(o, dict) and "TAKE_PROFIT" in o.get("type", "")],
-                    key=lambda o: float(o.get("stopPrice", 0)),
-                    reverse=(side == "SHORT")
-                )
-                sl_orders = [o for o in open_orders if isinstance(o, dict) and "STOP" in o.get("type", "")]
+                apply_manual_tpsl(symbol, tp_price, sl_price)
+                results.append(f"✅ {symbol}: TP/SL dipasang ({tp_price}/{sl_price})")
+            else:
+                results.append(f"✔️ {symbol}: Sudah ada TP/SL.")
 
-                tp_prices = [float(o["stopPrice"]) for o in tp_orders]
-                sl_price  = float(sl_orders[0]["stopPrice"]) if sl_orders else 0
-
-                active_trade_data[symbol] = {
-                    "entry": entry, "tps": tp_prices,
-                    "sl": sl_price, "side": side
-                }
-                logger.info(f"🛡️ Radar: {symbol} ({side}) diadopsi | TPs: {tp_prices} | SL: {sl_price}")
-
+        return "\n".join(results)
     except Exception as e:
-        logger.error(f"Radar Error: {e}")
+        logger.error(f"Sync Error: {e}")
+        return f"❌ Sync Error: {str(e)}"

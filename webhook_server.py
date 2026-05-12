@@ -246,6 +246,15 @@ def market_price_cmd(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Gagal ambil harga: `{str(e)}`")
 
+@bot.message_handler(commands=['sync'])
+def sync_cmd(message):
+    bot.reply_to(message, "⏳ Sedang mensinkronisasi TP/SL semua posisi aktif...")
+    try:
+        res = order_manager.sync_missing_tpsl()
+        bot.send_message(message.chat.id, res)
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Gagal Sync: {e}")
+
 @bot.message_handler(commands=['help', 'bantuan'])
 def help_cmd(message):
     help_text = (
@@ -255,6 +264,7 @@ def help_cmd(message):
         "• /settings - Melihat pengaturan leverage dan mode trading saat ini.\n"
         "• /leverage - Mengubah leverage default melalui tombol.\n"
         "• /tpmode - Mengganti mode TP (Scalping atau Trend).\n"
+        "• /sync - Perbaiki TP/SL semua posisi yang sedang terbuka.\n"
         "• /tpsl [HARGA_SL] - Memasang TP/SL otomatis untuk posisi manual.\n"
         "• /susul [KODE] - Re-entry otomatis menggunakan sinyal terakhir.\n"
         "• /report - Melihat ringkasan Profit/Loss (PnL) 24 jam terakhir.\n"
