@@ -388,25 +388,22 @@ def status_cmd(message):
         
         # 2. Ambil Posisi
         positions = bx.get_open_positions()
-        logger.info(f"✅ {len(positions)} posisi aktif ditemukan")
-        
-        # Ambil leverage dan TP mode dari file settings
+        # Ambil TP mode dari file settings
         current_settings = settings_manager.load_settings()
-        leverage_display = current_settings.get("leverage", 40)
         tp_mode = current_settings.get("tp_mode", "tp1_only")
         tp_mode_display = "Scalping (TP1 Only) 🎯" if tp_mode == "tp1_only" else "Trend (Multi-TP) 🚀"
         
-        status_msg = f"<b>📊 [ SYSTEM STATUS ]</b>\n"
+        status_msg = f"<b>📊 [ SYSTEM DASHBOARD ]</b>\n"
         status_msg += f"━━━━━━━━━━━━━━━━━━━━━\n"
-        status_msg += f"💰 <b>Balance:</b> <code>{balance:.2f} USDT</code>\n"
-        status_msg += f"🤖 <b>Mode Entry:</b> <code>AUTO-ENTRY 🟢</code>\n"
-        status_msg += f"🎯 <b>Mode TP:</b> <code>{tp_mode_display}</code>\n"
+        status_msg += f"🏦 <b>Balance:</b> <code>{balance:.2f} USDT</code>\n"
+        status_msg += f"🤖 <b>Entry Mode:</b> <code>AUTO 🟢</code>\n"
+        status_msg += f"🎯 <b>TP Mode:</b> <code>{tp_mode_display}</code>\n"
         status_msg += f"━━━━━━━━━━━━━━━━━━━━━\n\n"
         
         if not positions:
             status_msg += "📭 <b>Posisi Aktif:</b> <code>None</code>"
         else:
-            status_msg += "<b>📝 Posisi Terbuka:</b>\n"
+            status_msg += "<b>📝 OPEN POSITIONS:</b>\n"
             for pos in positions:
                 sym = pos.get("symbol")
                 side = pos.get("positionSide")
@@ -417,33 +414,29 @@ def status_cmd(message):
                 avg_p = float(pos.get("avgPrice", 0))
                 mark_p = float(pos.get("markPrice", 0))
                 liq_p = float(pos.get("liquidationPrice", 0))
-                margin_raw = pos.get("initialMargin", pos.get("margin", 0))
-                margin = float(margin_raw)
+                margin = float(pos.get("initialMargin", pos.get("margin", 0)))
 
                 roe = (pnl / margin * 100) if margin > 0 else 0
-                pnl_icon = "📈" if pnl >= 0 else "📉"
+                pnl_icon = "💎" if pnl >= 0 else "🩸"
                 
                 def format_price(p):
                     return f"{float(p):.5f}".rstrip('0').rstrip('.') if '.' in f"{float(p):.5f}" else str(p)
 
-                status_msg += f"• <b>{sym}</b> ({side}) - <code>{pos_lev}x</code>\n"
-                status_msg += f"  💰 Margin: <code>{margin:.2f}</code> | Size: <code>{amt}</code>\n"
-                status_msg += f"  📥 Entry: <code>{format_price(avg_p)}</code> | Mark: <code>{format_price(mark_p)}</code>\n"
-                status_msg += f"  💀 Liq: <code>{format_price(liq_p)}</code>\n"
+                status_msg += f"🔸 <b>{sym}</b> ({side} {pos_lev}x)\n"
+                status_msg += f"   💰 Margin: <code>{margin:.2f}</code> | PnL: <b>{pnl:+.2f}</b> {pnl_icon}\n"
+                status_msg += f"   📥 Entry: <code>{format_price(avg_p)}</code> | Mark: <code>{format_price(mark_p)}</code>\n"
                 
-                # Cek data TPs dari memori bot
+                # Tambahkan info TPs & SL jika ada di memori
                 trade_data = order_manager.active_trade_data.get(sym, {})
                 tps = trade_data.get("tps", [])
-                if tps: 
-                    tps_str = ', '.join([format_price(tp) for tp in tps])
-                    status_msg += f"  🎯 TPs: <code>{tps_str}</code>\n"
-                
                 sl = trade_data.get("sl")
-                if sl:
-                    status_msg += f"  🛑 SL: <code>{format_price(sl)}</code>\n"
                 
-                status_msg += f"  💵 PnL: <b>{pnl:+.2f} USDT</b> (<code>{roe:+.2f}%</code>) {pnl_icon}\n"
-                status_msg += "━━━━━━━━━━━━━━━━━━━━━\n"
+                if tps: status_msg += f"   🎯 TPs: <code>{', '.join([format_price(tp) for tp in tps])}</code>\n"
+                if sl: status_msg += f"   🛑 SL: <code>{format_price(sl)}</code>\n"
+                
+                status_msg += f"   📈 ROE: <b>{roe:+.2f}%</b>\n"
+                status_msg += "─────────────────────\n"
+
                 
         logger.info("📤 Mengirim pesan HTML ke Telegram...")
         bot.send_message(message.chat.id, status_msg, parse_mode="HTML")
