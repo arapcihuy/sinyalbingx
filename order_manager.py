@@ -429,45 +429,62 @@ def monitor_and_sync_positions():
             
             if amt == 0: continue
 
-            # ── 1. Logika Breakeven ──
-            # Hanya bekerja jika bukan mode tp1_only (karena kalau tp1_only, posisi ditutup di TP1)
+            # ── 1. Logika Trailing SL (SL Ikut Naik) ──
+            # Hanya bekerja jika bukan mode tp1_only
             if not tp_mode_is_tp1_only:
                 state = active_trade_data.get(symbol)
-                if state and not state.get("be_triggered", False):
-                    tp1 = state.get("tp1")
+                if state:
+                    tps = state.get("tps", [])
                     entry_saved = state.get("entry")
+                    current_sl = state.get("sl")
+                    side_pos = state.get("side")
+                    is_long = (side_pos == "LONG")
                     
-                    if tp1 and entry_saved:
-                        is_long = (side == "LONG")
-                        # Cek apakah harga sudah menyentuh/melewati TP1
-                        hit_tp1 = (is_long and mark_price >= tp1) or (not is_long and mark_price <= tp1)
+                    # Tentukan target SL baru berdasarkan TP yang sudah terlewati
+                    # Urutan: Entry -> TP1 -> TP2 -> TP3
+                    new_sl_target = None
+                    
+                    # Cek TP mana saja yang sudah terlewati
+                    for i, tp_price in enumerate(tps):
+                        reached = (is_long and mark_price >= tp_price) or (not is_long and mark_price <= tp_price)
+                        if reached:
+                            # Jika kena TP1 -> SL ke Entry
+                            if i == 0:
+                                new_sl_target = entry_saved
+                            # Jika kena TP2 -> SL ke TP1, dst
+                            elif i > 0:
+                                new_sl_target = tps[i-1]
+                    
+                    # Jika ada target SL baru dan lebih menguntungkan dari SL saat ini
+                    if new_sl_target:
+                        is_better = (is_long and new_sl_target > current_sl) or (not is_long and new_sl_target < current_sl)
                         
-                        if hit_tp1:
-                            logger.info(f"🛡️ BREAKEVEN: {symbol} menyentuh TP1 ({tp1}). Menggeser SL ke Entry ({entry_saved})...")
+                        if is_better:
+                            logger.info(f"🚀 TRAILING SL: {symbol} menyentuh target baru. Geser SL ke {new_sl_target}...")
                             try:
-                                # Cancel SL lama & pasang baru di Entry
-                                bx.cancel_all_orders(symbol) # Sederhananya cancel semua, lalu re-pasang TP/SL
-                                # Re-pasang semua TP yang tersisa dan SL di Entry
+                                bx.cancel_all_orders(symbol)
                                 sl_side = "SELL" if is_long else "BUY"
                                 
-                                # Pasang SL baru di Entry
+                                # Pasang SL baru
                                 bx._request("POST", "/openApi/swap/v2/trade/order", {
                                     "symbol": symbol, "side": sl_side, "positionSide": side,
-                                    "type": "STOP_MARKET", "stopPrice": entry_saved, "quantity": amt
+                                    "type": "STOP_MARKET", "stopPrice": new_sl_target, "quantity": amt
                                 })
                                 
-                                # Pasang ulang TP2, TP3, TP4 jika ada
-                                for i, tp_price in enumerate(state.get("tps", [])):
-                                    if i == 0: continue # Lewati TP1 karena sudah kena
-                                    bx._request("POST", "/openApi/swap/v2/trade/order", {
-                                        "symbol": symbol, "side": sl_side, "positionSide": side,
-                                        "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price, "quantity": amt / (len(state.get("tps")) - 1)
-                                    })
+                                # Pasang ulang sisa TP
+                                for tp_price in tps:
+                                    # Pasang TP yang harganya masih di depan harga saat ini
+                                    is_ahead = (is_long and tp_price > mark_price) or (not is_long and tp_price < mark_price)
+                                    if is_ahead:
+                                        bx._request("POST", "/openApi/swap/v2/trade/order", {
+                                            "symbol": symbol, "side": sl_side, "positionSide": side,
+                                            "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price, "quantity": amt / len([t for t in tps if (is_long and t > mark_price) or (not is_long and t < mark_price)])
+                                        })
                                 
-                                state["be_triggered"] = True
-                                logger.info(f"✅ BREAKEVEN SUKSES untuk {symbol}")
+                                state["sl"] = new_sl_target
+                                logger.info(f"✅ TRAILING SL BERHASIL untuk {symbol} ke {new_sl_target}")
                             except Exception as e:
-                                logger.error(f"❌ Gagal eksekusi Breakeven {symbol}: {e}")
+                                logger.error(f"❌ Gagal eksekusi Trailing SL {symbol}: {e}")
 
             # ── 2. Sinkronisasi TP/SL (Layanan Kesehatan) ──
             # (Panggil fungsi sync internal secara diam-diam)
