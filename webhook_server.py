@@ -368,12 +368,9 @@ def reentry_cmd(message):
         )
         bot.send_message(message.chat.id, exec_msg, parse_mode="Markdown")
     except Exception as e:
-        bot.reply_to(message, "❌ Gagal memuat menu.")
-ons]
-        markup.add(*buttons)
-        bot.send_message(message.chat.id, f"⚙️ *PILIH LEVERAGE DEFAULT*\nLeverage saat ini: `{CURRENT_LEVERAGE}x`", reply_markup=markup, parse_mode="Markdown")
-    except Exception as e:
-        bot.reply_to(message, "❌ Gagal memuat menu leverage.")
+        logger.error(f"Gagal re-entry: {e}")
+        bot.reply_to(message, f"❌ *System Error:* `{str(e)}`", parse_mode="Markdown")
+
 
 @bot.message_handler(commands=['status', 'cek'])
 def status_cmd(message):
