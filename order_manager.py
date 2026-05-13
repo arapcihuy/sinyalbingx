@@ -6,12 +6,42 @@ from dotenv import load_dotenv
 import bingx_client as bx
 import time
 import settings_manager
+import requests
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Config
-RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE_PERCENT", "2")) # Mau rugi berapa % dari total saldo per trade
+RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE_PERCENT", "2"))
+TG_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TG_CHAT_ID = os.getenv("TG_CHAT_ID")
+
+def send_telegram_msg(msg: str):
+    """Kirim pesan ke Telegram secara langsung."""
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+        payload = {"chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "Markdown"}
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        logger.error(f"Gagal kirim notif Tele: {e}")
+
+def send_mini_report():
+    """Kirim ringkasan profit singkat."""
+    try:
+        incomes = bx.get_income_history(days=1)
+        pnl_24h = sum(float(inc.get("income", 0)) for inc in incomes if inc.get("incomeType") in ["REALIZED_PNL", "COMMISSION", "FUNDING_FEE"])
+        balance = bx.get_balance()
+        
+        msg = (
+            f"📊 *UPDATE PROFIT 24 JAM*\n"
+            f"💰 Net Profit: `{pnl_24h:+.2f} USDT`\n"
+            f"🏦 Balance: `{balance:.2f} USDT`"
+        )
+        send_telegram_msg(msg)
+    except:
+        pass
 
 # ── Mode TP: Baca dari settings_manager ──
 def get_tp_mode():
@@ -20,6 +50,7 @@ def get_tp_mode():
 
 # State posisi aktif
 active_trade_data = {}
+last_known_positions = {} # Untuk deteksi posisi tertutup
 
 # ── Sinyal terakhir untuk /susul ──
 LATEST_SIGNALS_FILE = "latest_signals.json"
@@ -483,12 +514,61 @@ def monitor_and_sync_positions():
                                 
                                 state["sl"] = new_sl_target
                                 logger.info(f"✅ TRAILING SL BERHASIL untuk {symbol} ke {new_sl_target}")
+                                
+                                # Notifikasi ke Telegram
+                                tp_index = tps.index(new_sl_target) if new_sl_target in tps else -1
+                                tp_name = f"TP{tp_index + 1}" if tp_index >= 0 else "Modal"
+                                
+                                notif_msg = (
+                                    f"🎯 *TARGET TERCAPAI: {symbol}*\n"
+                                    f"Harga menyentuh target, SL sekarang digeser ke: `{new_sl_target}` ({tp_name})\n\n"
+                                    f"💰 *Profit sedang diamankan...*"
+                                )
+                                send_telegram_msg(notif_msg)
+                                time.sleep(1)
+                                send_mini_report()
+                                
                             except Exception as e:
                                 logger.error(f"❌ Gagal eksekusi Trailing SL {symbol}: {e}")
 
-            # ── 2. Sinkronisasi TP/SL (Layanan Kesehatan) ──
-            # (Panggil fungsi sync internal secara diam-diam)
+            # ── 3. Sinkronisasi TP/SL (Layanan Kesehatan) ──
             _sync_single_position(pos)
+
+        # ── 4. Deteksi Posisi yang Hilang (Berhasil Close/SL/Liq) ──
+        current_symbols = {p["symbol"] for p in positions}
+        for sym in list(last_known_positions.keys()):
+            if sym not in current_symbols:
+                # Posisi tertutup!
+                old_pos = last_known_positions[sym]
+                logger.info(f"🚩 Posisi {sym} terdeteksi tertutup.")
+                
+                # Cek apakah ini Liquidation atau SL Biasa
+                # Kita bisa cek saldo atau income history terakhir
+                time.sleep(2) # Jeda sebentar agar income history update di bursa
+                incomes = bx.get_income_history(days=1)
+                liq_income = next((inc for inc in incomes if inc.get("symbol") == sym and inc.get("incomeType") == "LIQUIDATION"), None)
+                
+                if liq_income:
+                    loss = abs(float(liq_income.get("income", 0)))
+                    notif_close = (
+                        f"💀 *LIQUIDATION DETECTED: {sym}*\n"
+                        f"Sayang sekali, posisi kamu terkena likuidasi.\n"
+                        f"Nominal: `-{loss:.2f} USDT`"
+                    )
+                else:
+                    notif_close = (
+                        f"🏁 *POSISI CLOSED: {sym}*\n"
+                        f"Posisi telah ditutup (Target TP tercapai atau kena SL)."
+                    )
+                
+                send_telegram_msg(notif_close)
+                # Hapus dari memori
+                active_trade_data.pop(sym, None)
+                last_known_positions.pop(sym, None)
+        
+        # Update last_known_positions untuk loop berikutnya
+        for p in positions:
+            last_known_positions[p["symbol"]] = p
 
     except Exception as e:
         logger.error(f"Monitor Error: {e}")
