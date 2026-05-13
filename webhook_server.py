@@ -171,12 +171,16 @@ def webhook():
         markup.row(InlineKeyboardButton("❌ Batal", callback_data=f"cancel:{signal_id}"))
 
         msg = (
-            f"🔔 *SINYAL MASUK!*\n\n"
-            f"Action: `{action}`\n"
-            f"Symbol: `{symbol}`\n"
-            f"Price: `{data.get('price', 'MARKET')}`\n"
-            f"Leverage Sinyal: `{data.get('leverage', 'N/A')}x`\n\n"
-            f"Konfirmasi eksekusi:"
+            f"🔔 *SIGNAL RECEIVED!*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🪙 *Symbol:* `{symbol}`\n"
+            f"📊 *Action:* `{action}`\n"
+            f"💵 *Price:* `{data.get('price', 'MARKET')}`\n"
+            f"⚖️ *Leverage:* `{data.get('leverage', 'N/A')}x`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎯 *Targets:* `{len([k for k in data if 'tp' in k]) // 2} levels`\n"
+            f"🛡️ *Risk:* `2% per Trade`\n\n"
+            f"❓ *Eksekusi sekarang?*"
         )
         bot.send_message(TG_CHAT_ID, msg, parse_mode="Markdown", reply_markup=markup)
         return jsonify({"status": "pending", "message": "Menunggu konfirmasi Telegram", "id": signal_id}), 200

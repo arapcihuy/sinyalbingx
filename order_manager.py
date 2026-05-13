@@ -34,10 +34,12 @@ def send_mini_report():
         pnl_24h = sum(float(inc.get("income", 0)) for inc in incomes if inc.get("incomeType") in ["REALIZED_PNL", "COMMISSION", "FUNDING_FEE"])
         balance = bx.get_balance()
         
+        icon = "📈" if pnl_24h >= 0 else "📉"
         msg = (
             f"📊 *UPDATE PROFIT 24 JAM*\n"
-            f"💰 Net Profit: `{pnl_24h:+.2f} USDT`\n"
-            f"🏦 Balance: `{balance:.2f} USDT`"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💰 *Net PnL:* `{pnl_24h:+.2f} USDT` {icon}\n"
+            f"🏦 *Balance:* `{balance:.2f} USDT`"
         )
         send_telegram_msg(msg)
     except:
@@ -515,14 +517,17 @@ def monitor_and_sync_positions():
                                 state["sl"] = new_sl_target
                                 logger.info(f"✅ TRAILING SL BERHASIL untuk {symbol} ke {new_sl_target}")
                                 
-                                # Notifikasi ke Telegram
+                                # Notifikasi ke Telegram Premium Style
                                 tp_index = tps.index(new_sl_target) if new_sl_target in tps else -1
-                                tp_name = f"TP{tp_index + 1}" if tp_index >= 0 else "Modal"
+                                tp_name = f"TP{tp_index + 1}" if tp_index >= 0 else "Entry (Modal)"
                                 
                                 notif_msg = (
-                                    f"🎯 *TARGET TERCAPAI: {symbol}*\n"
-                                    f"Harga menyentuh target, SL sekarang digeser ke: `{new_sl_target}` ({tp_name})\n\n"
-                                    f"💰 *Profit sedang diamankan...*"
+                                    f"💎 *TARGET TERCAPAI: {symbol}*\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"🎯 *Target:* `{tp_name}` Terlewati!\n"
+                                    f"🛡️ *Trailing:* SL naik ke `{new_sl_target}`\n"
+                                    f"📈 *Status:* `Running in Profit`\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━"
                                 )
                                 send_telegram_msg(notif_msg)
                                 time.sleep(1)
@@ -551,14 +556,21 @@ def monitor_and_sync_positions():
                 if liq_income:
                     loss = abs(float(liq_income.get("income", 0)))
                     notif_close = (
-                        f"💀 *LIQUIDATION DETECTED: {sym}*\n"
-                        f"Sayang sekali, posisi kamu terkena likuidasi.\n"
-                        f"Nominal: `-{loss:.2f} USDT`"
+                        f"💀 *LIQUIDATION DETECTED*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🪙 *Symbol:* `{sym}`\n"
+                        f"📉 *Status:* `Liquidated`\n"
+                        f"💸 *Loss:* `-{loss:.2f} USDT`\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"⚠️ *Peringatan: Cek kembali margin kamu!*"
                     )
                 else:
                     notif_close = (
-                        f"🏁 *POSISI CLOSED: {sym}*\n"
-                        f"Posisi telah ditutup (Target TP tercapai atau kena SL)."
+                        f"🏁 *TRADE CLOSED: {sym}*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📉 *Status:* `Position Closed`\n"
+                        f"ℹ️ *Reason:* Target Hit atau Stop Loss\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━"
                     )
                 
                 send_telegram_msg(notif_close)
