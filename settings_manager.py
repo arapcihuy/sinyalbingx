@@ -9,7 +9,6 @@ SETTINGS_FILE = "bot_settings.json"
 def load_settings():
     """Load settings from JSON file."""
     default_settings = {
-        "leverage": int(os.getenv("LEVERAGE", 40)),
         "auto_entry": os.getenv("AUTO_ENTRY", "false").lower() == "true",
         "tp_mode": "tp1_only" # Pilihan: tp1_only, multi_tp
     }

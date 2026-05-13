@@ -223,11 +223,13 @@ def execute_signal(data: dict) -> dict:
     # ── Simpan state ──
     active_trade_data[symbol] = {
         "entry": entry_price,
+        "tp1": tp_levels[0]["price"] if tp_levels else None,
         "tps": [t["price"] for t in tp_levels],
         "sl": sl_price,
         "side": pos_side,
         "leverage": leverage,
-        "total_qty": total_quantity
+        "total_qty": total_quantity,
+        "be_triggered": False # Flag untuk breakeven
     }
 
     return {
@@ -402,3 +404,95 @@ def sync_missing_tpsl():
     except Exception as e:
         logger.error(f"Sync Error: {e}")
         return f"❌ Sync Error: {str(e)}"
+
+
+def monitor_and_sync_positions():
+    """
+    Fungsi utama yang dipanggil oleh background thread:
+    1. Sinkronisasi TP/SL yang hilang.
+    2. Logika Breakeven (Geser SL ke Entry saat kena TP1).
+    """
+    try:
+        positions = bx.get_open_positions()
+        if not positions:
+            return
+
+        # Ambil settings terbaru
+        tp_mode_is_tp1_only = get_tp_mode()
+
+        for pos in positions:
+            symbol = pos["symbol"]
+            side = pos["positionSide"]
+            amt = abs(float(pos["positionAmt"]))
+            entry = float(pos["avgPrice"])
+            mark_price = float(pos["markPrice"])
+            
+            if amt == 0: continue
+
+            # ── 1. Logika Breakeven ──
+            # Hanya bekerja jika bukan mode tp1_only (karena kalau tp1_only, posisi ditutup di TP1)
+            if not tp_mode_is_tp1_only:
+                state = active_trade_data.get(symbol)
+                if state and not state.get("be_triggered", False):
+                    tp1 = state.get("tp1")
+                    entry_saved = state.get("entry")
+                    
+                    if tp1 and entry_saved:
+                        is_long = (side == "LONG")
+                        # Cek apakah harga sudah menyentuh/melewati TP1
+                        hit_tp1 = (is_long and mark_price >= tp1) or (not is_long and mark_price <= tp1)
+                        
+                        if hit_tp1:
+                            logger.info(f"🛡️ BREAKEVEN: {symbol} menyentuh TP1 ({tp1}). Menggeser SL ke Entry ({entry_saved})...")
+                            try:
+                                # Cancel SL lama & pasang baru di Entry
+                                bx.cancel_all_orders(symbol) # Sederhananya cancel semua, lalu re-pasang TP/SL
+                                # Re-pasang semua TP yang tersisa dan SL di Entry
+                                sl_side = "SELL" if is_long else "BUY"
+                                
+                                # Pasang SL baru di Entry
+                                bx._request("POST", "/openApi/swap/v2/trade/order", {
+                                    "symbol": symbol, "side": sl_side, "positionSide": side,
+                                    "type": "STOP_MARKET", "stopPrice": entry_saved, "quantity": amt
+                                })
+                                
+                                # Pasang ulang TP2, TP3, TP4 jika ada
+                                for i, tp_price in enumerate(state.get("tps", [])):
+                                    if i == 0: continue # Lewati TP1 karena sudah kena
+                                    bx._request("POST", "/openApi/swap/v2/trade/order", {
+                                        "symbol": symbol, "side": sl_side, "positionSide": side,
+                                        "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price, "quantity": amt / (len(state.get("tps")) - 1)
+                                    })
+                                
+                                state["be_triggered"] = True
+                                logger.info(f"✅ BREAKEVEN SUKSES untuk {symbol}")
+                            except Exception as e:
+                                logger.error(f"❌ Gagal eksekusi Breakeven {symbol}: {e}")
+
+            # ── 2. Sinkronisasi TP/SL (Layanan Kesehatan) ──
+            # (Panggil fungsi sync internal secara diam-diam)
+            _sync_single_position(pos)
+
+    except Exception as e:
+        logger.error(f"Monitor Error: {e}")
+
+def _sync_single_position(pos):
+    """Internal sync untuk satu posisi agar tidak berisik di log."""
+    try:
+        symbol = pos["symbol"]
+        # Cek order yang ada
+        orders_res = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
+        open_orders = orders_res.get("data", {}).get("orders", [])
+        has_tpsl = any("STOP" in o.get("type", "") or "TAKE_PROFIT" in o.get("type", "") for o in open_orders)
+        
+        if not has_tpsl:
+            # Jika hilang, pasang TP1/SL dari sinyal terakhir
+            latest = load_latest_signals()
+            signal = latest.get(symbol)
+            if signal:
+                sl_price = float(signal.get("sl", 0))
+                tp_price = float(signal.get("tp1", 0))
+                if sl_price > 0 and tp_price > 0:
+                    apply_manual_tpsl(symbol, tp_price, sl_price)
+    except:
+        pass

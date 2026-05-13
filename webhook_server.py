@@ -10,7 +10,6 @@ import settings_manager
 
 # Load initial settings
 settings = settings_manager.load_settings()
-CURRENT_LEVERAGE = settings.get("leverage", 40)
 import threading
 import time
 
@@ -51,7 +50,6 @@ try:
         telebot.types.BotCommand("report", "Laporan profit 24 jam terakhir"),
         telebot.types.BotCommand("tpsl", "Pasang Auto TP/SL (Manual Entry)"),
         telebot.types.BotCommand("susul", "Re-entry sinyal terakhir jika belum kena TP1"),
-        telebot.types.BotCommand("leverage", "Ganti leverage (1x - 150x)"),
         telebot.types.BotCommand("panic", "Tutup semua posisi & cancel order"),
         telebot.types.BotCommand("reset", "Muat ulang menu bot"),
         telebot.types.BotCommand("help", "Panduan penggunaan bot"),
@@ -167,9 +165,7 @@ def webhook():
         
         markup = InlineKeyboardMarkup()
         markup.row(
-            InlineKeyboardButton("10x", callback_data=f"exec:10:{signal_id}"),
-            InlineKeyboardButton("20x", callback_data=f"exec:20:{signal_id}"),
-            InlineKeyboardButton("30x", callback_data=f"exec:30:{signal_id}")
+            InlineKeyboardButton("🚀 Eksekusi Market (Sesuai Sinyal)", callback_data=f"exec_signal:{signal_id}")
         )
         markup.row(InlineKeyboardButton("🛠️ Hanya Pasang TP/SL (No Entry)", callback_data=f"tpsl_only:{signal_id}"))
         markup.row(InlineKeyboardButton("❌ Batal", callback_data=f"cancel:{signal_id}"))
@@ -178,8 +174,9 @@ def webhook():
             f"🔔 *SINYAL MASUK!*\n\n"
             f"Action: `{action}`\n"
             f"Symbol: `{symbol}`\n"
-            f"Price: `{data.get('price', 'MARKET')}`\n\n"
-            f"Pilih Leverage untuk eksekusi:"
+            f"Price: `{data.get('price', 'MARKET')}`\n"
+            f"Leverage Sinyal: `{data.get('leverage', 'N/A')}x`\n\n"
+            f"Konfirmasi eksekusi:"
         )
         bot.send_message(TG_CHAT_ID, msg, parse_mode="Markdown", reply_markup=markup)
         return jsonify({"status": "pending", "message": "Menunggu konfirmasi Telegram", "id": signal_id}), 200
@@ -208,7 +205,6 @@ def clear_menu(message):
     
     welcome_msg = (
         "🤖 *BingX Auto-Trading Bot Aktif!*\n\n"
-        f"Leverage Default: `{CURRENT_LEVERAGE}x`\n"
         f"Mode Auto-Entry: `{auto_mode}`\n\n"
         "📜 *Perintah Utama:*\n"
         "• /status - Cek saldo & posisi\n"
@@ -261,8 +257,7 @@ def help_cmd(message):
         "📖 *PANDUAN BINGX BOT*\n\n"
         "• /status - Menampilkan saldo USDT dan detail posisi yang sedang terbuka.\n"
         "• /market [KODE] - Cek harga koin. Contoh: `/market btc` atau `/market eth`.\n"
-        "• /settings - Melihat pengaturan leverage dan mode trading saat ini.\n"
-        "• /leverage - Mengubah leverage default melalui tombol.\n"
+        "• /settings - Melihat konfigurasi bot saat ini.\n"
         "• /tpmode - Mengganti mode TP (Scalping atau Trend).\n"
         "• /sync - Perbaiki TP/SL semua posisi yang sedang terbuka.\n"
         "• /tpsl [HARGA_SL] - Memasang TP/SL otomatis untuk posisi manual.\n"
@@ -284,11 +279,10 @@ def settings_cmd(message):
         "⚙️ *KONFIGURASI BOT SAAT INI*\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"🤖 *Mode:* `{mode}`\n"
-        f"⚖️ *Leverage:* `{current_settings.get('leverage')}x`\n"
         f"💰 *Risk per Trade:* `{risk}% dari total saldo` (kerugian saat SL)\n"
         f"🎯 *Mode TP:* `{ 'Scalping (TP1 Only)' if current_settings.get('tp_mode') == 'tp1_only' else 'Trend (Multi-TP)' }`\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
-        "Gunakan /leverage atau /tpmode untuk mengubah."
+        "Gunakan /tpmode untuk mengubah."
     )
     bot.send_message(message.chat.id, msg, parse_mode="Markdown")
 
@@ -373,31 +367,9 @@ def reentry_cmd(message):
             f"Status: `{result.get('status')}`"
         )
         bot.send_message(message.chat.id, exec_msg, parse_mode="Markdown")
-        
-    except ValueError as ve:
-        bot.reply_to(message, f"❌ *Ditolak:* {str(ve)}", parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"Gagal re-entry: {e}")
-        bot.reply_to(message, f"❌ *System Error:* `{str(e)}`", parse_mode="Markdown")
-
-
-@bot.message_handler(commands=['leverage', 'setleverage'])
-def set_leverage_cmd(message):
-    global CURRENT_LEVERAGE
-    try:
-        args = message.text.split()
-        if len(args) == 2:
-            new_lev = int(args[1])
-            if 1 <= new_lev <= 150:
-                CURRENT_LEVERAGE = new_lev
-                # Simpan ke file agar tidak hilang saat restart
-                settings_manager.save_settings({"leverage": CURRENT_LEVERAGE})
-                bot.reply_to(message, f"✅ *Leverage Berhasil Diubah!*\nSekarang: `{CURRENT_LEVERAGE}x`", parse_mode="Markdown")
-                return
-
-        markup = InlineKeyboardMarkup(row_width=4)
-        options = [1, 2, 5, 10, 20, 30, 40, 50, 60, 75, 100, 125, 150]
-        buttons = [InlineKeyboardButton(f"{opt}x", callback_data=f"setlev:{opt}") for opt in options]
+        bot.reply_to(message, "❌ Gagal memuat menu.")
+ons]
         markup.add(*buttons)
         bot.send_message(message.chat.id, f"⚙️ *PILIH LEVERAGE DEFAULT*\nLeverage saat ini: `{CURRENT_LEVERAGE}x`", reply_markup=markup, parse_mode="Markdown")
     except Exception as e:
@@ -426,7 +398,6 @@ def status_cmd(message):
         status_msg = f"<b>📊 [ SYSTEM STATUS ]</b>\n"
         status_msg += f"━━━━━━━━━━━━━━━━━━━━━\n"
         status_msg += f"💰 <b>Balance:</b> <code>{balance:.2f} USDT</code>\n"
-        status_msg += f"⚙️ <b>Leverage:</b> <code>{leverage_display}x</code>\n"
         status_msg += f"🤖 <b>Mode Entry:</b> <code>AUTO-ENTRY 🟢</code>\n"
         status_msg += f"🎯 <b>Mode TP:</b> <code>{tp_mode_display}</code>\n"
         status_msg += f"━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -607,25 +578,6 @@ def handle_callback(call):
     data_parts = call.data.split(":")
     cmd = data_parts[0]
     
-    if cmd == "setlev":
-        new_lev = int(data_parts[1])
-        global CURRENT_LEVERAGE
-        CURRENT_LEVERAGE = new_lev
-        
-        # Simpan ke settings agar tidak hilang saat restart (merge with existing)
-        current_settings = settings_manager.load_settings()
-        current_settings["leverage"] = CURRENT_LEVERAGE
-        settings_manager.save_settings(current_settings)
-        
-        bot.edit_message_text(
-            f"✅ *Leverage Berhasil Diubah!*\nSekarang Bot menggunakan: `{CURRENT_LEVERAGE}x`",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            parse_mode="Markdown"
-        )
-        status_cmd(call.message)
-        return
-
     if cmd == "settpmode":
         new_mode = data_parts[1]
         current_settings = settings_manager.load_settings()
@@ -641,19 +593,30 @@ def handle_callback(call):
         )
         status_cmd(call.message)
         return
-        
-    if cmd == "exec":
-        leverage = int(data_parts[1])
-        sid = data_parts[2]
+
+    if cmd == "exec_signal":
+        sid = data_parts[1]
         if sid not in pending_signals:
             bot.answer_callback_query(call.id, "Sinyal kadaluarsa!")
             return
         signal = pending_signals.pop(sid)
-        signal["leverage"] = leverage
         bot.edit_message_text(f"⚙️ Memproses `{signal['action']}` `{signal['symbol']}`...", chat_id=call.message.chat.id, message_id=call.message.message_id)
         try:
             result = order_manager.execute_signal(signal)
-            bot.edit_message_text(f"✅ *ORDER BERHASIL!*\nSymbol: `{result['symbol']}`", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="Markdown")
+            bot.edit_message_text(f"✅ *ORDER BERHASIL!*\nSymbol: `{result['symbol']}`\nLeverage: `{result['leverage']}x`", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="Markdown")
+        except Exception as e:
+            bot.edit_message_text(f"❌ *GAGAL*\nError: `{str(e)}`", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="Markdown")
+
+    if cmd == "tpsl_only":
+        sid = data_parts[1]
+        if sid not in pending_signals:
+            bot.answer_callback_query(call.id, "Sinyal kadaluarsa!")
+            return
+        signal = pending_signals.pop(sid)
+        bot.edit_message_text(f"🛠️ Memasang TP/SL saja untuk `{signal['symbol']}`...", chat_id=call.message.chat.id, message_id=call.message.message_id)
+        try:
+            res = order_manager.apply_manual_tpsl(signal['symbol'], float(signal['tp1']), float(signal['sl']))
+            bot.edit_message_text(f"✅ *TP/SL BERHASIL DIPASANG!*\nSymbol: `{signal['symbol']}`", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="Markdown")
         except Exception as e:
             bot.edit_message_text(f"❌ *GAGAL*\nError: `{str(e)}`", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="Markdown")
 
