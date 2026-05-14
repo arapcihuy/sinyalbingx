@@ -482,11 +482,39 @@ def monitor_and_sync_positions():
         for pos in positions:
             symbol = pos["symbol"]
             side = pos["positionSide"]
-            amt = abs(float(pos["positionAmt"]))
-            entry = float(pos["avgPrice"])
-            mark_price = float(pos["markPrice"])
+            amt = abs(float(pos.get("positionAmt", 0)))
+            pnl = float(pos.get("unrealizedProfit", "0"))
+            entry = float(pos.get("avgPrice", 0))
+            mark_price = float(pos.get("markPrice", 0))
             
             if amt == 0: continue
+
+            # ── AUTO-RECOVERY: Jika bot lupa data trade ini ──
+            if symbol not in active_trade_data:
+                logger.info(f"🔍 Mencari data pemulihan untuk {symbol}...")
+                latest = load_latest_signals()
+                signal = latest.get(symbol)
+                if signal:
+                    # Pastikan sinyal cocok dengan arah posisi
+                    sig_action = signal.get("action", "").upper()
+                    if (side == "LONG" and sig_action in ["BUY", "LONG"]) or \
+                       (side == "SHORT" and sig_action in ["SELL", "SHORT"]):
+                        
+                        tps_rec = []
+                        for i in range(1, 5):
+                            p = float(signal.get(f"tp{i}", 0))
+                            if p > 0: tps_rec.append(p)
+                        
+                        active_trade_data[symbol] = {
+                            "entry": entry,
+                            "tp1": tps_rec[0] if tps_rec else None,
+                            "tps": tps_rec,
+                            "sl": float(signal.get("sl", 0)),
+                            "side": side,
+                            "be_triggered": False
+                        }
+                        save_active_trades()
+                        logger.info(f"✅ Auto-Recovery BERHASIL untuk {symbol}!")
 
             # ── 1. Logika Trailing SL (SL Ikut Naik) ──
             # Hanya bekerja jika bukan mode tp1_only

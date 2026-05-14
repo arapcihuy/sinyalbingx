@@ -10,7 +10,7 @@ def load_settings():
     """Load settings from JSON file."""
     default_settings = {
         "auto_entry": os.getenv("AUTO_ENTRY", "false").lower() == "true",
-        "tp_mode": "tp1_only" # Pilihan: tp1_only, multi_tp
+        "tp_mode": "multi_tp" # Default ke Trend (Multi-TP)
     }
     
     if not os.path.exists(SETTINGS_FILE):
