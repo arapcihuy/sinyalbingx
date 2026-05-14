@@ -431,16 +431,46 @@ def status_cmd(message):
                 status_msg += f"   💰 Margin: <code>{margin:.2f}</code> | PnL: <b>{pnl:+.2f}</b> {pnl_icon}\n"
                 status_msg += f"   📥 Entry: <code>{format_price(avg_p)}</code> | Mark: <code>{format_price(mark_p)}</code>\n"
                 
-                # Tambahkan info TPs & SL jika ada di memori
-                trade_data = order_manager.active_trade_data.get(sym, {})
-                tps = trade_data.get("tps", [])
-                sl = trade_data.get("sl")
-                
-                if tps: status_msg += f"   🎯 TPs: <code>{', '.join([format_price(tp) for tp in tps])}</code>\n"
-                if sl: status_msg += f"   🛑 SL: <code>{format_price(sl)}</code>\n"
-                
+                # Baca TP & SL langsung dari BingX (100% akurat, tidak bergantung memori)
+                try:
+                    import bingx_client as bx_local
+                    ord_res = bx_local._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": sym})
+                    raw_ord = ord_res.get("data", [])
+                    open_orders = raw_ord if isinstance(raw_ord, list) else raw_ord.get("orders", [])
+                    
+                    live_tps = sorted(
+                        [float(o.get("stopPrice", 0)) for o in open_orders if "TAKE_PROFIT" in o.get("type","") and float(o.get("stopPrice",0)) > 0],
+                        reverse=(side == "SHORT")
+                    )
+                    live_sl_list = [float(o.get("stopPrice", 0)) for o in open_orders if "STOP" in o.get("type","") and "TAKE" not in o.get("type","") and float(o.get("stopPrice",0)) > 0]
+                    live_sl = live_sl_list[0] if live_sl_list else None
+
+                    # Auto-update memori bot dari data live BingX
+                    if (live_tps or live_sl) and sym not in order_manager.active_trade_data:
+                        order_manager.active_trade_data[sym] = {
+                            "entry": avg_p, "tp1": live_tps[0] if live_tps else None,
+                            "tps": live_tps, "sl": live_sl or 0,
+                            "side": side, "be_triggered": False
+                        }
+                        order_manager.save_active_trades()
+
+                    if live_tps:
+                        status_msg += f"   🎯 TPs: <code>{', '.join([format_price(tp) for tp in live_tps])}</code>\n"
+                    if live_sl:
+                        status_msg += f"   🛑 SL: <code>{format_price(live_sl)}</code>\n"
+                    if not live_tps and not live_sl:
+                        status_msg += f"   ⚠️ <i>Tidak ada TP/SL aktif di bursa</i>\n"
+                except Exception as e_ord:
+                    # Fallback ke memori bot jika API gagal
+                    trade_data = order_manager.active_trade_data.get(sym, {})
+                    tps = trade_data.get("tps", [])
+                    sl = trade_data.get("sl")
+                    if tps: status_msg += f"   🎯 TPs: <code>{', '.join([format_price(tp) for tp in tps])}</code>\n"
+                    if sl: status_msg += f"   🛑 SL: <code>{format_price(sl)}</code>\n"
+
                 status_msg += f"   📈 ROE: <b>{roe:+.2f}%</b>\n"
                 status_msg += "─────────────────────\n"
+
 
                 
         logger.info("📤 Mengirim pesan HTML ke Telegram...")
