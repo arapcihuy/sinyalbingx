@@ -494,7 +494,8 @@ def monitor_and_sync_positions():
                 logger.info(f"🔍 Mencoba memulihkan ingatan {symbol} dari order aktif di bursa...")
                 try:
                     orders_res = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
-                    open_orders = orders_res.get("data", {}).get("orders", [])
+                    raw_data = orders_res.get("data", [])
+                    open_orders = raw_data if isinstance(raw_data, list) else raw_data.get("orders", [])
                     
                     tps_rec = []
                     sl_rec = 0.0
@@ -674,7 +675,8 @@ def _sync_single_position(pos):
         symbol = pos["symbol"]
         # Cek order yang ada
         orders_res = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
-        open_orders = orders_res.get("data", {}).get("orders", [])
+        raw_data = orders_res.get("data", [])
+        open_orders = raw_data if isinstance(raw_data, list) else raw_data.get("orders", [])
         
         # Cari apakah ada order TP atau SL
         has_tpsl = any(o.get("type") in ["STOP_MARKET", "TAKE_PROFIT_MARKET", "STOP", "TAKE_PROFIT"] for o in open_orders)
