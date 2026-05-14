@@ -489,32 +489,41 @@ def monitor_and_sync_positions():
             
             if amt == 0: continue
 
-            # ── AUTO-RECOVERY: Jika bot lupa data trade ini ──
+            # ── AUTO-RECOVERY TINGKAT DEWA: Baca langsung dari BingX ──
             if symbol not in active_trade_data:
-                logger.info(f"🔍 Mencari data pemulihan untuk {symbol}...")
-                latest = load_latest_signals()
-                signal = latest.get(symbol)
-                if signal:
-                    # Pastikan sinyal cocok dengan arah posisi
-                    sig_action = signal.get("action", "").upper()
-                    if (side == "LONG" and sig_action in ["BUY", "LONG"]) or \
-                       (side == "SHORT" and sig_action in ["SELL", "SHORT"]):
+                logger.info(f"🔍 Mencoba memulihkan ingatan {symbol} dari order aktif di bursa...")
+                try:
+                    orders_res = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
+                    open_orders = orders_res.get("data", {}).get("orders", [])
+                    
+                    tps_rec = []
+                    sl_rec = 0.0
+                    
+                    for o in open_orders:
+                        o_type = o.get("type", "")
+                        o_price = float(o.get("stopPrice", 0))
                         
-                        tps_rec = []
-                        for i in range(1, 5):
-                            p = float(signal.get(f"tp{i}", 0))
-                            if p > 0: tps_rec.append(p)
+                        if "TAKE_PROFIT" in o_type and o_price > 0:
+                            tps_rec.append(o_price)
+                        elif "STOP" in o_type and o_price > 0:
+                            sl_rec = o_price
+                            
+                    if tps_rec or sl_rec > 0:
+                        # Urutkan TP dari yang terdekat dengan harga entry
+                        tps_rec.sort(reverse=(side == "SHORT"))
                         
                         active_trade_data[symbol] = {
                             "entry": entry,
                             "tp1": tps_rec[0] if tps_rec else None,
                             "tps": tps_rec,
-                            "sl": float(signal.get("sl", 0)),
+                            "sl": sl_rec,
                             "side": side,
                             "be_triggered": False
                         }
                         save_active_trades()
-                        logger.info(f"✅ Auto-Recovery BERHASIL untuk {symbol}!")
+                        logger.info(f"✅ Auto-Recovery BERHASIL untuk {symbol}! Ditemukan {len(tps_rec)} TP dan SL di {sl_rec}")
+                except Exception as e:
+                    logger.error(f"❌ Gagal Auto-Recovery {symbol}: {e}")
 
             # ── 1. Logika Trailing SL (SL Ikut Naik) ──
             # Hanya bekerja jika bukan mode tp1_only
