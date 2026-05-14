@@ -50,8 +50,23 @@ def get_tp_mode():
     settings = settings_manager.load_settings()
     return settings.get("tp_mode", "tp1_only") == "tp1_only"
 
-# State posisi aktif
+# State posisi aktif (Sekarang Permanen)
+ACTIVE_TRADES_FILE = "active_trades.json"
 active_trade_data = {}
+
+def save_active_trades():
+    with open(ACTIVE_TRADES_FILE, "w") as f:
+        json.dump(active_trade_data, f)
+
+def load_active_trades():
+    global active_trade_data
+    if os.path.exists(ACTIVE_TRADES_FILE):
+        with open(ACTIVE_TRADES_FILE, "r") as f:
+            active_trade_data = json.load(f)
+
+# Load saat startup
+load_active_trades()
+
 last_known_positions = {} # Untuk deteksi posisi tertutup
 
 # ── Sinyal terakhir untuk /susul ──
@@ -274,6 +289,7 @@ def execute_signal(data: dict) -> dict:
         "total_qty": total_quantity,
         "be_triggered": False # Flag untuk breakeven
     }
+    save_active_trades()
 
     return {
         "status": status_msg,
@@ -525,6 +541,7 @@ def monitor_and_sync_positions():
                                         })
                                 
                                 state["sl"] = new_sl_target
+                                save_active_trades() # Simpan perubahan SL
                                 logger.info(f"✅ TRAILING SL BERHASIL untuk {symbol} ke {new_sl_target}")
                                 
                                 # Notifikasi ke Telegram Premium Style
@@ -545,6 +562,24 @@ def monitor_and_sync_positions():
                                 
                             except Exception as e:
                                 logger.error(f"❌ Gagal eksekusi Trailing SL {symbol}: {e}")
+
+            # ── 2. Deteksi Perubahan Quantity (Partial TP Hit di Bursa) ──
+            last_pos = last_known_positions.get(symbol)
+            if last_pos:
+                last_amt = abs(float(last_pos.get("positionAmt", 0)))
+                if amt < last_amt:
+                    # Quantity berkurang! Berarti ada TP yang kena di bursa
+                    diff = last_amt - amt
+                    notif_partial = (
+                        f"💰 *PARTIAL TP HIT: {symbol}*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"✅ Terjual: `{diff}` koin\n"
+                        f"📦 Sisa Posisi: `{amt}` koin\n"
+                        f"💵 PnL Saat Ini: `{pnl:+.2f} USDT`\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━"
+                    )
+                    send_telegram_msg(notif_partial)
+                    send_mini_report()
 
             # ── 3. Sinkronisasi TP/SL (Layanan Kesehatan) ──
             _sync_single_position(pos)
@@ -584,9 +619,10 @@ def monitor_and_sync_positions():
                     )
                 
                 send_telegram_msg(notif_close)
-                # Hapus dari memori
+                # Hapus dari memori & simpan
                 active_trade_data.pop(sym, None)
                 last_known_positions.pop(sym, None)
+                save_active_trades()
         
         # Update last_known_positions untuk loop berikutnya
         for p in positions:
@@ -602,16 +638,22 @@ def _sync_single_position(pos):
         # Cek order yang ada
         orders_res = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
         open_orders = orders_res.get("data", {}).get("orders", [])
-        has_tpsl = any("STOP" in o.get("type", "") or "TAKE_PROFIT" in o.get("type", "") for o in open_orders)
+        
+        # Cari apakah ada order TP atau SL
+        has_tpsl = any(o.get("type") in ["STOP_MARKET", "TAKE_PROFIT_MARKET", "STOP", "TAKE_PROFIT"] for o in open_orders)
         
         if not has_tpsl:
-            # Jika hilang, pasang TP1/SL dari sinyal terakhir
+            # Jika benar-benar tidak ada, bersihkan sisa orderan sampah (jika ada) baru pasang baru
+            logger.info(f"⚠️ {symbol} terdeteksi tanpa TP/SL. Sinkronisasi ulang...")
+            
             latest = load_latest_signals()
             signal = latest.get(symbol)
             if signal:
                 sl_price = float(signal.get("sl", 0))
                 tp_price = float(signal.get("tp1", 0))
                 if sl_price > 0 and tp_price > 0:
+                    bx.cancel_all_orders(symbol) # Bersihkan dulu biar nggak dobel
+                    time.sleep(0.5)
                     apply_manual_tpsl(symbol, tp_price, sl_price)
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"Sync Error {pos.get('symbol')}: {e}")

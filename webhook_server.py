@@ -39,6 +39,9 @@ DUPLICATE_SIGNAL_TTL = int(os.getenv("WEBHOOK_DEDUP_TTL_SECONDS", 45))
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 bot = telebot.TeleBot(TG_TOKEN, threaded=True)
+# Tingkatkan timeout agar tidak mudah 'Read timed out'
+telebot.apihelper.CONNECT_TIMEOUT = 60
+telebot.apihelper.READ_TIMEOUT = 120
 WEBHOOK_URL = os.getenv("WEBHOOK_URL") 
 # Set menu perintah bot
 try:
@@ -378,6 +381,8 @@ def reentry_cmd(message):
 
 @bot.message_handler(commands=['status', 'cek'])
 def status_cmd(message):
+    # Kirim pesan tunggu agar user tahu bot sedang bekerja
+    wait_msg = bot.reply_to(message, "⏳ *Sedang mengambil data dari BingX...*", parse_mode="Markdown")
     try:
         logger.info(f"⏳ Memulai pengambilan status untuk {message.chat.id}...")
         import bingx_client as bx
@@ -439,6 +444,7 @@ def status_cmd(message):
 
                 
         logger.info("📤 Mengirim pesan HTML ke Telegram...")
+        bot.delete_message(message.chat.id, wait_msg.message_id) # Hapus pesan tunggu
         bot.send_message(message.chat.id, status_msg, parse_mode="HTML")
         logger.info("✅ Pesan terhasil dikirim!")
     except Exception as e:
