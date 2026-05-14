@@ -488,7 +488,68 @@ def tpmode_cmd(message):
         logger.error(f"Error tpmode_cmd: {e}")
         bot.reply_to(message, "❌ Gagal memuat menu TP mode.")
 
+@bot.message_handler(commands=['set'])
+def set_tpsl_cmd(message):
+    """
+    Command darurat: /set SYMBOL SL TP1 TP2 TP3 TP4
+    Contoh: /set ETH-USDT 2300 2390 2420 2460 2500
+    Atau minimal: /set ETH-USDT 2300 2390
+    """
+    try:
+        parts = message.text.strip().split()
+        if len(parts) < 4:
+            bot.reply_to(message, 
+                "❌ <b>Format salah!</b>\n\n"
+                "Gunakan: <code>/set SYMBOL SL TP1 TP2 TP3 TP4</code>\n\n"
+                "Contoh:\n"
+                "<code>/set ETH-USDT 2300 2390 2420 2460</code>\n"
+                "<code>/set BTC-USDT 80000 82000 84000</code>",
+                parse_mode="HTML"
+            )
+            return
+        
+        symbol = parts[1].upper()
+        sl = float(parts[2])
+        tps = [float(p) for p in parts[3:]]
+        
+        # Cek apakah ada posisi aktif untuk symbol ini
+        import bingx_client as bx
+        positions = bx.get_open_positions(symbol)
+        if not positions:
+            bot.reply_to(message, f"❌ Tidak ada posisi aktif untuk <code>{symbol}</code>.", parse_mode="HTML")
+            return
+        
+        pos = positions[0]
+        side = pos.get("positionSide", "LONG")
+        entry = float(pos.get("avgPrice", 0))
+        
+        # Simpan ke memori bot
+        order_manager.active_trade_data[symbol] = {
+            "entry": entry,
+            "tp1": tps[0] if tps else None,
+            "tps": tps,
+            "sl": sl,
+            "side": side,
+            "be_triggered": False
+        }
+        order_manager.save_active_trades()
+        
+        tp_str = " | ".join([f"TP{i+1}: <code>{tp}</code>" for i, tp in enumerate(tps)])
+        bot.reply_to(message, 
+            f"✅ <b>Data berhasil disimpan!</b>\n\n"
+            f"🪙 Symbol: <code>{symbol}</code> ({side})\n"
+            f"🛑 SL: <code>{sl}</code>\n"
+            f"🎯 {tp_str}\n\n"
+            f"Ketik /status untuk verifikasi.",
+            parse_mode="HTML"
+        )
+        logger.info(f"✅ Manual /set: {symbol} SL={sl} TPs={tps}")
+    except Exception as e:
+        logger.error(f"Error set_tpsl_cmd: {e}")
+        bot.reply_to(message, f"❌ Error: <code>{str(e)}</code>", parse_mode="HTML")
+
 @bot.message_handler(commands=['panic', 'closeall'])
+
 def panic_cmd(message):
     try:
         result = _close_all_positions()
