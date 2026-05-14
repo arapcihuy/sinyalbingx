@@ -228,15 +228,23 @@ def execute_signal(data: dict) -> dict:
         for i, tp in enumerate(tp_levels):
             is_last = (i == len(tp_levels) - 1)
 
-            # TP terakhir pakai sisa qty agar tidak ada selisih pembulatan
+            # ── PROTEKSI MINIMUM ORDER SIZE (Fix TP Gagal) ──
+            # BingX butuh min order size (estimasi ~22 USDT untuk amannya)
+            MIN_ORDER_VAL = 22.0
+            tp_qty = _round_qty(actual_quantity * tp["qty_pct"], symbol)
+            tp_qty = min(tp_qty, remaining_qty)
+            
+            # Cek nilai order (qty * price)
+            if (tp_qty * tp["price"]) < MIN_ORDER_VAL and not is_last:
+                logger.warning(f"⚠️ TP{i+1} terlalu kecil (${tp_qty * tp['price']:.2f}). Menggabungkan ke TP berikutnya...")
+                # Tambahkan qty_pct ini ke TP berikutnya
+                tp_levels[i+1]["qty_pct"] += tp["qty_pct"]
+                continue
+
             if is_last:
                 tp_qty = remaining_qty
-            else:
-                tp_qty = _round_qty(actual_quantity * tp["qty_pct"], symbol)
-                tp_qty = min(tp_qty, remaining_qty)
 
             if tp_qty <= 0:
-                logger.warning(f"   TP{i+1}: qty 0, dilewati")
                 continue
 
             tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
@@ -244,9 +252,11 @@ def execute_signal(data: dict) -> dict:
                 "type": "TAKE_PROFIT_MARKET", "stopPrice": tp["price"], "quantity": tp_qty
             })
             if tp_res.get("code", 0) != 0:
-                raise Exception(f"TP{i+1} Ditolak: {tp_res.get('msg')}")
+                # Jika masih gagal karena size, abaikan dan lanjut (sisa akan ter-close di TP berikutnya)
+                logger.error(f"❌ TP{i+1} Gagal: {tp_res.get('msg')}")
+                continue
 
-            logger.info(f"🎯 TP{i+1} terpasang di {tp['price']} (qty: {tp_qty}, {tp['qty_pct']*100:.0f}%)")
+            logger.info(f"🎯 TP{i+1} terpasang di {tp['price']} (qty: {tp_qty})")
             remaining_qty = _round_qty(remaining_qty - tp_qty, symbol)
 
     except Exception as e:
