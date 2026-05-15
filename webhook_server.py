@@ -150,30 +150,33 @@ def webhook():
     AUTO_ENTRY = current_settings.get("auto_entry", False)
     
     if AUTO_ENTRY:
-        try:
-            lev_from_signal = data.get("leverage", os.getenv("LEVERAGE", "10"))
-            logger.info(f"⚡ Mode OTOMATIS aktif. Leverage dari sinyal: {lev_from_signal}x. Eksekusi...")
-            result = order_manager.execute_signal(data)
-            
-            # Notifikasi Sukses / Warning (Asynchronous)
-            status_text = "BERHASIL"
-            if "warning" in result.get("status", ""):
-                status_text = "BERHASIL (⚠️ TP/SL GAGAL)"
-            
-            exec_msg = (
-                f"⚡ *EKSEKUSI OTOMATIS {status_text}*\n"
-                f"Symbol: `{symbol}`\n"
-                f"Action: `{action}`\n"
-                f"Qty: `{result.get('total_quantity', 'N/A')}`\n"
-                f"Status: `{result.get('status')}`"
-            )
-            threading.Thread(target=send_notif_bg, args=(exec_msg,), daemon=True).start()
-            return jsonify({"status": "success", "message": status_text}), 200
-        except Exception as e:
-            logger.error(f"❌ Gagal eksekusi otomatis: {e}")
-            fail_msg = f"❌ *GAGAL EKSEKUSI OTOMATIS!*\n\nError: `{str(e)}`"
-            threading.Thread(target=send_notif_bg, args=(fail_msg,), daemon=True).start()
-            return jsonify({"error": str(e)}), 500
+        def execute_bg(signal_data):
+            try:
+                lev_from_signal = signal_data.get("leverage", os.getenv("LEVERAGE", "10"))
+                logger.info(f"⚡ Mode OTOMATIS aktif. Eksekusi {signal_data.get('symbol')}...")
+                result = order_manager.execute_signal(signal_data)
+                
+                # Notifikasi Sukses / Warning
+                status_text = "BERHASIL"
+                if "warning" in result.get("status", ""):
+                    status_text = "BERHASIL (⚠️ TP/SL GAGAL)"
+                
+                exec_msg = (
+                    f"⚡ *EKSEKUSI OTOMATIS {status_text}*\n"
+                    f"Symbol: `{signal_data.get('symbol')}`\n"
+                    f"Action: `{signal_data.get('action')}`\n"
+                    f"Qty: `{result.get('total_quantity', 'N/A')}`\n"
+                    f"Status: `{result.get('status')}`"
+                )
+                bot.send_message(TG_CHAT_ID, exec_msg, parse_mode="Markdown")
+            except Exception as e:
+                logger.error(f"❌ Gagal eksekusi otomatis: {e}")
+                fail_msg = f"❌ *GAGAL EKSEKUSI OTOMATIS!*\n\nError: `{str(e)}`"
+                bot.send_message(TG_CHAT_ID, fail_msg, parse_mode="Markdown")
+
+        # Jalankan eksekusi di background agar webhook TradingView langsung merespon (Anti-Timeout)
+        threading.Thread(target=execute_bg, args=(data,), daemon=True).start()
+        return jsonify({"status": "processing", "message": "Eksekusi berjalan di background"}), 200
 
     # ── Jika Mode Otomatis Mati, Minta Konfirmasi Telegram ──
     try:

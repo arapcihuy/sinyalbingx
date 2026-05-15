@@ -268,8 +268,8 @@ def execute_signal(data: dict) -> dict:
             is_last = (i == len(tp_levels) - 1)
 
             # ── PROTEKSI MINIMUM ORDER SIZE (Fix TP Gagal) ──
-            # BingX butuh min order size (estimasi ~22 USDT untuk amannya)
-            MIN_ORDER_VAL = 22.0
+            # BingX butuh min order size (biasanya 5 USDT, kita set 5.5 USDT untuk aman)
+            MIN_ORDER_VAL = 5.5
             tp_qty = _round_qty(actual_quantity * tp["qty_pct"], symbol)
             tp_qty = min(tp_qty, remaining_qty)
             
