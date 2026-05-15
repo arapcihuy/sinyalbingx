@@ -103,6 +103,20 @@ def webhook():
     action = data.get("action", "").upper()
     symbol = data.get("symbol", "BTC-USDT")
     
+    # --- Anti-Race Condition: Abaikan CLOSE jika ada ENTRY baru saja masuk ---
+    if action == "CLOSE":
+        time.sleep(1.5)  # Beri jeda agar ENTRY (BUY/SELL) yang masuk bersamaan tercatat duluan
+        current_time = time.time()
+        recent_entry = False
+        for k, t in processed_signals.items():
+            if symbol in k and ("BUY" in k or "SELL" in k):
+                if current_time - t < 15:  # Jika ada entry dalam 15 detik terakhir
+                    recent_entry = True
+                    break
+        if recent_entry:
+            logger.info(f"🚫 Sinyal CLOSE diabaikan karena berdekatan dengan ENTRY: {symbol}")
+            return jsonify({"status": "ignored", "reason": "close_ignored_due_to_recent_entry"}), 200
+            
     # 2. Deduplikasi Sinyal (Cegah double execution)
     signal_key = f"{symbol}_{action}_{data.get('price')}"
     now = time.time()
