@@ -139,6 +139,30 @@ def execute_signal(data: dict) -> dict:
     sl_price    = float(data.get("sl", 0))
     leverage    = int(data.get("leverage", int(os.getenv("LEVERAGE", 20))))
 
+    # --- VALIDASI & CLAMP SL (Anti-Liquidation & Anti-Invalid SL) ---
+    # 1. Pastikan SL tidak melampaui / sama dengan Entry
+    if pos_side == "LONG" and sl_price >= entry_price:
+        logger.warning(f"⚠️ SL ({sl_price}) >= Entry ({entry_price}) untuk LONG! Set ke default 1%...")
+        sl_price = entry_price * 0.99
+    elif pos_side == "SHORT" and sl_price <= entry_price:
+        logger.warning(f"⚠️ SL ({sl_price}) <= Entry ({entry_price}) untuk SHORT! Set ke default 1%...")
+        sl_price = entry_price * 1.01
+
+    # 2. Pastikan SL tidak melampaui Harga Likuidasi (Max 85% dari batas margin)
+    max_sl_distance_pct = (1.0 / leverage) * 0.85
+    if pos_side == "LONG":
+        min_safe_sl = entry_price * (1.0 - max_sl_distance_pct)
+        if sl_price < min_safe_sl:
+            logger.warning(f"⚠️ SL ({sl_price}) berisiko Likuidasi! Menyesuaikan ke {min_safe_sl}")
+            sl_price = min_safe_sl
+    else: # SHORT
+        max_safe_sl = entry_price * (1.0 + max_sl_distance_pct)
+        if sl_price > max_safe_sl:
+            logger.warning(f"⚠️ SL ({sl_price}) berisiko Likuidasi! Menyesuaikan ke {max_safe_sl}")
+            sl_price = max_safe_sl
+            
+    sl_price = round(sl_price, 4) # Bulatkan agar aman di API BingX
+
     # Kumpulkan TP levels dari sinyal
     # Support 2 format:
     # - Format baru: tp1+qty_tp1, tp2+qty_tp2, dst (dari Pine Script terbaru)
