@@ -20,3 +20,5 @@ bot_settings.json
 
 # Log files
 logs.*.log
+active_trades.json
+latest_signals.json

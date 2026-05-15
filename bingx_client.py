@@ -17,7 +17,11 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 BINGX_API_KEY = os.getenv("BINGX_API_KEY")
 BINGX_API_SECRET = os.getenv("BINGX_API_SECRET")
-BASE_URL = "https://open-api.bingx.com"
+
+# Gunakan fitur Demo Trading (VST) BingX jika USE_DEMO=True di .env
+USE_DEMO = os.getenv("USE_DEMO", "False").lower() in ["true", "1", "yes"]
+BASE_URL = "https://open-api-vst.bingx.com" if USE_DEMO else "https://open-api.bingx.com"
+
 _SESSION = requests.Session()
 _RETRY = Retry(
     total=3,
