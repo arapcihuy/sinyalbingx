@@ -550,91 +550,82 @@ def monitor_and_sync_positions():
                             "side": side,
                             "be_triggered": False
                         }
-                    # ── 2. Deteksi Perubahan Quantity (Partial TP Hit di Bursa) ──
-            # Kita bandingkan amt sekarang dengan amt yang tercatat sebelumnya
-            last_pos = last_known_positions.get(symbol)
-            partial_hit_detected = False
-            
-            if last_pos:
-                last_amt = abs(float(last_pos.get("positionAmt", 0)))
-                if amt < last_amt:
-                    # Quantity berkurang! Berarti ada TP yang kena di bursa
-                    diff = last_amt - amt
-                    partial_hit_detected = True
-                    
-                    notif_partial = (
-                        f"💰 *PARTIAL TP HIT: {symbol}*\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"✅ Terjual: `{diff}` koin\n"
-                        f"📦 Sisa Posisi: `{amt}` koin\n"
-                        f"💵 PnL Saat Ini: `{pnl:+.2f} USDT`\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━"
-                    )
-                    send_telegram_msg(notif_partial)
-                    logger.info(f"🎯 Partial TP Hit detected for {symbol} (Qty: {last_amt} -> {amt})")
+                        save_active_trades()
+                        logger.info(f"✅ Auto-Recovery BERHASIL untuk {symbol}! Ditemukan {len(tps_rec)} TP dan SL di {sl_rec}")
+                except Exception as e:
+                    logger.error(f"❌ Gagal Auto-Recovery {symbol}: {e}")
 
-            # ── 3. Logika Trailing SL (Geser SL Otomatis) ──
+            # ── 1. Logika Trailing SL (SL Ikut Naik) ──
+            # Hanya bekerja jika bukan mode tp1_only
             if not tp_mode_is_tp1_only:
                 state = active_trade_data.get(symbol)
                 if state:
                     tps = state.get("tps", [])
                     entry_saved = state.get("entry")
                     current_sl = state.get("sl", 0)
-                    side_pos = state.get("side", side)
+                    side_pos = state.get("side", side)  # Fallback ke positionSide dari bursa
                     is_long = (side_pos == "LONG")
 
                     # Tentukan target SL baru berdasarkan TP yang sudah terlewati
+                    # Urutan: Entry -> TP1 -> TP2 -> TP3 -> TP4
                     new_sl_target = None
-                    tp_hit_name = ""
+                    tp_hit_name = "Entry (Modal)"
 
-                    # Cek setiap level TP
+                    # Cek TP mana saja yang sudah terlewati harga saat ini
                     for i, tp_price in enumerate(tps):
-                        # Syarat kena: Harga lewat TP ATAU koin sudah berkurang (partial hit)
-                        price_reached = (is_long and mark_price >= tp_price) or (not is_long and mark_price <= tp_price)
-                        
-                        # Jika TP ke-i kena
-                        if price_reached:
+                        reached = (is_long and mark_price >= tp_price) or (not is_long and mark_price <= tp_price)
+                        if reached:
+                            # Jika kena TP1 -> SL ke Entry (Breakeven)
                             if i == 0:
                                 new_sl_target = entry_saved
-                                tp_hit_name = "TP1 (SL ke Entry)"
+                                tp_hit_name = "TP1 → SL ke Entry"
+                            # Jika kena TP2 -> SL ke TP1, dst
                             elif i > 0:
                                 new_sl_target = tps[i-1]
-                                tp_hit_name = f"TP{i+1} (SL ke TP{i})"
+                                tp_hit_name = f"TP{i+1} → SL ke TP{i}"
 
-                    # Validasi: Hanya geser jika target baru lebih menguntungkan (True Trailing)
-                    is_better = False
-                    if new_sl_target:
-                        if current_sl == 0:
-                            is_better = True
-                        else:
-                            is_better = (is_long and new_sl_target > current_sl) or \
-                                        (not is_long and new_sl_target < current_sl)
+                    # Cek apakah SL baru lebih menguntungkan dari SL sekarang
+                    # LONG: SL naik (lebih tinggi) = lebih baik
+                    # SHORT: SL turun (lebih rendah) = lebih baik
+                    if new_sl_target and current_sl != 0:
+                        is_better = (is_long and new_sl_target > current_sl) or \
+                                    (not is_long and new_sl_target < current_sl)
+                    elif new_sl_target and current_sl == 0:
+                        # Jika current_sl belum diketahui, anggap selalu perlu diupdate
+                        is_better = True
+                    else:
+                        is_better = False
 
                     if new_sl_target and is_better:
-                        logger.info(f"🚀 TRUE TRAILING: {symbol} maju ke {tp_hit_name}. Target SL: {new_sl_target}")
+                        logger.info(f"TRAILING SL: {symbol} target {tp_hit_name}!")
                         try:
-                            # Bersihkan dan pasang ulang dengan formasi baru
+                            # 1. Bersihkan order lama
                             bx.cancel_all_orders(symbol)
                             time.sleep(0.5)
                             
                             sl_side = "SELL" if is_long else "BUY"
                             
-                            # Pasang SL baru
+                            # 2. Pasang SL baru dengan pengecekan respon
                             sl_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
                                 "symbol": symbol, "side": sl_side, "positionSide": side,
                                 "type": "STOP_MARKET", "stopPrice": new_sl_target, "quantity": amt
                             })
                             
-                            # Pasang ulang sisa TP yang belum kena
+                            if sl_res.get("code") != 0:
+                                send_telegram_msg(f"WARNING: GAGAL GESER SL {symbol}\nBursa menolak SL baru: {sl_res.get('msg')}\nPosisi saat ini TANPA SL! Segera cek BingX.")
+                                logger.error(f"Gagal pasang Trailing SL {symbol}: {sl_res}")
+                            
+                            # 3. Pasang sisa TP (dengan proteksi ukuran order)
                             remaining_tps = [t for t in tps if (is_long and t > mark_price) or (not is_long and t < mark_price)]
                             if remaining_tps:
                                 MIN_VAL = 6.0
                                 current_value = amt * mark_price
+                                
                                 if (current_value / len(remaining_tps)) < MIN_VAL:
-                                    final_tp = remaining_tps[-1]
+                                    # Terlalu kecil, pasang 1 TP saja
                                     bx._request("POST", "/openApi/swap/v2/trade/order", {
                                         "symbol": symbol, "side": sl_side, "positionSide": side,
-                                        "type": "TAKE_PROFIT_MARKET", "stopPrice": final_tp, "quantity": amt
+                                        "type": "TAKE_PROFIT_MARKET", "stopPrice": remaining_tps[-1], "quantity": amt
                                     })
                                 else:
                                     qty_per_tp = _round_qty(amt / len(remaining_tps), symbol)
@@ -647,67 +638,65 @@ def monitor_and_sync_positions():
                             state["sl"] = new_sl_target
                             save_active_trades()
                             
-                            notif_msg = (
-                                f"💎 *TRUE TRAILING: {symbol}*\n"
-                                f"━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"🎯 *Target Terlewati:* `{tp_hit_name}`\n"
-                                f"🛡️ *SL Baru:* `{new_sl_target}`\n"
-                                f"📈 *Status:* `Safe Profit Secured`\n"
-                                f"━━━━━━━━━━━━━━━━━━━━━"
-                            )
-                            send_telegram_msg(notif_msg)
+                            send_telegram_msg(f"SUCCESS: TRAILING SL {symbol}\nTarget {tp_hit_name} tercapai!\nSL baru di {new_sl_target}")
+                            time.sleep(1)
                             send_mini_report()
                             
                         except Exception as e:
-                            logger.error(f"❌ Error Trailing {symbol}: {e}")
+                            logger.error(f"Error Trailing {symbol}: {e}")
 
-            # ── 4. Sinkronisasi Rutin ──
-            # (Hanya jika tidak ada TP/SL sama sekali)
-            last_known_positions[symbol] = pos
-            _sync_single_position(pos)��━━━━━━\n"
-                        f"✅ Terjual: `{diff}` koin\n"
-                        f"📦 Sisa Posisi: `{amt}` koin\n"
-                        f"💵 PnL Saat Ini: `{pnl:+.2f} USDT`\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━"
+            # --- 2. Deteksi Perubahan Quantity (Partial TP Hit di Bursa) ---
+            last_pos = last_known_positions.get(symbol)
+            if last_pos:
+                last_amt = abs(float(last_pos.get("positionAmt", 0)))
+                if amt < last_amt:
+                    # Quantity berkurang! Berarti ada TP yang kena di bursa
+                    diff = last_amt - amt
+                    notif_partial = (
+                        f"PARTIAL TP HIT: {symbol}\n"
+                        f"---------------------\n"
+                        f"Terjual: {diff} koin\n"
+                        f"Sisa Posisi: {amt} koin\n"
+                        f"PnL Saat Ini: {pnl:+.2f} USDT\n"
+                        f"---------------------\n"
                     )
                     send_telegram_msg(notif_partial)
                     send_mini_report()
 
-            # ── 3. Sinkronisasi TP/SL (Layanan Kesehatan) ──
+            # --- 3. Sinkronisasi TP/SL (Layanan Kesehatan) ---
             _sync_single_position(pos)
 
-        # ── 4. Deteksi Posisi yang Hilang (Berhasil Close/SL/Liq) ──
+        # --- 4. Deteksi Posisi yang Hilang (Berhasil Close/SL/Liq) ---
         current_symbols = {p["symbol"] for p in positions}
         for sym in list(last_known_positions.keys()):
             if sym not in current_symbols:
                 # Posisi tertutup!
                 old_pos = last_known_positions[sym]
-                logger.info(f"🚩 Posisi {sym} terdeteksi tertutup.")
+                logger.info(f"Position {sym} closed.")
                 
                 # Cek apakah ini Liquidation atau SL Biasa
-                # Kita bisa cek saldo atau income history terakhir
-                time.sleep(2) # Jeda sebentar agar income history update di bursa
+                time.sleep(2)
                 incomes = bx.get_income_history(days=1)
                 liq_income = next((inc for inc in incomes if inc.get("symbol") == sym and inc.get("incomeType") == "LIQUIDATION"), None)
                 
                 if liq_income:
                     loss = abs(float(liq_income.get("income", 0)))
                     notif_close = (
-                        f"💀 *LIQUIDATION DETECTED*\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🪙 *Symbol:* `{sym}`\n"
-                        f"📉 *Status:* `Liquidated`\n"
-                        f"💸 *Loss:* `-{loss:.2f} USDT`\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"⚠️ *Peringatan: Cek kembali margin kamu!*"
+                        f"!!! LIQUIDATION DETECTED !!!\n"
+                        f"---------------------\n"
+                        f"Symbol: {sym}\n"
+                        f"Status: Liquidated\n"
+                        f"Loss: -{loss:.2f} USDT\n"
+                        f"---------------------\n"
+                        f"WARNING: Check your margin!"
                     )
                 else:
                     notif_close = (
-                        f"🏁 *TRADE CLOSED: {sym}*\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"📉 *Status:* `Position Closed`\n"
-                        f"ℹ️ *Reason:* Target Hit atau Stop Loss\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━"
+                        f"TRADE CLOSED: {sym}\n"
+                        f"---------------------\n"
+                        f"Status: Position Closed\n"
+                        f"Reason: Target Hit or Stop Loss\n"
+                        f"---------------------\n"
                     )
                 
                 send_telegram_msg(notif_close)
@@ -737,7 +726,7 @@ def _sync_single_position(pos):
         
         if not has_tpsl:
             # Jika benar-benar tidak ada, bersihkan sisa orderan sampah (jika ada) baru pasang baru
-            logger.info(f"⚠️ {symbol} terdeteksi tanpa TP/SL. Sinkronisasi ulang...")
+            logger.info(f"Syncing TP/SL for {symbol}...")
             
             latest = load_latest_signals()
             signal = latest.get(symbol)
@@ -745,7 +734,7 @@ def _sync_single_position(pos):
                 sl_price = float(signal.get("sl", 0))
                 tp_price = float(signal.get("tp1", 0))
                 if sl_price > 0 and tp_price > 0:
-                    bx.cancel_all_orders(symbol) # Bersihkan dulu biar nggak dobel
+                    bx.cancel_all_orders(symbol)
                     time.sleep(0.5)
                     apply_manual_tpsl(symbol, tp_price, sl_price)
     except Exception as e:
