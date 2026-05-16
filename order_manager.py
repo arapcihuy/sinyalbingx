@@ -138,6 +138,11 @@ def execute_signal(data: dict) -> dict:
     entry_price = float(data.get("price", 0)) or bx.get_current_price(symbol)
     sl_price    = float(data.get("sl", 0))
     leverage    = int(data.get("leverage", int(os.getenv("LEVERAGE", 20))))
+    
+    # ── FORCE LEVERAGE MAKSIMAL 15x AGAR AMAN DARI LIKUIDASI ──
+    if leverage > 15:
+        logger.warning(f"⚠️ Leverage dari sinyal terlalu tinggi ({leverage}x). Memaksa turun ke 15x agar aman.")
+        leverage = 15
 
     # --- VALIDASI & CLAMP SL (Anti-Liquidation & Anti-Invalid SL) ---
     # 1. Pastikan SL tidak melampaui / sama dengan Entry
