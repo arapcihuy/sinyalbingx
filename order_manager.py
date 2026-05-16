@@ -562,30 +562,41 @@ def monitor_and_sync_positions():
                 if state:
                     tps = state.get("tps", [])
                     entry_saved = state.get("entry")
-                    current_sl = state.get("sl")
-                    side_pos = state.get("side")
+                    current_sl = state.get("sl", 0)
+                    side_pos = state.get("side", side)  # Fallback ke positionSide dari bursa
                     is_long = (side_pos == "LONG")
-                    
+
                     # Tentukan target SL baru berdasarkan TP yang sudah terlewati
-                    # Urutan: Entry -> TP1 -> TP2 -> TP3
+                    # Urutan: Entry -> TP1 -> TP2 -> TP3 -> TP4
                     new_sl_target = None
-                    
-                    # Cek TP mana saja yang sudah terlewati
+                    tp_hit_name = "Entry (Modal)"
+
+                    # Cek TP mana saja yang sudah terlewati harga saat ini
                     for i, tp_price in enumerate(tps):
                         reached = (is_long and mark_price >= tp_price) or (not is_long and mark_price <= tp_price)
                         if reached:
-                            # Jika kena TP1 -> SL ke Entry
+                            # Jika kena TP1 -> SL ke Entry (Breakeven)
                             if i == 0:
                                 new_sl_target = entry_saved
+                                tp_hit_name = "TP1 → SL ke Entry"
                             # Jika kena TP2 -> SL ke TP1, dst
                             elif i > 0:
                                 new_sl_target = tps[i-1]
-                    
-                    # Jika ada target SL baru dan lebih menguntungkan dari SL saat ini
-                    if new_sl_target:
-                        is_better = (is_long and new_sl_target > current_sl) or (not is_long and new_sl_target < current_sl)
-                        
-                        if is_better:
+                                tp_hit_name = f"TP{i+1} → SL ke TP{i}"
+
+                    # Cek apakah SL baru lebih menguntungkan dari SL sekarang
+                    # LONG: SL naik (lebih tinggi) = lebih baik
+                    # SHORT: SL turun (lebih rendah) = lebih baik
+                    if new_sl_target and current_sl != 0:
+                        is_better = (is_long and new_sl_target > current_sl) or \
+                                    (not is_long and new_sl_target < current_sl)
+                    elif new_sl_target and current_sl == 0:
+                        # Jika current_sl belum diketahui, anggap selalu perlu diupdate
+                        is_better = True
+                    else:
+                        is_better = False
+
+                    if new_sl_target and is_better:
                             logger.info(f"🚀 TRAILING SL: {symbol} menyentuh target baru. Geser SL ke {new_sl_target}...")
                             try:
                                 bx.cancel_all_orders(symbol)
