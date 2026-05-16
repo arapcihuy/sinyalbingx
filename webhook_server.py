@@ -420,6 +420,7 @@ def status_cmd(message):
         status_msg += f"🏦 <b>Balance:</b> <code>{balance:.2f} USDT</code>\n"
         status_msg += f"🤖 <b>Entry Mode:</b> <code>AUTO 🟢</code>\n"
         status_msg += f"🎯 <b>TP Mode:</b> <code>{tp_mode_display}</code>\n"
+        status_msg += f"⚖️ <b>Max Leverage:</b> <code>15x (Auto-Safe)</code>\n"
         status_msg += f"━━━━━━━━━━━━━━━━━━━━━\n\n"
         
         if not positions:
