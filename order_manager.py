@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 # Config
 RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE_PERCENT", "2"))
 TG_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TG_CHAT_ID = os.getenv("TG_CHAT_ID")
+TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 def send_telegram_msg(msg: str):
     """Kirim pesan ke Telegram secara langsung."""
