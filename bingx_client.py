@@ -301,9 +301,28 @@ def set_multi_tp_sl(
 
 
 def cancel_all_orders(symbol: str) -> dict:
-    """Batalkan semua open order untuk symbol."""
-    result = _request("DELETE", "/openApi/swap/v2/trade/allOpenOrders", {"symbol": symbol})
-    return result
+    """Batalkan semua open order (termasuk limit & trigger TP/SL) secara paksa."""
+    # 1. Batalkan semua limit orders bawaan
+    _request("DELETE", "/openApi/swap/v2/trade/allOpenOrders", {"symbol": symbol})
+    
+    # 2. Batalkan semua trigger orders (STOP_MARKET & TAKE_PROFIT_MARKET) secara manual
+    try:
+        orders_res = _request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
+        orders_raw = orders_res.get("data", [])
+        if isinstance(orders_raw, dict):
+            open_orders = orders_raw.get("orders", [])
+        else:
+            open_orders = orders_raw if isinstance(orders_raw, list) else []
+            
+        for order in open_orders:
+            order_id = order.get("orderId")
+            cancel_order(symbol, order_id)
+    except Exception as e:
+        import logging as _log
+        _logger = _log.getLogger(__name__)
+        _logger.error(f"⚠️ Gagal membersihkan trigger orders: {e}")
+        
+    return {"status": "success"}
 
 
 def cancel_order(symbol: str, order_id: str) -> dict:
