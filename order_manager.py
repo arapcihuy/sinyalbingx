@@ -134,68 +134,51 @@ def execute_signal(data: dict) -> dict:
     order_side = "BUY" if pos_side == "LONG" else "SELL"
     sl_side    = "SELL" if pos_side == "LONG" else "BUY"
 
-    # ── Ambil semua parameter dari sinyal ──
+    # ── Ambil parameter dasar dari sinyal ──
     entry_price = float(data.get("price", 0)) or bx.get_current_price(symbol)
-    sl_price    = float(data.get("sl", 0))
     leverage    = int(data.get("leverage", int(os.getenv("LEVERAGE", 20))))
     
-    # ── FORCE LEVERAGE MAKSIMAL 15x AGAR AMAN DARI LIKUIDASI ──
+    # ── FORCE LEVERAGE MAKSIMAL 15x AGAR AMAN ──
     if leverage > 15:
         logger.warning(f"⚠️ Leverage dari sinyal terlalu tinggi ({leverage}x). Memaksa turun ke 15x agar aman.")
         leverage = 15
 
-    # --- VALIDASI & CLAMP SL (Anti-Liquidation & Anti-Invalid SL) ---
-    # 1. Pastikan SL tidak melampaui / sama dengan Entry
-    if pos_side == "LONG" and sl_price >= entry_price:
-        logger.warning(f"⚠️ SL ({sl_price}) >= Entry ({entry_price}) untuk LONG! Set ke default 1%...")
-        sl_price = entry_price * 0.99
-    elif pos_side == "SHORT" and sl_price <= entry_price:
-        logger.warning(f"⚠️ SL ({sl_price}) <= Entry ({entry_price}) untuk SHORT! Set ke default 1%...")
-        sl_price = entry_price * 1.01
-
-    # 2. Pastikan SL tidak melampaui Harga Likuidasi (Max 85% dari batas margin)
-    max_sl_distance_pct = (1.0 / leverage) * 0.85
+    # --- 15M AUTOMATED HIGH R:R OVERRIDE SYSTEM ---
+    # Kita set SL sangat ketat (1.0% jarak harga) agar risiko sangat receh
+    sl_percent = 0.010 # 1.0% SL
+    
     if pos_side == "LONG":
-        min_safe_sl = entry_price * (1.0 - max_sl_distance_pct)
-        if sl_price < min_safe_sl:
-            logger.warning(f"⚠️ SL ({sl_price}) berisiko Likuidasi! Menyesuaikan ke {min_safe_sl}")
-            sl_price = min_safe_sl
-    else: # SHORT
-        max_safe_sl = entry_price * (1.0 + max_sl_distance_pct)
-        if sl_price > max_safe_sl:
-            logger.warning(f"⚠️ SL ({sl_price}) berisiko Likuidasi! Menyesuaikan ke {max_safe_sl}")
-            sl_price = max_safe_sl
-            
-    sl_price = round(sl_price, 4) # Bulatkan agar aman di API BingX
-
-    # Kumpulkan TP levels dari sinyal
-    # Support 2 format:
-    # - Format baru: tp1+qty_tp1, tp2+qty_tp2, dst (dari Pine Script terbaru)
-    # - Format lama: hanya tp1 tanpa qty (qty otomatis dibagi rata)
-    tp_levels_raw = []
-    for i in range(1, 5):
-        tp_price = float(data.get(f"tp{i}", 0))
-        if tp_price > 0:
-            tp_qty_pct = float(data.get(f"qty_tp{i}", 0))
-            tp_levels_raw.append({"price": tp_price, "qty_pct": tp_qty_pct})
-
-    # Jika tidak ada qty_tp sama sekali → bagi rata ke semua TP yang ada
-    has_qty = any(t["qty_pct"] > 0 for t in tp_levels_raw)
-    if not has_qty and tp_levels_raw:
-        equal_pct = 100.0 / len(tp_levels_raw)
-        for t in tp_levels_raw:
-            t["qty_pct"] = equal_pct
-
-    # Filter hanya TP yang valid (price > 0 dan qty > 0)
-    tp_levels = [t for t in tp_levels_raw if t["price"] > 0 and t["qty_pct"] > 0]
-
-    # ── Terapkan mode TP dari setting global ──
-    tp_mode_is_tp1_only = get_tp_mode()
-    if tp_mode_is_tp1_only and tp_levels:
-        tp_levels = [{"price": tp_levels[0]["price"], "qty_pct": 100.0}]
-        logger.info(f"📌 Mode TP1 Only → Close semua di TP1: {tp_levels[0]['price']}")
+        sl_price = entry_price * (1.0 - sl_percent)
     else:
-        logger.info(f"📊 Mode Multi-TP → {len(tp_levels)} level aktif")
+        sl_price = entry_price * (1.0 + sl_percent)
+        
+    sl_price = round(sl_price, 2)
+    sl_dist = abs(entry_price - sl_price)
+
+    # Kita set 4 target TP otomatis dengan rasio R:R tinggi (1:1, 1:1.8, 1:3, 1:5)
+    # TP1: 1.0x SL distance (Untuk memicu Breakeven / SL ke Entry)
+    # TP2: 1.8x SL distance
+    # TP3: 3.0x SL distance
+    # TP4: 5.0x SL distance (Cuan maksimal!)
+    # Setiap TP kebagian 25% dari total quantity
+    tp_levels = []
+    ratios = [1.0, 1.8, 3.0, 5.0]
+    
+    for ratio in ratios:
+        if pos_side == "LONG":
+            tp_price = entry_price + (sl_dist * ratio)
+        else:
+            tp_price = entry_price - (sl_dist * ratio)
+        
+        tp_levels.append({
+            "price": round(tp_price, 2),
+            "qty_pct": 25.0
+        })
+
+    logger.info(f"🛡️ AUTOMATIC HIGH R:R STRATEGY ACTIVATED")
+    logger.info(f"    Tight SL set at {sl_price} (Risk: 1.0%)")
+    for i, tp in enumerate(tp_levels):
+        logger.info(f"    TP{i+1} set at {tp['price']} (R:R 1:{ratios[i]})")
 
     # ── Validasi wajib ──
     if sl_price == 0:
