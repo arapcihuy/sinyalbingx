@@ -197,7 +197,7 @@ def execute_signal(data: dict) -> dict:
     for i, t in enumerate(tp_levels, 1):
         logger.info(f"   TP{i}: {t['price']} ({t['qty_pct']*100:.0f}%)")
 
-    # ── Auto-Reversal: tutup posisi berlawanan jika ada ──
+    # ── Auto-Reversal & Same-Direction Safeguard ──
     existing_positions = bx.get_open_positions(symbol)
     for pos in existing_positions:
         if pos.get("positionSide") != pos_side:
@@ -205,6 +205,13 @@ def execute_signal(data: dict) -> dict:
             _close_position(symbol)
             time.sleep(1.5)
             break
+        else:
+            logger.info(f"⚠️ Sinyal {pos_side} {symbol} diabaikan karena posisi {pos_side} sudah aktif.")
+            return {
+                "status": "ignored_already_open",
+                "total_quantity": abs(float(pos.get("positionAmt", 0))),
+                "msg": f"Posisi {pos_side} untuk {symbol} sudah aktif."
+            }
 
     # ── Hitung total quantity berdasarkan RISK PER TRADE ──
     balance = bx.get_balance()
