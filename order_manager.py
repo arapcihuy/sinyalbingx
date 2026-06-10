@@ -265,7 +265,6 @@ def execute_signal(data: dict) -> dict:
         logger.error(f"Gagal update balance live: {e}")
     
     import brain_engine
-    leverage = brain_engine.get_dynamic_leverage(balance)
     risk_pct = brain_engine.get_dynamic_risk_percent(balance)
     
     # TP/SL dari TV (ngikutin script TRADENTIX PRO)
@@ -285,6 +284,9 @@ def execute_signal(data: dict) -> dict:
         tp1_price = trade_plan["tp1"]
         tp2_price = trade_plan["tp2"]
         tp_prices = [tp1_price, tp2_price, 0.0, 0.0]
+    
+    # Hitung safe leverage agar SL berada sebelum likuidasi
+    leverage = brain_engine.get_safe_leverage(balance, entry_price, sl_price, pos_side, symbol)
     
     # Hitung kuantitas cerdas multi-TP dengan pengaman 50%
     calc_result = brain_engine.calculate_smart_multi_tp_qty(balance, entry_price, tp_prices, leverage, symbol)
@@ -351,8 +353,7 @@ def execute_signal(data: dict) -> dict:
         # 1. Pasang STOP LOSS Tunggal
         bx._request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": symbol, "side": sl_side, "positionSide": pos_side,
-            "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": qty,
-            "reduceOnly": "true"
+            "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": qty
         })
         
         # 2. Pasang Tiap Level TP yang Valid
@@ -361,8 +362,7 @@ def execute_signal(data: dict) -> dict:
             if tp_price > 0 and tp_qty > 0:
                 bx._request("POST", "/openApi/swap/v2/trade/order", {
                     "symbol": symbol, "side": sl_side, "positionSide": pos_side,
-                    "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price, "quantity": tp_qty,
-                    "reduceOnly": "true"
+                    "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price, "quantity": tp_qty
                 })
         return {"status": "success", "symbol": symbol, "qty": qty}
     else:
@@ -499,8 +499,7 @@ def check_and_update_trailing_sl():
                 # 2. Pasang SL baru
                 bx._request("POST", "/openApi/swap/v2/trade/order", {
                     "symbol": symbol, "side": sl_side, "positionSide": pos_side,
-                    "type": "STOP_MARKET", "stopPrice": new_sl, "quantity": qty,
-                    "reduceOnly": "true"
+                    "type": "STOP_MARKET", "stopPrice": new_sl, "quantity": qty
                 })
                 
                 # 3. Update state lokal

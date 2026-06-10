@@ -156,6 +156,46 @@ def get_dynamic_leverage(balance: float) -> int:
     return 10  # Default fallback
 
 
+def get_safe_leverage(balance: float, entry_price: float, sl_price: float, side: str, symbol: str) -> int:
+    """
+    Menghitung leverage aman agar Stop Loss terpicu sebelum Liquidation Price.
+    Menggunakan Safety Factor 0.90 (buffer 10% jarak aman dari likuidasi).
+    """
+    base_leverage = get_dynamic_leverage(balance)
+    
+    if sl_price <= 0 or entry_price <= 0 or entry_price == sl_price:
+        return base_leverage
+
+    mmr = 0.005  # Maintenance Margin Rate default BingX (0.5%)
+
+    try:
+        if side == "LONG":
+            if sl_price >= entry_price:
+                return base_leverage
+            ratio = sl_price / entry_price
+            denominator = 1.0 - ratio * (1.0 - mmr)
+            if denominator <= 0:
+                return base_leverage
+            l_max = 1.0 / denominator
+        else:  # SHORT
+            if sl_price <= entry_price:
+                return base_leverage
+            ratio = sl_price / entry_price
+            denominator = ratio * (1.0 + mmr) - 1.0
+            if denominator <= 0:
+                return base_leverage
+            l_max = 1.0 / denominator
+
+        safe_leverage = int(math.floor(l_max * 0.9))
+        final_leverage = max(1, min(base_leverage, safe_leverage))
+        logger.info(f"🛡️ AUDIT LEVERAGE: Base {base_leverage}x | L_max {l_max:.1f}x | Safe {safe_leverage}x | Final {final_leverage}x")
+        return final_leverage
+    except Exception as e:
+        logger.error(f"Gagal menghitung safe leverage: {e}")
+        return base_leverage
+
+
+
 def get_dynamic_risk_percent(balance: float) -> float:
     """
     Tentukan risk per trade berdasarkan saldo.
