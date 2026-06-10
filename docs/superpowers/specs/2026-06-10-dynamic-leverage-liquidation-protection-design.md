@@ -37,18 +37,21 @@ Untuk margin terisolasi (*isolated margin*), rumus penentuan harga likuidasi ada
 ## 3. Komponen yang Diubah
 
 ### A. [brain_engine.py](file:///Users/mac/sinyalbingx/brain_engine.py)
-*   Menambahkan fungsi `get_safe_leverage(balance, entry_price, sl_price, side, symbol)` yang mengembalikan nilai leverage aman setelah dikalkulasi dan di-capping.
+
+- Menambahkan fungsi `get_safe_leverage(balance, entry_price, sl_price, side, symbol)` yang mengembalikan nilai leverage aman setelah dikalkulasi dan di-capping.
 
 ### B. [order_manager.py](file:///Users/mac/sinyalbingx/order_manager.py)
-*   Mengganti pemanggilan `brain_engine.get_dynamic_leverage(balance)` di dalam fungsi `execute_signal` menjadi pemanggilan `brain_engine.get_safe_leverage(balance, entry_price, sl_price, pos_side, symbol)`.
+
+- Mengganti pemanggilan `brain_engine.get_dynamic_leverage(balance)` di dalam fungsi `execute_signal` menjadi pemanggilan `brain_engine.get_safe_leverage(balance, entry_price, sl_price, pos_side, symbol)`.
 
 ---
 
 ## 4. Rencana Pengujian & Validasi
 
-### Pengujian Unit (Unit Test):
-*   Skenario LONG dengan SL tipis (leverage 50x aman).
-*   Skenario LONG dengan SL dalam (leverage diturunkan ke nilai di bawah 50x, misal ~34x).
-*   Skenario SHORT dengan SL tipis (leverage 50x aman).
-*   Skenario SHORT dengan SL dalam (leverage diturunkan).
-*   Verifikasi bahwa $P_{\text{sl}}$ selalu lebih aman dibandingkan kalkulasi teoretis $P_{\text{liq}}$.
+### Pengujian Unit (Unit Test)
+
+- Skenario LONG dengan SL tipis (leverage 50x aman).
+- Skenario LONG dengan SL dalam (leverage diturunkan ke nilai di bawah 50x, misal ~34x).
+- Skenario SHORT dengan SL tipis (leverage 50x aman).
+- Skenario SHORT dengan SL dalam (leverage diturunkan).
+- Verifikasi bahwa $P_{\text{sl}}$ selalu lebih aman dibandingkan kalkulasi teoretis $P_{\text{liq}}$.
