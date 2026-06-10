@@ -3,6 +3,7 @@
 Dokumen ini mendokumentasikan spesifikasi desain untuk fitur eksekusi otomatis multi-take profit berbasis target profit absolut, leverage & margin dinamis, serta trailing SL berbasis level milestone TP pada BingX Futures.
 
 ## 1. Kebutuhan Bisnis & Logika Trading
+
 1. **Webhook Integrasi:** Sinyal dari TradingView langsung terhubung ke Railway (Webhook Server) dan notifikasi dikirimkan ke Telegram.
 2. **Multi-TP dari TradingView:** Sinyal TradingView mengirimkan `sl`, `tp1`, `tp2`, `tp3`, dan `tp4`. Kuantitas per level TP dihitung secara cerdas agar masing-masing level memberikan keuntungan absolut sebesar \$1 USDT (tambahan \$1 per level TP, total \$4 jika mencapai TP4).
 3. **Leverage & Margin Dinamis (Keamanan Saldo):**
@@ -19,6 +20,7 @@ Dokumen ini mendokumentasikan spesifikasi desain untuk fitur eksekusi otomatis m
 ## 2. Detail Formula Matematika
 
 ### A. Perhitungan Kuantitas Parsial ($q_i$) per TP Level
+
 Untuk setiap tingkat Take Profit $i \in \{1, 2, 3, 4\}$:
 $$q_i = \frac{1.0}{|P_{tpi} - P_{entry}|}$$
 
@@ -26,6 +28,7 @@ Total Kuantitas Pembukaan Awal ($Q$):
 $$Q = q_1 + q_2 + q_3 + q_4$$
 
 ### B. Batas Pengaman Margin (50% Safety Guard)
+
 Margin yang dibutuhkan ($M$):
 $$M = \frac{Q \times P_{entry}}{\text{Leverage}}$$
 
@@ -39,6 +42,7 @@ $$Q_{\text{scaled}} = Q \times F$$
 ---
 
 ## 3. Detail Alur Eksekusi Order (API BingX)
+
 1. **Set Leverage:** Panggil `/openApi/swap/v2/trade/leverage` dengan leverage dinamis yang sesuai.
 2. **Entry Position:** Panggil `/openApi/swap/v2/trade/order` dengan tipe `MARKET`, kuantitas $Q$ (atau $Q_{\text{scaled}}$).
 3. **Pasang Stop Loss tunggal:** Panggil `/openApi/swap/v2/trade/order` dengan tipe `STOP_MARKET` di harga `sl`, kuantitas $Q$, dan parameter `"reduceOnly": "true"`.
@@ -47,8 +51,10 @@ $$Q_{\text{scaled}} = Q \times F$$
 ---
 
 ## 4. Alur Kerja Pemantauan Latar Belakang (Background Monitor)
+
 Sebuah background thread dijalankan di `webhook_server.py` dengan interval 15-20 detik.
 Untuk setiap posisi aktif di `active_trades.json`:
+
 1. Ambil harga pasar saat ini ($P_{current}$) dari API BingX.
 2. Bandingkan dengan milestone TP:
    * **LONG:**

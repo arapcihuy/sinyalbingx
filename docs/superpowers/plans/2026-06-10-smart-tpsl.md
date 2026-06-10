@@ -10,9 +10,10 @@
 
 ---
 
-### Task 1: Update Brain Engine Logic (Leverage, Multi-TP Qty, Trailing Check)
+## Task 1: Update Brain Engine Logic (Leverage, Multi-TP Qty, Trailing Check)
 
 **Files:**
+
 - Modify: `brain_engine.py`
 
 - [ ] **Step 1: Ganti atau tambahkan fungsi hitung kuantitas multi-TP dan safety guard margin 50%**
@@ -134,9 +135,10 @@
 
 ---
 
-### Task 2: Modifikasi Webhook Server (Parse Payload TP3 & TP4)
+## Task 2: Modifikasi Webhook Server (Parse Payload TP3 & TP4)
 
 **Files:**
+
 - Modify: `webhook_server.py:41-67`
 
 - [ ] **Step 1: Tambahkan parser tp3 dan tp4 di webhook_server.py**
@@ -194,9 +196,10 @@
 
 ---
 
-### Task 3: Modifikasi Order Manager (Logika Multi-TP & Real-time Balance)
+## Task 3: Modifikasi Order Manager (Logika Multi-TP & Real-time Balance)
 
 **Files:**
+
 - Modify: `order_manager.py`
 
 - [ ] **Step 1: Sesuaikan parameter input di `execute_signal` untuk multi-TP**
@@ -404,9 +407,10 @@
 
 ---
 
-### Task 4: Tambahkan Background Monitor Thread ke Webhook Server
+## Task 4: Tambahkan Background Monitor Thread ke Webhook Server
 
 **Files:**
+
 - Modify: `webhook_server.py`
 
 - [ ] **Step 1: Jalankan monitoring thread saat server startup**
@@ -450,9 +454,10 @@
 
 ---
 
-### Task 5: Validasi Menggunakan Simulasi Trading
+## Task 5: Validasi Menggunakan Simulasi Trading
 
 **Files:**
+
 - Modify: `simulasi_trading.py`
 - Run: `python3 simulasi_trading.py`
 
