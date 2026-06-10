@@ -1,0 +1,13 @@
+name = "tradentix-bridge"
+main = "cloudflare-worker.js"
+compatibility_date = "2025-06-01"
+account_id = "db2ea40b65820fadfc5244fa311fbe94"
+
+# OPTIONAL — Cron trailing SL tiap 1 menit
+# [triggers]
+# crons = ["*/1 * * * *"]
+
+# OPTIONAL — KV buat nyimpen posisi (dibutuhin kalo pake cron trailing)
+# [[kv_namespaces]]
+# binding = "POSITIONS"
+# id = "isi_id_kv_mu"

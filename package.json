@@ -1,0 +1,12 @@
+{
+  "name": "sinyal-bingx",
+  "version": "1.0.0",
+  "main": "webhook_server.cjs",
+  "scripts": {
+    "start": "node webhook_server.cjs",
+    "postinstall": "pip install flask requests gunicorn python-dotenv 2>/dev/null || true"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
