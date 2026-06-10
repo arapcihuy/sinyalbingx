@@ -3,6 +3,9 @@ import json
 import logging
 import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 log = logging.getLogger(__name__)

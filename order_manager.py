@@ -73,6 +73,22 @@ def save_active_trades():
     except Exception as e:
         logger.error(f"Gagal simpan active_trades: {e}")
 
+def load_active_trades():
+    global active_trade_data
+    if os.path.exists(ACTIVE_TRADES_FILE):
+        try:
+            with open(ACTIVE_TRADES_FILE, "r") as f:
+                active_trade_data = json.load(f)
+                logger.info(f"💾 State active trades di-load: {list(active_trade_data.keys())}")
+        except Exception as e:
+            logger.error(f"Gagal load active_trades: {e}")
+            active_trade_data = {}
+    return active_trade_data
+
+# Inisialisasi state saat modul di-load
+load_latest_signals()
+load_active_trades()
+
 def get_symbol_precision(symbol):
     """Ambil presisi quantity & price langsung dari BingX atau cache."""
     global _SYMBOL_PRECISION_CACHE
@@ -402,19 +418,67 @@ def monitor_and_sync_positions():
         logger.error(f"Error monitor trailing: {e}")
 
 def sync_missing_tpsl():
-    """Cek semua posisi open, sync TP/SL yang mungkin hilang."""
-    result_parts = []
+    """Cek semua posisi aktif, jika ada yang tidak punya TP/SL, pasang otomatis."""
     try:
         positions = bx.get_open_positions()
         if not positions:
-            return "Tidak ada posisi aktif untuk disinkron."
+            return "📭 Tidak ada posisi aktif untuk di-sync."
+
+        results = []
         for pos in positions:
-            sym = pos["symbol"]
-            logger.info(f"Sync TP/SL untuk {sym}")
-        result_parts.append(f"{len(positions)} posisi di-sync.")
+            symbol = pos["symbol"]
+            side = pos["positionSide"]
+            amt = abs(float(pos["positionAmt"]))
+            entry = float(pos["avgPrice"])
+            
+            if amt == 0: continue
+
+            # Cek order yang ada
+            orders_res = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
+            open_orders_raw = orders_res.get("data", [])
+            if isinstance(open_orders_raw, dict):
+                open_orders = open_orders_raw.get("orders", [])
+            else:
+                open_orders = open_orders_raw if isinstance(open_orders_raw, list) else []
+
+            has_tpsl = any("STOP" in o.get("type", "") or "TAKE_PROFIT" in o.get("type", "") for o in open_orders)
+            
+            if not has_tpsl:
+                logger.info(f"⚠️ {symbol} tidak punya TP/SL. Memasang via Sync...")
+                
+                # Ambil dari sinyal terakhir jika ada dan SIDE-nya cocok
+                latest = load_latest_signals()
+                signal = latest.get(symbol)
+                
+                # Cek apakah side sinyal cocok dengan side posisi
+                # (Sinyal BUY cocok dengan posisi LONG, SELL cocok dengan SHORT)
+                signal_action = signal.get("action", "").upper() if signal else ""
+                side_matches = (side == "LONG" and signal_action in ["BUY", "LONG"]) or \
+                               (side == "SHORT" and signal_action in ["SELL", "SHORT"])
+
+                if side_matches:
+                    sl_price = float(signal.get("sl", 0))
+                    tp_price = float(signal.get("tp1", 0))
+                    logger.info(f"🎯 Sync {symbol}: Menggunakan data sinyal yang cocok.")
+                else:
+                    # Estimasi aman jika data sinyal tidak cocok atau tidak ada
+                    logger.info(f"⚠️ Sync {symbol}: Arah sinyal tidak cocok, gunakan estimasi aman.")
+                    if side == "LONG":
+                        sl_price = round(entry * 0.985, 2) # 1.5% SL
+                        tp_price = round(entry * 1.01, 2)  # 1% TP
+                    else:
+                        sl_price = round(entry * 1.015, 2)
+                        tp_price = round(entry * 0.99, 2)
+
+                apply_manual_tpsl(symbol, tp_price, sl_price)
+                results.append(f"✅ {symbol}: TP/SL dipasang ({tp_price}/{sl_price})")
+            else:
+                results.append(f"✔️ {symbol}: Sudah ada TP/SL.")
+
+        return "\n".join(results)
     except Exception as e:
-        return f"Gagal sync: {e}"
-    return " | ".join(result_parts) if result_parts else "Sync selesai."
+        logger.error(f"Sync Error: {e}")
+        return f"❌ Sync Error: {str(e)}"
 
 def apply_manual_tpsl(symbol, tp_price, sl_price):
     """Pasang TP/SL manual untuk posisi aktif di bursa."""
@@ -441,9 +505,26 @@ def apply_manual_tpsl(symbol, tp_price, sl_price):
 def check_and_update_trailing_sl():
     """
     Memantau harga real-time dan menggeser SL saat menyentuh milestone TP1/TP2/TP3.
+    Mendukung mode Paper dan Live. Melacak harga puncak (peak price) untuk
+    mencegah hilangnya status milestone akibat retrace harga sementara.
     """
     try:
-        positions = bx.get_open_positions()
+        paper_mode = get_paper_mode()
+        
+        if paper_mode:
+            trades = load_paper_trades()
+            open_trades = [t for t in trades if t["status"] == "OPEN_PAPER"]
+            positions = []
+            for t in open_trades:
+                positions.append({
+                    "symbol": t["symbol"],
+                    "positionSide": t["side"],
+                    "positionAmt": t["qty"],
+                    "avgPrice": t["entry"]
+                })
+        else:
+            positions = bx.get_open_positions()
+            
         if not positions:
             # Jika tidak ada posisi terbuka, kosongkan active_trade_data
             if active_trade_data:
@@ -462,11 +543,133 @@ def check_and_update_trailing_sl():
             symbol = pos["symbol"]
             pos_side = pos["positionSide"]
             qty = abs(float(pos["positionAmt"]))
+            avg_price = float(pos["avgPrice"])
             current_price = bx.get_current_price(symbol)
             
-            if current_price == 0 or symbol not in active_trade_data:
+            if current_price == 0:
                 continue
                 
+            # --- 1. AUTO-ADOPT: Adopsi posisi manual jika tidak ada di state lokal ---
+            if symbol not in active_trade_data:
+                try:
+                    import brain_engine
+                    # Hitung balance akun untuk sizing / risk
+                    balance = 100.0
+                    try:
+                        if not paper_mode:
+                            balance = bx.get_balance()
+                    except:
+                        pass
+                    
+                    # Buat rencana TP/SL otomatis berbasis ATR
+                    plan = brain_engine.get_full_trade_plan(balance, avg_price, pos_side, symbol)
+                    
+                    active_trade_data[symbol] = {
+                        "symbol": symbol,
+                        "side": pos_side,
+                        "entry_price": avg_price,
+                        "sl": plan["sl"],
+                        "tp1": plan["tp1"],
+                        "tp2": plan["tp2"],
+                        "tp3": 0.0,
+                        "tp4": 0.0,
+                        "qtys": [qty/2, qty/2, 0.0, 0.0],
+                        "qty": qty,
+                        "leverage": plan["leverage"],
+                        "risk_pct": plan["risk_percent"],
+                        "atr": plan["atr"],
+                        "trailing": {
+                            "activate_atr_mult": 1.0,
+                            "offset_atr_mult": 0.5,
+                            "active": False,
+                            "highest_price": avg_price if pos_side == "LONG" else 0,
+                            "lowest_price": avg_price if pos_side == "SHORT" else 0,
+                        },
+                        "status": "OPEN",
+                        "open_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "adopted": True
+                    }
+                    save_active_trades()
+                    
+                    # Kirim Telegram Notif Auto-Adopt
+                    TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7809584261")
+                    mode_label = "PAPER" if paper_mode else "LIVE"
+                    msg_adopt = (
+                        f"📥 *POSISI MANUAL DIADOPSI ({mode_label})*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🪙 *Pair:* `{symbol}` ({pos_side})\n"
+                        f"📈 *Entry:* `{avg_price}`\n"
+                        f"🛡️ *SL Otomatis:* `{plan['sl']}`\n"
+                        f"🎯 *TP1:* `{plan['tp1']}` | *TP2:* `{plan['tp2']}`\n"
+                        f"📝 *Status:* Berhasil diadopsi & diproteksi.\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━"
+                    )
+                    import requests as r
+                    r.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                          json={"chat_id": TG_CHAT_ID, "text": msg_adopt, "parse_mode": "Markdown"}, timeout=5)
+                    logger.info(f"📥 AUTO-ADOPT: Posisi manual {symbol} {pos_side} diadopsi pada entry {avg_price}")
+                except Exception as adopt_err:
+                    logger.error(f"Gagal auto-adopt posisi {symbol}: {adopt_err}")
+                    continue
+            
+            trade = active_trade_data[symbol]
+            entry_price = trade["entry_price"]
+            
+            # --- 2. AUTO-CALIBRATION: Kalibrasi ulang jika entry di bursa berbeda dengan state ---
+            # Jika selisih entry bursa vs state > 0.1%, lakukan kalibrasi ulang level TP/SL
+            if abs(avg_price - entry_price) / entry_price > 0.001:
+                try:
+                    logger.info(f"🔄 Kalibrasi TP/SL {symbol} karena slippage: {entry_price} -> {avg_price}")
+                    prec = get_symbol_precision(symbol)
+                    price_prec = prec["price"]
+                    
+                    # Hitung persentase TP/SL dari entry lama
+                    sl_pct = (trade["sl"] - entry_price) / entry_price
+                    tp1_pct = (trade["tp1"] - entry_price) / entry_price if trade.get("tp1", 0) > 0 else 0
+                    tp2_pct = (trade["tp2"] - entry_price) / entry_price if trade.get("tp2", 0) > 0 else 0
+                    tp3_pct = (trade["tp3"] - entry_price) / entry_price if trade.get("tp3", 0) > 0 else 0
+                    tp4_pct = (trade["tp4"] - entry_price) / entry_price if trade.get("tp4", 0) > 0 else 0
+                    
+                    # Set entry baru ke avg_price bursa
+                    trade["entry_price"] = avg_price
+                    trade["qty"] = qty
+                    
+                    # Terapkan persentase ke entry baru
+                    trade["sl"] = round(avg_price * (1 + sl_pct), price_prec)
+                    if tp1_pct != 0: trade["tp1"] = round(avg_price * (1 + tp1_pct), price_prec)
+                    if tp2_pct != 0: trade["tp2"] = round(avg_price * (1 + tp2_pct), price_prec)
+                    if tp3_pct != 0: trade["tp3"] = round(avg_price * (1 + tp3_pct), price_prec)
+                    if tp4_pct != 0: trade["tp4"] = round(avg_price * (1 + tp4_pct), price_prec)
+                    
+                    # Reset peak price di trailing
+                    if "trailing" in trade:
+                        trade["trailing"]["highest_price"] = avg_price if pos_side == "LONG" else 0
+                        trade["trailing"]["lowest_price"] = avg_price if pos_side == "SHORT" else 0
+                    
+                    active_trade_data[symbol] = trade
+                    save_active_trades()
+                    
+                    # Kirim Telegram Notif Auto-Calibration
+                    TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7809584261")
+                    mode_label = "PAPER" if paper_mode else "LIVE"
+                    msg_calib = (
+                        f"🔄 *KALIBRASI LEVEL TP/SL SELESAI ({mode_label})*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🪙 *Pair:* `{symbol}`\n"
+                        f"📈 *Entry Baru:* `{avg_price}` (Slippage/Susul)\n"
+                        f"🛡️ *SL Baru:* `{trade['sl']}`\n"
+                        f"🎯 *TP1 Baru:* `{trade.get('tp1', 0)}` | *TP2 Baru:* `{trade.get('tp2', 0)}`\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━"
+                    )
+                    import requests as r
+                    r.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                          json={"chat_id": TG_CHAT_ID, "text": msg_calib, "parse_mode": "Markdown"}, timeout=5)
+                except Exception as calib_err:
+                    logger.error(f"Gagal melakukan kalibrasi {symbol}: {calib_err}")
+            
+            # Ambil kembali data setelah kemungkinan kalibrasi
             trade = active_trade_data[symbol]
             entry_price = trade["entry_price"]
             current_sl = trade["sl"]
@@ -474,33 +677,69 @@ def check_and_update_trailing_sl():
             tp2 = trade.get("tp2", 0)
             tp3 = trade.get("tp3", 0)
             
+            # Pastikan struktur trailing eksis
+            if "trailing" not in trade:
+                trade["trailing"] = {
+                    "activate_atr_mult": 1.0,
+                    "offset_atr_mult": 0.5,
+                    "active": False,
+                    "highest_price": entry_price if pos_side == "LONG" else 0,
+                    "lowest_price": entry_price if pos_side == "SHORT" else 0,
+                }
+            
+            # Update harga tertinggi/terendah (peak price) sejak posisi dibuka
+            if pos_side == "LONG":
+                highest_price = max(current_price, trade["trailing"].get("highest_price", entry_price))
+                trade["trailing"]["highest_price"] = highest_price
+                peak_price = highest_price
+            else:
+                lowest_price = trade["trailing"].get("lowest_price", entry_price)
+                if lowest_price == 0:
+                    lowest_price = entry_price
+                lowest_price = min(current_price, lowest_price)
+                trade["trailing"]["lowest_price"] = lowest_price
+                peak_price = lowest_price
+                
+            # Simpan update peak price ke state lokal
+            active_trade_data[symbol] = trade
+            save_active_trades()
+            
             import brain_engine
+            # Gunakan peak_price sebagai basis perhitungan milestone, bukan current_price
             result = brain_engine.calculate_milestone_trailing_sl(
-                current_price, pos_side, entry_price, current_sl, tp1, tp2, tp3, symbol
+                peak_price, pos_side, entry_price, current_sl, tp1, tp2, tp3, symbol
             )
             
             if result["should_update"]:
                 new_sl = result["new_sl"]
                 sl_side = "SELL" if pos_side == "LONG" else "BUY"
                 
-                # 1. Batalkan semua SL lama di bursa (STOP_MARKET)
-                try:
-                    orders_res = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
-                    open_orders = orders_res.get("data", [])
-                    if isinstance(open_orders, dict):
-                        open_orders = open_orders.get("orders", [])
-                    
-                    for order in open_orders:
-                        if order.get("type") == "STOP_MARKET":
-                            bx.cancel_order(symbol, order.get("orderId"))
-                except Exception as ce:
-                    logger.error(f"Gagal cancel SL lama: {ce}")
-                    
-                # 2. Pasang SL baru
-                bx._request("POST", "/openApi/swap/v2/trade/order", {
-                    "symbol": symbol, "side": sl_side, "positionSide": pos_side,
-                    "type": "STOP_MARKET", "stopPrice": new_sl, "quantity": qty
-                })
+                if paper_mode:
+                    # Update Stop Loss di database paper trades
+                    trades = load_paper_trades()
+                    for pt in trades:
+                        if pt["symbol"] == symbol and pt["status"] == "OPEN_PAPER":
+                            pt["sl"] = new_sl
+                    update_paper_trades(trades)
+                else:
+                    # 1. Batalkan semua SL lama di bursa (STOP_MARKET)
+                    try:
+                        orders_res = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
+                        open_orders = orders_res.get("data", [])
+                        if isinstance(open_orders, dict):
+                            open_orders = open_orders.get("orders", [])
+                        
+                        for order in open_orders:
+                            if order.get("type") == "STOP_MARKET":
+                                bx.cancel_order(symbol, order.get("orderId"))
+                    except Exception as ce:
+                        logger.error(f"Gagal cancel SL lama: {ce}")
+                        
+                    # 2. Pasang SL baru di bursa
+                    bx._request("POST", "/openApi/swap/v2/trade/order", {
+                        "symbol": symbol, "side": sl_side, "positionSide": pos_side,
+                        "type": "STOP_MARKET", "stopPrice": new_sl, "quantity": qty
+                    })
                 
                 # 3. Update state lokal
                 trade["sl"] = new_sl
@@ -511,8 +750,9 @@ def check_and_update_trailing_sl():
                 try:
                     TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
                     TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7809584261")
+                    mode_label = "PAPER" if paper_mode else "LIVE"
                     msg = (
-                        f"🔄 *TRAILING STOP LOSS AKTIF*\n"
+                        f"🔄 *TRAILING STOP LOSS AKTIF ({mode_label})*\n"
                         f"━━━━━━━━━━━━━━━━━━━━━\n"
                         f"🪙 *Pair:* `{symbol}`\n"
                         f"🛡️ *SL Baru:* `{new_sl}`\n"
@@ -525,7 +765,7 @@ def check_and_update_trailing_sl():
                 except Exception as tg_err:
                     logger.error(f"Gagal notif trailing SL ke Telegram: {tg_err}")
                     
-                logger.info(f"🔄 TRAILING SL {symbol}: {current_sl} → {new_sl} | {result['reason']}")
+                logger.info(f"🔄 TRAILING SL {symbol} ({mode_label}): {current_sl} → {new_sl} | {result['reason']}")
     except Exception as e:
         logger.error(f"Error check_and_update_trailing_sl: {e}")
 
