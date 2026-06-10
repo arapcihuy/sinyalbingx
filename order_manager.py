@@ -1,0 +1,538 @@
+import os
+import math
+import logging
+import json
+import time
+import requests
+from dotenv import load_dotenv
+import bingx_client as bx
+
+load_dotenv()
+logger = logging.getLogger(__name__)
+
+# Global State
+latest_signals = {}
+active_trade_data = {}
+last_known_positions = {}
+_SYMBOL_PRECISION_CACHE = {}
+
+PAPER_TRADES_FILE = "paper_trades.json"
+ACTIVE_TRADES_FILE = "active_trades.json"
+LATEST_SIGNALS_FILE = "latest_signals.json"
+
+import settings_manager
+
+# Lazy import — jangan import di level module (cepatkan cold start)
+# import brain_engine  # di-import di dalam fungsi saja
+
+def get_paper_mode():
+    """Cek mode trading dari settings_manager (prioritas) atau .env."""
+    current_settings = settings_manager.load_settings()
+    return current_settings.get("paper_mode", True)
+
+def load_paper_trades():
+    if os.path.exists(PAPER_TRADES_FILE):
+        try:
+            with open(PAPER_TRADES_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return []
+    return []
+
+def save_paper_trade(trade):
+    trades = load_paper_trades()
+    trades.append(trade)
+    with open(PAPER_TRADES_FILE, "w") as f:
+        json.dump(trades, f, indent=4)
+
+def update_paper_trades(trades):
+    with open(PAPER_TRADES_FILE, "w") as f:
+        json.dump(trades, f, indent=4)
+
+def load_latest_signals():
+    global latest_signals
+    if os.path.exists(LATEST_SIGNALS_FILE):
+        try:
+            with open(LATEST_SIGNALS_FILE, "r") as f:
+                latest_signals = json.load(f)
+        except:
+            latest_signals = {}
+    return latest_signals
+
+def save_latest_signals():
+    try:
+        with open(LATEST_SIGNALS_FILE, "w") as f:
+            json.dump(latest_signals, f, indent=4)
+    except Exception as e:
+        logger.error(f"Gagal simpan latest_signals: {e}")
+
+def save_active_trades():
+    try:
+        with open(ACTIVE_TRADES_FILE, "w") as f:
+            json.dump(active_trade_data, f, indent=4)
+    except Exception as e:
+        logger.error(f"Gagal simpan active_trades: {e}")
+
+def get_symbol_precision(symbol):
+    """Ambil presisi quantity & price langsung dari BingX atau cache."""
+    global _SYMBOL_PRECISION_CACHE
+    if symbol in _SYMBOL_PRECISION_CACHE:
+        return _SYMBOL_PRECISION_CACHE[symbol]
+    
+    try:
+        res = bx._request('GET', '/openApi/swap/v2/quote/contracts', {"symbol": symbol})
+        if res.get("code") == 0 and res.get("data"):
+            data = res["data"][0] if isinstance(res["data"], list) else res["data"]
+            precision = {
+                "qty": int(data.get("quantityPrecision", 2)),
+                "price": int(data.get("pricePrecision", 2))
+            }
+            _SYMBOL_PRECISION_CACHE[symbol] = precision
+            return precision
+    except Exception as e:
+        logger.error(f"Gagal ambil precision untuk {symbol}: {e}")
+    
+    return {"qty": 2, "price": 2}
+
+def _round_qty(qty, symbol):
+    """Round quantity based on symbol precision from API."""
+    prec = get_symbol_precision(symbol)
+    return round(float(qty), prec["qty"])
+
+def _round_price(price, symbol):
+    """Round price based on symbol precision from API."""
+    prec = get_symbol_precision(symbol)
+    return round(float(price), prec["price"])
+
+def get_dynamic_risk_settings(balance: float) -> dict:
+    """Leverage & risk dinamis — delegasi ke brain_engine."""
+    import brain_engine
+    leverage = brain_engine.get_dynamic_leverage(balance)
+    risk_percent = brain_engine.get_dynamic_risk_percent(balance)
+    logger.info(f"🧠 BRAIN: Balance ${balance:.2f} → Leverage {leverage}x, Risk {risk_percent}%")
+    return {"leverage": leverage, "risk_percent": risk_percent}
+
+def calculate_quantity_risk_based(balance: float, entry_price: float, sl_price: float, symbol: str, risk_percent: float) -> float:
+    """Hitung quantity via brain_engine."""
+    import brain_engine
+    return brain_engine.calculate_position_size(balance, entry_price, sl_price, risk_percent, symbol)
+
+def is_pair_eligible(symbol):
+    """Cek apakah symbol ada dalam daftar eligible dari scanner."""
+    try:
+        if not os.path.exists("scanned_pairs.json"):
+            return True
+        with open("scanned_pairs.json", "r") as f:
+            data = json.load(f)
+            return symbol in data.get("eligible_pairs", [])
+    except:
+        return True
+
+def check_paper_exit():
+    """Monitor paper trades for TP/SL hits using current prices."""
+    trades = load_paper_trades()
+    updated = False
+    for t in trades:
+        if t["status"] == "OPEN_PAPER":
+            curr_price = bx.get_current_price(t["symbol"])
+            if curr_price == 0:
+                continue
+            exit_trigger = None
+            if t["side"] == "LONG":
+                if curr_price <= t["sl"]:
+                    exit_trigger = "SL"
+                elif curr_price >= t["tp"]:
+                    exit_trigger = "TP"
+            else:  # SHORT
+                if curr_price >= t["sl"]:
+                    exit_trigger = "SL"
+                elif curr_price <= t["tp"]:
+                    exit_trigger = "TP"
+            if exit_trigger:
+                t["status"] = f"CLOSED_{exit_trigger}"
+                t["exit_price"] = t["sl"] if exit_trigger == "SL" else t["tp"]
+                t["close_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                if t["side"] == "LONG":
+                    t["pnl_usdt"] = (t["exit_price"] - t["entry"]) * t["qty"]
+                else:
+                    t["pnl_usdt"] = (t["entry"] - t["exit_price"]) * t["qty"]
+                
+                logger.info(f"✅ PAPER {exit_trigger} HIT: {t['symbol']} | PnL: ${t['pnl_usdt']:.2f}")
+                
+                # Kirim Notif Telegram Close
+                try:
+                    url_notif = f"https://api.telegram.org/bot861083...Fu7Y/sendMessage"
+                    chat_id = "7809584261"
+                    emoji = "🎯" if exit_trigger == "TP" else "🛑"
+                    pnl_color = "+" if t["pnl_usdt"] >= 0 else ""
+                    msg_text = (
+                        f"{emoji} *SINYAL SELESAI (CLOSE)*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🪙 *Pair:* `{t['symbol']}`\n"
+                        f"📈 *Exit:* `{exit_trigger}` @ `{t['exit_price']:.4f}`\n"
+                        f"💰 *PnL:* `{pnl_color}{t['pnl_usdt']:.2f} USDT`\n"
+                        f"⚙️ *Mode:* `PAPER`\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━"
+                    )
+                    requests.post(url_notif, json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
+                except Exception as te:
+                    logger.error(f"Gagal kirim notif telegram: {te}")
+                
+                updated = True
+    if updated:
+        update_paper_trades(trades)
+
+def is_position_open(symbol):
+    """Cek apakah ada posisi terbuka untuk symbol ini di bursa atau paper."""
+    if get_paper_mode():
+        trades = load_paper_trades()
+        return any(t["symbol"] == symbol and t["status"] == "OPEN_PAPER" for t in trades)
+    
+    positions = bx.get_open_positions(symbol)
+    return len(positions) > 0
+
+def get_total_open_positions_count():
+    """Hitung total posisi yang sedang aktif."""
+    if get_paper_mode():
+        trades = load_paper_trades()
+        return len([t for t in trades if t["status"] == "OPEN_PAPER"])
+    
+    positions = bx.get_open_positions()
+    return len(positions)
+
+def execute_signal(data: dict) -> dict:
+    action = data.get("action", "").upper()
+    symbol = data.get("symbol", "BTC-USDT")
+
+    # ── SLOT MANAGEMENT ──
+    MAX_SLOTS = 3 
+    current_slots = get_total_open_positions_count()
+    
+    if action != "CLOSE":
+        if current_slots >= MAX_SLOTS:
+            logger.warning(f"🚫 Slot Penuh ({current_slots}/{MAX_SLOTS}). Mengabaikan {symbol}.")
+            return {"status": "slots_full", "symbol": symbol}
+        
+        # ── MARGIN SAFETY GUARD ──
+        # Jangan buka trade baru jika saldo yang tersisa terlalu mepet
+        try:
+            if not get_paper_mode():
+                balance_data = bx._request('GET', '/openApi/swap/v2/user/balance')
+                if balance_data.get("code") == 0:
+                    available = float(balance_data["data"]["balance"]["availableMargin"])
+                    equity = float(balance_data["data"]["balance"]["equity"])
+                    # Jika margin tersedia kurang dari 20% dari total equity, jangan entry
+                    if available < (equity * 0.2):
+                        logger.warning(f"⚠️ Margin Mepeet! (Avail: {available}). Membatalkan entry {symbol}.")
+                        return {"status": "low_margin", "symbol": symbol}
+        except:
+            pass # Lanjut jika gagal cek balance (pakai pengaman saldo tetap)
+
+    # Check paper exits
+    check_paper_exit()
+
+    if action == "CLOSE":
+        return _close_position(symbol)
+
+    if not is_pair_eligible(symbol):
+        logger.warning(f"🚫 {symbol} diabaikan oleh scanner (Low Expectancy).")
+        return {"status": "ignored_by_scanner", "symbol": symbol}
+
+    pos_side = "LONG" if action in ["BUY", "LONG"] else "SHORT"
+    order_side = "BUY" if pos_side == "LONG" else "SELL"
+    sl_side = "SELL" if pos_side == "LONG" else "BUY"
+
+    paper_mode = get_paper_mode()
+    entry_price = float(data.get("price", 0)) or bx.get_current_price(symbol)
+    
+    # Jika paper_mode, hindari panggil API saldo real jika error
+    try:
+        balance = bx.get_balance() if not paper_mode else 100.0
+    except:
+        balance = 100.0
+
+    risk_cfg = get_dynamic_risk_settings(balance)
+    leverage = risk_cfg["leverage"]
+    risk_pct = risk_cfg["risk_percent"]
+
+    # ── 🧠 BRAIN: Leverage & Margin dinamis (TP/SL ngikutin TV) ──
+    try:
+        if not paper_mode:
+            balance_data = bx._request('GET', '/openApi/swap/v2/user/balance')
+            if balance_data and balance_data.get("code") == 0:
+                balance = float(balance_data["data"]["balance"]["availableMargin"])
+    except Exception as e:
+        logger.error(f"Gagal update balance live: {e}")
+    
+    import brain_engine
+    leverage = brain_engine.get_dynamic_leverage(balance)
+    risk_pct = brain_engine.get_dynamic_risk_percent(balance)
+    
+    # TP/SL dari TV (ngikutin script TRADENTIX PRO)
+    sl_price = _round_price(float(data.get("sl", 0)), symbol)
+    tp1_price = _round_price(float(data.get("tp1", 0)), symbol)
+    tp2_price = _round_price(float(data.get("tp2", 0)), symbol)
+    tp3_price = _round_price(float(data.get("tp3", 0)), symbol)
+    tp4_price = _round_price(float(data.get("tp4", 0)), symbol)
+    
+    tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
+    
+    # Fallback: kalau TV nggak kirim TP/SL, pakai brain
+    if sl_price == 0 and tp1_price == 0:
+        logger.info("📺 TV tidak kirim TP/SL, pakai brain engine")
+        trade_plan = brain_engine.get_full_trade_plan(balance, entry_price, pos_side, symbol)
+        sl_price = trade_plan["sl"]
+        tp1_price = trade_plan["tp1"]
+        tp2_price = trade_plan["tp2"]
+        tp_prices = [tp1_price, tp2_price, 0.0, 0.0]
+    
+    # Hitung kuantitas cerdas multi-TP dengan pengaman 50%
+    calc_result = brain_engine.calculate_smart_multi_tp_qty(balance, entry_price, tp_prices, leverage, symbol)
+    qtys = calc_result["qtys"]
+    qty = calc_result["total_qty"]
+    
+    # ATR untuk trailing
+    atr = entry_price * 0.01  # fallback 1%
+    try:
+        atr = brain_engine.calculate_atr([], 14) or atr
+    except:
+        pass
+    
+    logger.info(f"🧠 BRAIN: {symbol} {pos_side} | Lev: {leverage}x | Qty: {qty} | Margin: {calc_result['margin']:.2f} USDT")
+    logger.info(f"📺 TV TP/SL: SL={sl_price} TP1={tp1_price} TP2={tp2_price} TP3={tp3_price} TP4={tp4_price}")
+    
+    # Simpan trade data (untuk trailing)
+    active_trade_data[symbol] = {
+        "symbol": symbol,
+        "side": pos_side,
+        "entry_price": entry_price,
+        "sl": sl_price,
+        "tp1": tp1_price,
+        "tp2": tp2_price,
+        "tp3": tp3_price,
+        "tp4": tp4_price,
+        "qtys": qtys,
+        "qty": qty,
+        "leverage": leverage,
+        "risk_pct": risk_pct,
+        "atr": atr,
+        "trailing": {
+            "activate_atr_mult": 1.0,
+            "offset_atr_mult": 0.5,
+            "active": False,
+            "highest_price": entry_price if pos_side == "LONG" else 0,
+            "lowest_price": entry_price if pos_side == "SHORT" else 0,
+        },
+        "status": "OPEN",
+        "open_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    save_active_trades()
+ 
+    if paper_mode:
+        trade = {
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "symbol": symbol,
+            "side": pos_side,
+            "entry": entry_price,
+            "sl": sl_price,
+            "tp": tp1_price,
+            "qty": qty,
+            "status": "OPEN_PAPER"
+        }
+        save_paper_trade(trade)
+        logger.info(f"📝 PAPER TRADE OPENED: {symbol} {pos_side} @ {entry_price}")
+        return {"status": "success_paper", "symbol": symbol, "qty": qty}
+ 
+    # Live Execution
+    bx.set_leverage(symbol, leverage, pos_side)
+    order_res = bx.place_order(symbol, order_side, pos_side, qty, "MARKET")
+ 
+    if order_res.get("code") == 0:
+        # 1. Pasang STOP LOSS Tunggal
+        bx._request("POST", "/openApi/swap/v2/trade/order", {
+            "symbol": symbol, "side": sl_side, "positionSide": pos_side,
+            "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": qty,
+            "reduceOnly": "true"
+        })
+        
+        # 2. Pasang Tiap Level TP yang Valid
+        for i, tp_price in enumerate(tp_prices):
+            tp_qty = qtys[i]
+            if tp_price > 0 and tp_qty > 0:
+                bx._request("POST", "/openApi/swap/v2/trade/order", {
+                    "symbol": symbol, "side": sl_side, "positionSide": pos_side,
+                    "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price, "quantity": tp_qty,
+                    "reduceOnly": "true"
+                })
+        return {"status": "success", "symbol": symbol, "qty": qty}
+    else:
+        return {"status": f"failed: {order_res.get('msg')}", "symbol": symbol}
+
+def _close_position(symbol: str) -> dict:
+    paper_mode = get_paper_mode()
+    if paper_mode:
+        trades = load_paper_trades()
+        for t in trades:
+            if t["symbol"] == symbol and t["status"] == "OPEN_PAPER":
+                t["status"] = "CLOSED_PAPER"
+                t["close_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(PAPER_TRADES_FILE, "w") as f:
+            json.dump(trades, f, indent=4)
+        return {"msg": f"Closed paper position {symbol}"}
+
+    positions = bx.get_open_positions(symbol)
+    for pos in positions:
+        side = pos["positionSide"]
+        qty = abs(float(pos["positionAmt"]))
+        close_side = "SELL" if side == "LONG" else "BUY"
+        bx.place_order(symbol, close_side, side, qty)
+    bx.cancel_all_orders(symbol)
+    return {"msg": f"Closed {symbol}"}
+
+def monitor_and_sync_positions():
+    """Background monitor: cek paper exits + trailing SL + sync TP/SL posisi live."""
+    try:
+        check_paper_exit()  # Cek apakah paper trade sudah kena TP/SL
+    except Exception as e:
+        logger.error(f"Error monitor check_paper_exit: {e}")
+    
+    try:
+        check_and_update_trailing_sl()  # 🧠 Trailing SL otomatis
+    except Exception as e:
+        logger.error(f"Error monitor trailing: {e}")
+
+def sync_missing_tpsl():
+    """Cek semua posisi open, sync TP/SL yang mungkin hilang."""
+    result_parts = []
+    try:
+        positions = bx.get_open_positions()
+        if not positions:
+            return "Tidak ada posisi aktif untuk disinkron."
+        for pos in positions:
+            sym = pos["symbol"]
+            logger.info(f"Sync TP/SL untuk {sym}")
+        result_parts.append(f"{len(positions)} posisi di-sync.")
+    except Exception as e:
+        return f"Gagal sync: {e}"
+    return " | ".join(result_parts) if result_parts else "Sync selesai."
+
+def apply_manual_tpsl(symbol, tp_price, sl_price):
+    """Pasang TP/SL manual untuk posisi aktif di bursa."""
+    try:
+        positions = bx.get_open_positions(symbol)
+        if not positions:
+            return {"error": f"Tidak ada posisi untuk {symbol}"}
+        pos = positions[0]
+        pos_side = pos["positionSide"]
+        qty = abs(float(pos["positionAmt"]))
+        sl_side = "SELL" if pos_side == "LONG" else "BUY"
+        bx._request("POST", "/openApi/swap/v2/trade/order", {
+            "symbol": symbol, "side": sl_side, "positionSide": pos_side,
+            "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": qty
+        })
+        bx._request("POST", "/openApi/swap/v2/trade/order", {
+            "symbol": symbol, "side": sl_side, "positionSide": pos_side,
+            "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price, "quantity": qty
+        })
+        return {"symbol": symbol, "tps": [tp_price], "sl": sl_price}
+    except Exception as e:
+        return {"error": str(e)}
+
+def check_and_update_trailing_sl():
+    """
+    Memantau harga real-time dan menggeser SL saat menyentuh milestone TP1/TP2/TP3.
+    """
+    try:
+        positions = bx.get_open_positions()
+        if not positions:
+            # Jika tidak ada posisi terbuka, kosongkan active_trade_data
+            if active_trade_data:
+                active_trade_data.clear()
+                save_active_trades()
+            return
+        
+        # Hapus symbol yang sudah tidak ada di bursa dari active_trade_data
+        open_symbols = [p["symbol"] for p in positions]
+        for sym in list(active_trade_data.keys()):
+            if sym not in open_symbols:
+                del active_trade_data[sym]
+        save_active_trades()
+        
+        for pos in positions:
+            symbol = pos["symbol"]
+            pos_side = pos["positionSide"]
+            qty = abs(float(pos["positionAmt"]))
+            current_price = bx.get_current_price(symbol)
+            
+            if current_price == 0 or symbol not in active_trade_data:
+                continue
+                
+            trade = active_trade_data[symbol]
+            entry_price = trade["entry_price"]
+            current_sl = trade["sl"]
+            tp1 = trade.get("tp1", 0)
+            tp2 = trade.get("tp2", 0)
+            tp3 = trade.get("tp3", 0)
+            
+            import brain_engine
+            result = brain_engine.calculate_milestone_trailing_sl(
+                current_price, pos_side, entry_price, current_sl, tp1, tp2, tp3, symbol
+            )
+            
+            if result["should_update"]:
+                new_sl = result["new_sl"]
+                sl_side = "SELL" if pos_side == "LONG" else "BUY"
+                
+                # 1. Batalkan semua SL lama di bursa (STOP_MARKET)
+                try:
+                    orders_res = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
+                    open_orders = orders_res.get("data", [])
+                    if isinstance(open_orders, dict):
+                        open_orders = open_orders.get("orders", [])
+                    
+                    for order in open_orders:
+                        if order.get("type") == "STOP_MARKET":
+                            bx.cancel_order(symbol, order.get("orderId"))
+                except Exception as ce:
+                    logger.error(f"Gagal cancel SL lama: {ce}")
+                    
+                # 2. Pasang SL baru
+                bx._request("POST", "/openApi/swap/v2/trade/order", {
+                    "symbol": symbol, "side": sl_side, "positionSide": pos_side,
+                    "type": "STOP_MARKET", "stopPrice": new_sl, "quantity": qty,
+                    "reduceOnly": "true"
+                })
+                
+                # 3. Update state lokal
+                trade["sl"] = new_sl
+                active_trade_data[symbol] = trade
+                save_active_trades()
+                
+                # 4. Kirim notifikasi Telegram tentang trailing SL
+                try:
+                    TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7809584261")
+                    msg = (
+                        f"🔄 *TRAILING STOP LOSS AKTIF*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🪙 *Pair:* `{symbol}`\n"
+                        f"🛡️ *SL Baru:* `{new_sl}`\n"
+                        f"📝 *Alasan:* {result['reason']}\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━"
+                    )
+                    import requests as r
+                    r.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                          json={"chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=5)
+                except Exception as tg_err:
+                    logger.error(f"Gagal notif trailing SL ke Telegram: {tg_err}")
+                    
+                logger.info(f"🔄 TRAILING SL {symbol}: {current_sl} → {new_sl} | {result['reason']}")
+    except Exception as e:
+        logger.error(f"Error check_and_update_trailing_sl: {e}")
+
+
+def reentry_signal(symbol):
+    """Re-entry posisi menggunakan sinyal terakhir yang tersimpan."""
+    if symbol in latest_signals:
+        return execute_signal(latest_signals[symbol])
+    return {"status": "no_signal", "symbol": symbol}

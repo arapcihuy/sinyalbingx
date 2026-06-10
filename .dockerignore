@@ -1,0 +1,13 @@
+.git
+.gitignore
+venv
+.venv
+__pycache__
+*.pyc
+*.log
+.DS_Store
+.env
+.env.*
+*.txt
+!requirements.txt
+!TRADENTIX_PRO.txt

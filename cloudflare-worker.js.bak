@@ -1,0 +1,317 @@
+1|/**
+2| * TRADENTIX PRO → BingX Bridge V2
+3| * Cloudflare Worker — GRATIS, gak perlu VPS
+4| * 
+5| * FITUR:
+6| * ✅ Dynamic sizing — otomatis sesuaikan sama saldo futures
+7| * ✅ Auto leverage — aman, gak over-leverage
+8| * ✅ Trailing SL — SL ikut naik kalo harga udah profit
+9| * ✅ Paper mode — testing aman
+10| * 
+11| * Cara deploy:
+12| * 1. Buka https://dash.cloudflare.com → Workers & Pages
+13| * 2. Create Worker → copas code ini → Deploy
+14| * 3. Dapet URL: https://namamu.workers.dev
+15| * 4. Di TradingView alert: set Webhook URL ke URL itu
+16| * 
+17| * Mode PAPER: default true — aman buat testing
+18| * Ubah PAPER_MODE = false kalo mau real trading
+19| * 
+20| * UNTUK TRAILING SL LANJUTAN:
+21| * Worker ini support cron trigger. Setup Cron Triggers di Cloudflare:
+22| * Settings → Triggers → Cron: every 1 minute (setiap 1 menit)
+23| * Worker bakal auto-update trailing SL untuk posisi aktif.
+24| */
+25|
+26|// ⚙️ KONFIGURASI
+27|const CONFIG = {
+28|  BINGX_API_KEY:        '4SpTFy...qt8Q',
+29|  REDACTED_SECRET_KEY:     'HK5P3JWf059hq0k5JREnxAUytlwb3AIDPGmQbG7uQyfRJueZNGeAvcVOBhd9eUdEJnfTppXDPHoLrbgTVg',
+30|  REDACTED_WEBHOOK_SECRET:       'REDACTED_WEBHOOK_SECRET',
+31|  PAPER_MODE:           true,          // true = testing
+32|  RISK_PER_TRADE:       2,             // % saldo per trade (1-5%)
+33|  MAX_LEVERAGE:         10,            // maksimal leverage
+34|  TRAIL_ACTIVATE_PCT:   1.0,           // trail aktif setelah profit X%
+35|  TRAIL_OFFSET_ATR:     1.5,           // jarak trailing dari harga (ATR)
+36|};
+37|
+38|// ====== KV Namespace binding (untuk tracking posisi) ======
+39|// Di Cloudflare dashboard: Workers → KV → Create namespace "POSITIONS"
+40|// Bind ke worker dengan variable name "POSITIONS"
+41|// let POSITIONS;
+42|
+43|export default {
+44|  async fetch(request, env) {
+45|    // Support Cron Trigger (Cloudflare Cron Triggers)
+46|    const url = new URL(request.url);
+47|    if (url.pathname === '/__cron' || request.method === 'CRON') {
+48|      return await handleCron(env);
+49|    }
+50|
+51|    if (request.method === 'OPTIONS') {
+52|      return new Response('OK', { headers: cors() });
+53|    }
+54|
+55|    if (request.method !== 'POST') {
+56|      return new Response('Method not allowed', { status: 405, headers: cors() });
+57|    }
+58|
+59|    try {
+60|      const data = await request.json();
+61|      console.log('[INCOMING]', JSON.stringify(data));
+62|
+63|      if (data.secret !== CONFIG.REDACTED_WEBHOOK_SECRET) {
+64|        return new Response('Unauthorized', { status: 401, headers: cors() });
+65|      }
+66|
+67|      // Handle CLOSE signal
+68|      if (data.action === 'CLOSE') {
+69|        const result = await closePosition(data, env);
+70|        return jsonResponse(result);
+71|      }
+72|
+73|      const result = await handleSignal(data, env);
+74|      return jsonResponse(result);
+75|
+76|    } catch (err) {
+77|      console.error('[ERROR]', err);
+78|      return jsonResponse({ error: err.message }, 500);
+79|    }
+80|  },
+81|};
+82|
+83|// ====== CRON: Update trailing SL untuk semua posisi aktif ======
+84|async function handleCron(env) {
+85|  if (CONFIG.PAPER_MODE) return jsonResponse({ status: 'paper_mode_skipped' });
+86|
+87|  try {
+88|    // Get all open positions
+89|    const positions = await apiCall('/openApi/swap/v2/user/positions', {});
+90|    const openPos = positions?.data?.filter(p => parseFloat(p.positionAmt) !== 0) || [];
+91|
+92|    for (const pos of openPos) {
+93|      const symbol = pos.symbol;
+94|      const entryPrice = parseFloat(pos.entryPrice);
+95|      const markPrice = parseFloat(pos.markPrice);
+96|      const isLong = pos.positionSide === 'LONG';
+97|      const posAmt = parseFloat(pos.positionAmt);
+98|      const atr = pos.atr || 0;
+99|
+100|      // Check if position is in profit enough to activate trailing
+101|      const profitPct = isLong 
+102|        ? ((markPrice - entryPrice) / entryPrice) * 100
+103|        : ((entryPrice - markPrice) / entryPrice) * 100;
+104|
+105|      if (profitPct >= CONFIG.TRAIL_ACTIVATE_PCT) {
+106|        // Calculate trailing SL price
+107|        const trailOffset = atr * CONFIG.TRAIL_OFFSET_ATR || entryPrice * (CONFIG.TRAIL_ACTIVATE_PCT / 100);
+108|        const newSl = isLong ? markPrice - trailOffset : markPrice + trailOffset;
+109|
+110|        // Only update if new SL is better than current
+111|        const currentSl = parseFloat(pos.stopLoss || 0);
+112|        const shouldUpdate = isLong 
+113|          ? (newSl > currentSl)
+114|          : (newSl < currentSl);
+115|
+116|        if (shouldUpdate && newSl > 0) {
+117|          console.log(`[TRAIL] ${symbol}: SL ${currentSl} → ${newSl.toFixed(4)} (profit: ${profitPct.toFixed(2)}%)`);
+118|
+119|          await apiCall('/openApi/swap/v2/trade/order', {
+120|            symbol,
+121|            side: isLong ? 'SELL' : 'BUY',
+122|            positionSide: pos.positionSide,
+123|            type: 'STOP_MARKET',
+124|            quantity: posAmt.toFixed(6),
+125|            stopPrice: newSl.toFixed(4),
+126|            price: newSl.toFixed(4),
+127|          });
+128|        }
+129|      }
+130|    }
+131|
+132|    return jsonResponse({ status: 'trailing_updated', positions: openPos.length });
+133|  } catch (err) {
+134|    console.error('[CRON ERROR]', err);
+135|    return jsonResponse({ error: err.message });
+136|  }
+137|}
+138|
+139|// ====== HANDLE SIGNAL ======
+140|async function handleSignal(data, env) {
+141|  const symbol = cleanSymbol(data.symbol);
+142|  const isBuy = data.action === 'BUY';
+143|  const side = isBuy ? 'BUY' : 'SELL';
+144|  const posSide = isBuy ? 'LONG' : 'SHORT';
+145|
+146|  // ── Dynamic sizing: ambil saldo futures ──
+147|  let balance = CONFIG.POSITION_SIZE_USDT; // fallback
+148|  let leverage = CONFIG.MAX_LEVERAGE;
+149|
+150|  if (!CONFIG.PAPER_MODE) {
+151|    try {
+152|      const accInfo = await apiCall('/openApi/swap/v2/user/balance', {});
+153|      balance = parseFloat(accInfo?.data?.balance?.availableBalance || 0);
+154|
+155|      // Auto leverage: limit by volatility
+156|      const markPrice = parseFloat(data.price);
+157|      const slPct = data.sl ? Math.abs(parseFloat(data.sl) - markPrice) / markPrice * 100 : 1;
+158|      const safeLev = Math.floor(1 / (slPct / 100) * (CONFIG.RISK_PER_TRADE / 100));
+159|      leverage = Math.min(CONFIG.MAX_LEVERAGE, Math.max(1, safeLev));
+160|      console.log(`[BALANCE] ${balance} USDT | Auto Lev: ${leverage}x`);
+161|    } catch (e) {
+162|      console.warn('[BALANCE FAIL] pakai default', e.message);
+163|    }
+164|  }
+165|
+166|  // ── Hitung quantity ──
+167|  const positionSize = balance * (CONFIG.RISK_PER_TRADE / 100) * leverage;
+168|  const qty = positionSize / parseFloat(data.price);
+169|
+170|  if (CONFIG.PAPER_MODE) {
+171|    console.log(`[PAPER] ${side} ${symbol} | Size: ${positionSize.toFixed(2)} USD | Lev: ${leverage}x | Qty: ${qty.toFixed(6)}`);
+172|    return {
+173|      status: 'paper',
+174|      action: data.action,
+175|      symbol,
+176|      price: data.price,
+177|      qty: qty.toFixed(6),
+178|      leverage,
+179|      positionSize: positionSize.toFixed(2),
+180|      balance: balance.toFixed(2),
+181|    };
+182|  }
+183|
+184|  // ====== REAL EXECUTION ======
+185|  try {
+186|    // 1. Set leverage
+187|    await apiCall('/openApi/swap/v2/trade/leverage', {
+188|      symbol, leverage, side: posSide,
+189|    });
+190|
+191|    // 2. Market order
+192|    const order = await apiCall('/openApi/swap/v2/trade/order', {
+193|      symbol, side, positionSide: posSide,
+194|      type: 'MARKET', quantity: qty.toFixed(6),
+195|    });
+196|    const orderId = order?.data?.orderId;
+197|    if (!orderId) throw new Error('Order failed');
+198|
+199|    // 3. Stop Loss
+200|    if (data.sl) {
+201|      await apiCall('/openApi/swap/v2/trade/order', {
+202|        symbol, side: isBuy ? 'SELL' : 'BUY', positionSide: posSide,
+203|        type: 'STOP_MARKET', quantity: qty.toFixed(6),
+204|        stopPrice: parseFloat(data.sl).toFixed(4),
+205|        price: parseFloat(data.sl).toFixed(4),
+206|      });
+207|    }
+208|
+209|    // 4. Take Profit (level 1)
+210|    if (data.tp1) {
+211|      await apiCall('/openApi/swap/v2/trade/order', {
+212|        symbol, side: isBuy ? 'SELL' : 'BUY', positionSide: posSide,
+213|        type: 'TAKE_PROFIT_MARKET', quantity: qty.toFixed(6),
+214|        stopPrice: parseFloat(data.tp1).toFixed(4),
+215|        price: parseFloat(data.tp1).toFixed(4),
+216|      });
+217|    }
+218|
+219|    // 5. Simpan posisi ke KV untuk trailing cron (kalo ada)
+220|    if (typeof env?.POSITIONS?.put !== 'undefined') {
+221|      const posData = {
+222|        symbol, side, posSide, entry: data.price,
+223|        sl: data.sl, tp1: data.tp1, qty: qty.toFixed(6),
+224|        leverage, time: Date.now(),
+225|      };
+226|      await env.POSITIONS.put(symbol, JSON.stringify(posData), { expirationTtl: 86400 });
+227|    }
+228|
+229|    return {
+230|      status: 'executed',
+231|      action: data.action, symbol, orderId,
+232|      qty: qty.toFixed(6), leverage,
+233|      entry: data.price, sl: data.sl, tp1: data.tp1,
+234|      balanceUsed: positionSize.toFixed(2),
+235|    };
+236|
+237|  } catch (err) {
+238|    console.error('[BINGX ERROR]', err);
+239|    throw err;
+240|  }
+241|}
+242|
+243|// ====== CLOSE POSITION ======
+244|async function closePosition(data, env) {
+245|  const symbol = cleanSymbol(data.symbol);
+246|  if (CONFIG.PAPER_MODE) {
+247|    return { status: 'paper_closed', symbol };
+248|  }
+249|
+250|  await apiCall('/openApi/swap/v2/trade/closeAllPositions', { symbol });
+251|  if (typeof env?.POSITIONS?.delete !== 'undefined') {
+252|    await env.POSITIONS.delete(symbol);
+253|  }
+254|  return { status: 'closed', symbol };
+255|}
+256|
+257|// ====== CORS ======
+258|function cors() {
+259|  return {
+260|    'Access-Control-Allow-Origin': '*',
+261|    'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
+262|    'Access-Control-Allow-Headers': 'Content-Type',
+263|  };
+264|}
+265|
+266|function jsonResponse(data, status = 200) {
+267|  return new Response(JSON.stringify(data), {
+268|    status,
+269|    headers: { ...cors(), 'Content-Type': 'application/json' },
+270|  });
+271|}
+272|
+273|function cleanSymbol(sym) {
+274|  return sym.replace('.P', '').replace('-', '').trim();
+275|}
+276|
+277|// ====== BINGX API ======
+278|async function apiCall(path, params) {
+279|  const timestamp = Date.now();
+280|  const queryObj = { ...params, timestamp };
+281|  const queryStr = Object.entries(queryObj)
+282|    .map(([k, v]) => `${k}=${v}`)
+283|    .join('&');
+284|
+285|  const signature = await hmacSHA256(queryStr, CONFIG.REDACTED_SECRET_KEY);
+286|  const url = `https://open-api.bingx.com${path}`;
+287|  const body = `${queryStr}&signature=${signature}`;
+288|
+289|  console.log(`[BINGX] ${path}`);
+290|
+291|  const resp = await fetch(url, {
+292|    method: 'POST',
+293|    headers: {
+294|      'X-BX-APIKEY': CONFIG.BINGX_API_KEY,
+295|      'Content-Type': 'application/x-www-form-urlencoded',
+296|    },
+297|    body,
+298|  });
+299|
+300|  const result = await resp.json();
+301|  if (result.code && result.code !== 0) {
+302|    throw new Error(`BingX ${result.code}: ${result.msg || JSON.stringify(result)}`);
+303|  }
+304|  return result;
+305|}
+306|
+307|async function hmacSHA256(message, secret) {
+308|  const encoder = new TextEncoder();
+309|  const key = await crypto.subtle.importKey(
+310|    'raw', encoder.encode(secret),
+311|    { name: 'HMAC', hash: 'SHA-256' },
+312|    false, ['sign']
+313|  );
+314|  const sig = await crypto.subtle.sign('HMAC', key, encoder.encode(message));
+315|  return [...new Uint8Array(sig)].map(b => b.toString(16).padStart(2, '0')).join('');
+316|}
+317|

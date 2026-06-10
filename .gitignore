@@ -1,0 +1,30 @@
+.env
+.env.*
+!.env.example
+BINGX_API_KEY
+BINGX_API_SECRET
+REDACTED_WEBHOOK_SECRET
+*.log
+__pycache__/
+*.pyc
+.DS_Store
+venv/
+.venv/
+
+# Pine Script strategy (rahasia dapur)
+TRADENTIX_PRO*.txt
+*.pine
+*.txt
+!requirements.txt
+!runtime.txt
+
+# Bot settings (runtime)
+bot_settings.json
+
+# Log files
+logs.*.log
+active_trades.json
+latest_signals.json
+
+# Paper trading & scanner
+paper_trades.json
