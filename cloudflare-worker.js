@@ -41,7 +41,7 @@ const CONFIG = {
 // let POSITIONS;
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     // Support Cron Trigger (Cloudflare Cron Triggers)
     const url = new URL(request.url);
     if (url.pathname === '/__cron' || request.method === 'CRON') {
@@ -66,12 +66,12 @@ export default {
 
       // Handle CLOSE signal
       if (data.action === 'CLOSE') {
-        const result = await closePosition(data, env);
-        return jsonResponse(result);
+        ctx.waitUntil(closePosition(data, env));
+        return jsonResponse({ status: 'accepted', action: 'CLOSE', symbol: data.symbol });
       }
 
-      const result = await handleSignal(data, env);
-      return jsonResponse(result);
+      ctx.waitUntil(handleSignal(data, env));
+      return jsonResponse({ status: 'accepted', action: data.action, symbol: data.symbol });
 
     } catch (err) {
       console.error('[ERROR]', err);
