@@ -23,8 +23,8 @@ pgrep -x caffeinate > /dev/null || $VENV_PYTHON -c "import os; os.system('caffei
 cd $BOT_DIR
 $VENV_PYTHON webhook_server.py > bot_run.log 2>&1 &
 
-# 3. Jalankan Hunter Engine (Otonom)
-$VENV_PYTHON hunter_engine.py > hunter_run.log 2>&1 &
+# 3. Jalankan Hunter Engine (Otonom) - DINONAKTIFKAN
+# $VENV_PYTHON hunter_engine.py > hunter_run.log 2>&1 &
 
 # 4. Jalankan Cloudflare Tunnel ke port yang sesuai
 # Menggunakan path absolut untuk cloudflared
