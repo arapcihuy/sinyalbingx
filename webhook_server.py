@@ -260,7 +260,7 @@ if bot:
         if not authorized:
             log.warning(f"🔒 Unauthorized access attempt from Chat ID: {message.chat.id}")
             try:
-                bot.reply_to(message, "⚠️ *Akses Ditolak:* Anda tidak memiliki izin untuk mengontrol bot ini.", parse_mode="Markdown")
+                bot.reply_to(message, f"⚠️ *Akses Ditolak:* Anda tidak memiliki izin untuk mengontrol bot ini.\n\n👤 *ID Telegram Anda:* `{message.chat.id}`\n🔑 *Solusi:* Silakan daftarkan ID ini di environment variable `TELEGRAM_CHAT_ID` pada dashboard Railway.", parse_mode="Markdown")
             except:
                 pass
         return authorized
