@@ -53,41 +53,68 @@ def run_async_execution(data, pair, signal, price, sl, tp1, tp2, tp3, tp4, TG_TO
 
 import re
 
+def clean_number(num_str):
+    if not num_str:
+        return 0.0
+    if "," in num_str:
+        num_str = num_str.replace(".", "").replace(",", ".")
+    try:
+        return float(num_str)
+    except ValueError:
+        return 0.0
+
 def parse_plain_text_alert(text):
     data = {}
     
-    # 1. Cari action: buy/sell/long/short
-    action_match = re.search(r"order\s+(sell|buy|long|short)", text, re.IGNORECASE)
-    if action_match:
-        action = action_match.group(1).upper()
-        if action == "LONG": action = "BUY"
-        if action == "SHORT": action = "SELL"
-        data["action"] = action
+    # 1. Parse Action
+    action_match = re.search(r"(?:order|zone|side)?\s*(buy|sell|long|short)\s*(?:entry|zone|order|side)?", text, re.IGNORECASE)
+    if re.search(r"✅\s*Buy|Buy Entry Zone|\b(buy|long)\b", text, re.IGNORECASE):
+        data["action"] = "BUY"
+    elif re.search(r"❎\s*Sell|Sell Entry Zone|\b(sell|short)\b", text, re.IGNORECASE):
+        data["action"] = "SELL"
+    elif action_match:
+        act = action_match.group(1).upper()
+        if act in ["LONG", "BUY"]:
+            data["action"] = "BUY"
+        elif act in ["SHORT", "SELL"]:
+            data["action"] = "SELL"
 
-    # 2. Price (@ 1.635,25 atau @ 62.430,7)
-    price_match = re.search(r"@\s*([0-9.,]+)", text)
-    if price_match:
-        price_str = price_match.group(1)
-        # Format desimal Indonesia (koma untuk desimal, titik untuk ribuan)
-        if "," in price_str:
-            price_str = price_str.replace(".", "").replace(",", ".")
-        try:
-            data["price"] = float(price_str)
-        except ValueError:
-            pass
-
-    # 3. Symbol setelah "terisi pada" atau "pada"
-    symbol_match = re.search(r"(?:terisi pada|pada)\s+([A-Z0-9.-]+)", text, re.IGNORECASE)
+    # 2. Parse Symbol
+    symbol_match = re.search(r"#\s*([A-Z0-9]+)", text)
+    if not symbol_match:
+        symbol_match = re.search(r"Coin\s*:\s*([A-Z0-9]+)", text, re.IGNORECASE)
+    if not symbol_match:
+        symbol_match = re.search(r"(?:terisi pada|pada)\s+([A-Z0-9.-]+)", text, re.IGNORECASE)
+        
     if symbol_match:
         symbol = symbol_match.group(1).upper()
-        # Bersihkan karakter non-alphanumeric kecuali strip
         symbol = re.sub(r'[^A-Z0-9-]', '', symbol)
         symbol = symbol.replace("USDT.P", "USDT")
         if symbol.endswith("USDT") and "-" not in symbol:
             symbol = symbol[:-4] + "-USDT"
         data["symbol"] = symbol
 
+    # 3. Parse Entry Price
+    price_match = re.search(r"(?:entry zone|entry|harga|@)\s*:?\s*([0-9.,]+)", text, re.IGNORECASE)
+    if not price_match:
+        price_match = re.search(r"@\s*([0-9.,]+)", text)
+        
+    if price_match:
+        data["price"] = clean_number(price_match.group(1))
+
+    # 4. Parse Stop Loss
+    sl_match = re.search(r"(?:stop-loss|stop target|sl)\s*:?\s*([0-9.,]+)", text, re.IGNORECASE)
+    if sl_match:
+        data["sl"] = clean_number(sl_match.group(1))
+
+    # 5. Parse Take Profits
+    for i in range(1, 5):
+        tp_match = re.search(rf"(?:target {i}|take profit {i}|tp{i})\s*:?\s*([0-9.,]+)", text, re.IGNORECASE)
+        if tp_match:
+            data[f"tp{i}"] = clean_number(tp_match.group(1))
+
     if "action" in data and "symbol" in data:
+        data["price"] = data.get("price", 0.0)
         data["sl"] = data.get("sl", 0.0)
         data["tp1"] = data.get("tp1", 0.0)
         return data
