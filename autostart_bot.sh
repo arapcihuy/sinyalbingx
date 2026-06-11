@@ -30,7 +30,8 @@ $VENV_PYTHON webhook_server.py > bot_run.log 2>&1 &
 # Menggunakan path absolut untuk cloudflared
 /opt/homebrew/bin/cloudflared tunnel --url http://127.0.0.1:$TARGET_PORT > bridge_tunnel.log 2>&1 &
 
-# 5. Jalankan Hermes AI Chat Bot
-$VENV_PYTHON hermes_ai_bot.py > hermes_bot.log 2>&1 &
+# 5. Jalankan Hermes AI Chat Bot (DINONAKTIFKAN)
+# $VENV_PYTHON hermes_ai_bot.py > hermes_bot.log 2>&1 &
 
 echo "✅ Auto-Trader System Started (Bot on Port $TARGET_PORT, Tunnel, Anti-Sleep)"
+

@@ -129,7 +129,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(body).encode())
 
     def log_message(self, fmt, *args):
-        pass
+        log.info(f"HTTP: {fmt % args}")
 
 
 def start_background_monitor():
@@ -151,10 +151,14 @@ def start_background_monitor():
 
 
 if __name__ == "__main__":
+    # Cetak info env PORT saat startup
+    raw_port = os.getenv("PORT")
+    log.info(f"Railway Raw PORT env: {raw_port}")
+    
     # Aktifkan background monitor
     start_background_monitor()
     
-    port = int(os.getenv("PORT", 5000))
+    port = int(raw_port or 5000)
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     log.info(f"Listening on :{port}")
     server.serve_forever()
