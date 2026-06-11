@@ -200,6 +200,7 @@ def run_autonomous_self_test_loop():
                 
             # 2. Tes API BingX
             bingx_ok = False
+            api_err_msg = ""
             try:
                 price = bx.get_current_price("BTC-USDT")
                 if price > 0:
@@ -209,10 +210,13 @@ def run_autonomous_self_test_loop():
                         bingx_ok = True
                         log.info(f"✅ SELF-TEST: Koneksi & API Key BingX SUKSES. Harga BTC: {price} | Saldo: {balance} USDT")
                     except Exception as bal_err:
+                        api_err_msg = f"Validasi Saldo Gagal ({str(bal_err)})"
                         log.error(f"❌ SELF-TEST: Koneksi API OK tetapi validasi API Key / Saldo GAGAL: {bal_err}")
                 else:
+                    api_err_msg = "Harga BTC 0"
                     log.error("❌ SELF-TEST: Koneksi API BingX mengembalikan harga 0.")
             except Exception as e:
+                api_err_msg = f"Koneksi Error ({str(e)})"
                 log.error(f"❌ SELF-TEST: Koneksi API BingX mengalami error: {e}")
                 
             # Logika Promosi / Demotasi Mode Trading (Internal Tanpa Notif Telegram)
@@ -228,7 +232,7 @@ def run_autonomous_self_test_loop():
             else:
                 reason = []
                 if not inbound_ok: reason.append("Inbound Jaringan Error")
-                if not bingx_ok: reason.append("API BingX Error")
+                if not bingx_ok: reason.append(f"API BingX Error: {api_err_msg}")
                 err_msg = ", ".join(reason)
                 state_manager.demote_to_safe_mode(err_msg)
                 log.warning(f"🚨 SELF-TEST: Gagal ({err_msg}). Bot dikunci di SAFE MODE (Simulasi) demi keamanan dana.")
