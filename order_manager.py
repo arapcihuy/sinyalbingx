@@ -226,35 +226,59 @@ def execute_signal(data: dict) -> dict:
     action = data.get("action", "").upper()
     symbol = data.get("symbol", "BTC-USDT")
 
-    # ── SLOT MANAGEMENT ──
-    MAX_SLOTS = 3 
-    current_slots = get_total_open_positions_count()
-    
-    if action != "CLOSE":
-        if current_slots >= MAX_SLOTS:
-            logger.warning(f"🚫 Slot Penuh ({current_slots}/{MAX_SLOTS}). Mengabaikan {symbol}.")
-            return {"status": "slots_full", "symbol": symbol}
-        
-        # ── MARGIN SAFETY GUARD ──
-        # Jangan buka trade baru jika saldo yang tersisa terlalu mepet
-        try:
-            if not get_paper_mode():
-                balance_data = bx._request('GET', '/openApi/swap/v2/user/balance')
-                if balance_data.get("code") == 0:
-                    available = float(balance_data["data"]["balance"]["availableMargin"])
-                    equity = float(balance_data["data"]["balance"]["equity"])
-                    # Jika margin tersedia kurang dari 20% dari total equity, jangan entry
-                    if available < (equity * 0.2):
-                        logger.warning(f"⚠️ Margin Mepeet! (Avail: {available}). Membatalkan entry {symbol}.")
-                        return {"status": "low_margin", "symbol": symbol}
-        except:
-            pass # Lanjut jika gagal cek balance (pakai pengaman saldo tetap)
-
     # Check paper exits
     check_paper_exit()
 
     if action == "CLOSE":
         return _close_position(symbol)
+
+    # ── CHECK EXISTING POSITION & REVERSAL ──
+    target_pos_side = "LONG" if action in ["BUY", "LONG"] else "SHORT"
+    opposite_pos_side = "SHORT" if target_pos_side == "LONG" else "LONG"
+    
+    existing_positions = []
+    if not get_paper_mode():
+        try:
+            existing_positions = bx.get_open_positions(symbol)
+        except Exception as pe:
+            logger.error(f"Gagal get_open_positions untuk check reversal: {pe}")
+    else:
+        trades = load_paper_trades()
+        existing_positions = [t for t in trades if t["symbol"] == symbol and t["status"] == "OPEN_PAPER"]
+
+    for pos in existing_positions:
+        pos_side_str = pos["side"] if get_paper_mode() else pos["positionSide"]
+        if pos_side_str == opposite_pos_side:
+            logger.info(f"🔄 Terdeteksi Sinyal Berbalik Arah (Reversal) untuk {symbol}: {pos_side_str} -> {target_pos_side}. Menutup posisi lama...")
+            _close_position(symbol)
+            if not get_paper_mode():
+                time.sleep(1.5)
+        elif pos_side_str == target_pos_side:
+            logger.warning(f"⚠️ Posisi {target_pos_side} untuk {symbol} sudah terbuka. Mengabaikan sinyal duplikat.")
+            return {"status": "already_open", "symbol": symbol}
+
+    # ── SLOT MANAGEMENT ──
+    MAX_SLOTS = 3 
+    current_slots = get_total_open_positions_count()
+    
+    if current_slots >= MAX_SLOTS:
+        logger.warning(f"🚫 Slot Penuh ({current_slots}/{MAX_SLOTS}). Mengabaikan {symbol}.")
+        return {"status": "slots_full", "symbol": symbol}
+    
+    # ── MARGIN SAFETY GUARD ──
+    # Jangan buka trade baru jika saldo yang tersisa terlalu mepet
+    try:
+        if not get_paper_mode():
+            balance_data = bx._request('GET', '/openApi/swap/v2/user/balance')
+            if balance_data.get("code") == 0:
+                available = float(balance_data["data"]["balance"]["availableMargin"])
+                equity = float(balance_data["data"]["balance"]["equity"])
+                # Jika margin tersedia kurang dari 20% dari total equity, jangan entry
+                if available < (equity * 0.2):
+                    logger.warning(f"⚠️ Margin Mepeet! (Avail: {available}). Membatalkan entry {symbol}.")
+                    return {"status": "low_margin", "symbol": symbol}
+    except:
+        pass # Lanjut jika gagal cek balance (pakai pengaman saldo tetap)
 
     if not is_pair_eligible(symbol):
         logger.warning(f"🚫 {symbol} diabaikan oleh scanner (Low Expectancy).")
