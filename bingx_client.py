@@ -37,7 +37,7 @@ if not BINGX_API_KEY or not BINGX_API_SECRET:
     # Optional: raise error or handle gracefully
 
 # Gunakan fitur Demo Trading (VST) BingX jika USE_DEMO=True di .env
-USE_DEMO = False
+USE_DEMO = os.getenv("USE_DEMO", "true").lower() == "true"
 BASE_URL = "https://open-api-vst.bingx.com" if USE_DEMO else "https://open-api.bingx.com"
 
 _SESSION = requests.Session()
