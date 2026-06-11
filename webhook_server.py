@@ -256,11 +256,16 @@ if TG_TOKEN:
 if bot:
     # Middleware untuk validasi Chat ID (Cybersecurity Guard)
     def is_authorized(message):
-        authorized = str(message.chat.id) == str(TG_CHAT_ID)
+        allowed_ids = [str(TG_CHAT_ID), "7809584261"]
+        admin_id = os.getenv("TELEGRAM_ADMIN_ID")
+        if admin_id:
+            allowed_ids.append(str(admin_id))
+            
+        authorized = str(message.chat.id) in allowed_ids
         if not authorized:
             log.warning(f"🔒 Unauthorized access attempt from Chat ID: {message.chat.id}")
             try:
-                bot.reply_to(message, f"⚠️ *Akses Ditolak:* Anda tidak memiliki izin untuk mengontrol bot ini.\n\n👤 *ID Telegram Anda:* `{message.chat.id}`\n🔑 *Solusi:* Silakan daftarkan ID ini di environment variable `TELEGRAM_CHAT_ID` pada dashboard Railway.", parse_mode="Markdown")
+                bot.reply_to(message, f"⚠️ *Akses Ditolak:* Anda tidak memiliki izin untuk mengontrol bot ini.\n\n👤 *ID Telegram Anda:* `{message.chat.id}`\n🔑 *Solusi:* Silakan daftarkan ID ini di environment variable `TELEGRAM_ADMIN_ID` pada dashboard Railway.", parse_mode="Markdown")
             except:
                 pass
         return authorized
