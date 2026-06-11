@@ -36,9 +36,16 @@ if not BINGX_API_KEY or not BINGX_API_SECRET:
     print("[ERROR] BINGX_API_KEY or BINGX_API_SECRET not found in environment!")
     # Optional: raise error or handle gracefully
 
-# Gunakan fitur Demo Trading (VST) BingX jika USE_DEMO=True di .env
-USE_DEMO = os.getenv("USE_DEMO", "true").lower() == "true"
-BASE_URL = "https://open-api-vst.bingx.com" if USE_DEMO else "https://open-api.bingx.com"
+def get_base_url() -> str:
+    """Mengambil URL endpoint BingX secara dinamis berdasarkan state_manager."""
+    try:
+        import state_manager
+        use_demo = state_manager.get_trading_mode()["use_demo"]
+    except Exception:
+        # Fallback jika diimpor sebelum state_manager selesai diinisialisasi
+        import os
+        use_demo = os.getenv("USE_DEMO", "true").lower() == "true"
+    return "https://open-api-vst.bingx.com" if use_demo else "https://open-api.bingx.com"
 
 _SESSION = requests.Session()
 _RETRY = Retry(
@@ -99,9 +106,8 @@ def _request(method: str, path: str, params: dict = None) -> dict:
     # Tambahkan signature ke query string
     signature = _sign(query_string)
     full_query_string = f"{query_string}&signature={signature}"
+    url = f"{get_base_url()}{path}?{full_query_string}"
     
-    # Konstruksi URL dengan query string lengkap
-    url = f"{BASE_URL}{path}?{full_query_string}"
     # Gunakan header yang lebih lengkap agar tidak diblokir
     headers = _get_headers()
     headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"

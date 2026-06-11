@@ -26,9 +26,15 @@ import settings_manager
 # import brain_engine  # di-import di dalam fungsi saja
 
 def get_paper_mode():
-    """Cek mode trading dari settings_manager (prioritas) atau .env."""
-    current_settings = settings_manager.load_settings()
-    return current_settings.get("paper_mode", True)
+    """Mengambil status mode trading secara dinamis dari state_manager."""
+    try:
+        import state_manager
+        return state_manager.get_trading_mode()["paper_mode"]
+    except Exception:
+        # Fallback jika diimpor sebelum state_manager siap
+        import settings_manager
+        current_settings = settings_manager.load_settings()
+        return current_settings.get("paper_mode", True)
 
 def load_paper_trades():
     if os.path.exists(PAPER_TRADES_FILE):
@@ -405,6 +411,69 @@ def _close_position(symbol: str) -> dict:
     bx.cancel_all_orders(symbol)
     return {"msg": f"Closed {symbol}"}
 
+# Counter global untuk meredam spam alert Telegram
+_RECONCILIATION_MISMATCH_COUNT = {}
+
+def audit_position_reconciliation():
+    """
+    Membandingkan posisi aktif di bursa BingX dengan database posisi lokal (active_trades.json).
+    Jika terdeteksi perbedaan status selama 3 putaran berturut-turut, kirimkan peringatan ke Telegram.
+    """
+    global _RECONCILIATION_MISMATCH_COUNT
+    import state_manager
+    mode = state_manager.get_trading_mode()
+    
+    # Rekonsiliasi hanya berlaku di LIVE mode (uang asli), demo tidak wajib ketat
+    if mode["paper_mode"]:
+        return
+        
+    try:
+        # Ambil posisi riil di bursa
+        real_positions = bx.get_open_positions()
+        real_symbols = [p["symbol"] for p in real_positions]
+        
+        # Ambil posisi di log lokal
+        local_trades = load_active_trades()
+        local_symbols = [sym for sym, data in local_trades.items() if data.get("status") == "OPEN"]
+        
+        # Cari ketidakcocokan (mismatch)
+        all_symbols = set(real_symbols + local_symbols)
+        for sym in all_symbols:
+            has_mismatch = False
+            mismatch_reason = ""
+            
+            if sym in real_symbols and sym not in local_symbols:
+                has_mismatch = True
+                mismatch_reason = "Posisi aktif di bursa, tetapi TIDAK terdaftar di log bot lokal."
+            elif sym in local_symbols and sym not in real_symbols:
+                has_mismatch = True
+                mismatch_reason = "Terdaftar OPEN di log bot lokal, tetapi TIDAK ada posisi di bursa."
+                
+            if has_mismatch:
+                _RECONCILIATION_MISMATCH_COUNT[sym] = _RECONCILIATION_MISMATCH_COUNT.get(sym, 0) + 1
+                if _RECONCILIATION_MISMATCH_COUNT[sym] == 3: # 3x berturut-turut (~45 detik)
+                    # Kirim notifikasi peringatan ke Telegram
+                    TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7809584261")
+                    msg = (
+                        f"🚨 *ALARM REKONSILIASI POSISI*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🪙 *Pair:* `{sym}`\n"
+                        f"⚠️ *Anomali:* {mismatch_reason}\n"
+                        f"📝 *Solusi:* Periksa manual open positions di aplikasi BingX Anda!\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━"
+                    )
+                    try:
+                        import requests
+                        requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                                      json={"chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=5)
+                    except Exception as te:
+                        logger.error(f"Gagal kirim notif rekonsiliasi ke Telegram: {te}")
+            else:
+                _RECONCILIATION_MISMATCH_COUNT[sym] = 0
+    except Exception as e:
+        logger.error(f"Gagal melakukan audit rekonsiliasi: {e}")
+
 def monitor_and_sync_positions():
     """Background monitor: cek paper exits + trailing SL + sync TP/SL posisi live."""
     try:
@@ -416,6 +485,11 @@ def monitor_and_sync_positions():
         check_and_update_trailing_sl()  # 🧠 Trailing SL otomatis
     except Exception as e:
         logger.error(f"Error monitor trailing: {e}")
+
+    try:
+        audit_position_reconciliation()  # 🔄 Audit rekonsiliasi posisi bursa vs lokal
+    except Exception as e:
+        logger.error(f"Error monitor reconciliation: {e}")
 
 def sync_missing_tpsl():
     """Cek semua posisi aktif, jika ada yang tidak punya TP/SL, pasang otomatis."""
