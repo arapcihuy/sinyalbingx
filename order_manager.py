@@ -487,12 +487,17 @@ def monitor_and_sync_positions():
         logger.error(f"Error monitor trailing: {e}")
 
     try:
+        sync_missing_tpsl()  # 🔄 Sync missing TP/SL untuk posisi live secara otomatis
+    except Exception as e:
+        logger.error(f"Error monitor sync: {e}")
+
+    try:
         audit_position_reconciliation()  # 🔄 Audit rekonsiliasi posisi bursa vs lokal
     except Exception as e:
         logger.error(f"Error monitor reconciliation: {e}")
 
 def sync_missing_tpsl():
-    """Cek semua posisi aktif, jika ada yang tidak punya TP/SL, pasang otomatis."""
+    """Cek semua posisi aktif, jika ada yang tidak punya TP atau SL, pasang otomatis secara granular."""
     try:
         positions = bx.get_open_positions()
         if not positions:
@@ -515,39 +520,57 @@ def sync_missing_tpsl():
             else:
                 open_orders = open_orders_raw if isinstance(open_orders_raw, list) else []
 
-            has_tpsl = any("STOP" in o.get("type", "") or "TAKE_PROFIT" in o.get("type", "") for o in open_orders)
+            has_sl = any("STOP" in o.get("type", "") for o in open_orders)
+            has_tp = any("TAKE_PROFIT" in o.get("type", "") for o in open_orders)
             
-            if not has_tpsl:
-                logger.info(f"⚠️ {symbol} tidak punya TP/SL. Memasang via Sync...")
-                
-                # Ambil dari sinyal terakhir jika ada dan SIDE-nya cocok
-                latest = load_latest_signals()
-                signal = latest.get(symbol)
-                
-                # Cek apakah side sinyal cocok dengan side posisi
-                # (Sinyal BUY cocok dengan posisi LONG, SELL cocok dengan SHORT)
-                signal_action = signal.get("action", "").upper() if signal else ""
-                side_matches = (side == "LONG" and signal_action in ["BUY", "LONG"]) or \
-                               (side == "SHORT" and signal_action in ["SELL", "SHORT"])
-
-                if side_matches:
-                    sl_price = float(signal.get("sl", 0))
-                    tp_price = float(signal.get("tp1", 0))
-                    logger.info(f"🎯 Sync {symbol}: Menggunakan data sinyal yang cocok.")
+            if not has_sl or not has_tp:
+                # Ambil dari active_trade_data terlebih dahulu, jika tidak ada baru latest_signals
+                trade_state = active_trade_data.get(symbol)
+                if trade_state:
+                    sl_price = float(trade_state.get("sl", 0))
+                    tp_price = float(trade_state.get("tp1", 0))
                 else:
-                    # Estimasi aman jika data sinyal tidak cocok atau tidak ada
-                    logger.info(f"⚠️ Sync {symbol}: Arah sinyal tidak cocok, gunakan estimasi aman.")
-                    if side == "LONG":
-                        sl_price = round(entry * 0.985, 2) # 1.5% SL
-                        tp_price = round(entry * 1.01, 2)  # 1% TP
-                    else:
-                        sl_price = round(entry * 1.015, 2)
-                        tp_price = round(entry * 0.99, 2)
+                    latest = load_latest_signals()
+                    signal = latest.get(symbol)
+                    
+                    # Cek apakah side sinyal cocok dengan side posisi
+                    signal_action = signal.get("action", "").upper() if signal else ""
+                    side_matches = (side == "LONG" and signal_action in ["BUY", "LONG"]) or \
+                                   (side == "SHORT" and signal_action in ["SELL", "SHORT"])
 
-                apply_manual_tpsl(symbol, tp_price, sl_price)
-                results.append(f"✅ {symbol}: TP/SL dipasang ({tp_price}/{sl_price})")
+                    if side_matches:
+                        sl_price = float(signal.get("sl", 0))
+                        tp_price = float(signal.get("tp1", 0))
+                    else:
+                        # Estimasi aman jika data sinyal tidak cocok atau tidak ada
+                        if side == "LONG":
+                            sl_price = round(entry * 0.985, 2)
+                            tp_price = round(entry * 1.01, 2)
+                        else:
+                            sl_price = round(entry * 1.015, 2)
+                            tp_price = round(entry * 0.99, 2)
+
+                sl_side = "SELL" if side == "LONG" else "BUY"
+                
+                # Pasang Stop Loss jika belum ada
+                if not has_sl and sl_price > 0:
+                    logger.info(f"⚠️ {symbol} tidak punya SL. Memasang SL {sl_price}...")
+                    bx._request("POST", "/openApi/swap/v2/trade/order", {
+                        "symbol": symbol, "side": sl_side, "positionSide": side,
+                        "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": amt
+                    })
+                    results.append(f"✅ {symbol}: SL dipasang ({sl_price})")
+                
+                # Pasang Take Profit jika belum ada
+                if not has_tp and tp_price > 0:
+                    logger.info(f"⚠️ {symbol} tidak punya TP. Memasang TP {tp_price}...")
+                    bx._request("POST", "/openApi/swap/v2/trade/order", {
+                        "symbol": symbol, "side": sl_side, "positionSide": side,
+                        "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price, "quantity": amt
+                    })
+                    results.append(f"✅ {symbol}: TP dipasang ({tp_price})")
             else:
-                results.append(f"✔️ {symbol}: Sudah ada TP/SL.")
+                results.append(f"✔️ {symbol}: Sudah memiliki SL dan TP.")
 
         return "\n".join(results)
     except Exception as e:
