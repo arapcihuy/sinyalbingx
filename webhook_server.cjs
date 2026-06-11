@@ -28,16 +28,17 @@ function parseJSON(body) {
 
 const server = http.createServer((req, res) => {
   const parsedUrl = url.parse(req.url, true);
+  const pathname = (parsedUrl.pathname || '').replace(/\/+$/, '') || '/';
 
   // Health check
-  if (req.method === 'GET' && (parsedUrl.pathname === '/health' || parsedUrl.pathname === '/')) {
+  if (req.method === 'GET' && (pathname === '/health' || pathname === '/')) {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('OK');
     return;
   }
 
   // TradingView webhook
-  if (req.method === 'POST' && parsedUrl.pathname === '/tradingview') {
+  if (req.method === 'POST' && pathname === '/tradingview') {
     let body = '';
     req.on('data', chunk => body += chunk);
     req.on('end', () => {
@@ -79,7 +80,11 @@ const server = http.createServer((req, res) => {
 
       tgSend(`⚡ SINYAL DITERIMA\n${signal} ${pair} @ ${price}`);
 
-      // Lazy import order_manager (Python child process)
+      // Respond immediately to prevent TradingView timeout
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'accepted', message: 'Signal received and processing asynchronously' }));
+
+      // Lazy import order_manager (Python child process) executed in background
       const { exec } = require('child_process');
       const payload = JSON.stringify({ symbol: pair, action: signal, price, sl, tp1, tp2, tp3: 0, tp4: 0 });
       exec(`python3 -c "import sys,json; sys.path.insert(0,'.'); import order_manager; r=order_manager.execute_signal(json.loads('${payload}')); print(json.dumps(r))"`,
@@ -89,8 +94,6 @@ const server = http.createServer((req, res) => {
           try { result = JSON.parse(stdout); } catch {}
           const status = result.status || (err ? 'error' : 'unknown');
           tgSend(`✅ DIEKSEKUSI\n${pair} ${signal}\nSL: ${sl}\nTP1: ${tp1}\nResult: ${status}`);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ status: 'success', result }));
         }
       );
     });

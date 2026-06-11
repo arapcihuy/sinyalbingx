@@ -51,15 +51,62 @@ def run_async_execution(data, pair, signal, price, sl, tp1, tp2, tp3, tp4, TG_TO
     except Exception as e:
         log.error(f"Error in background execution: {e}")
 
+import re
+
+def parse_plain_text_alert(text):
+    data = {}
+    
+    # 1. Cari action: buy/sell/long/short
+    action_match = re.search(r"order\s+(sell|buy|long|short)", text, re.IGNORECASE)
+    if action_match:
+        action = action_match.group(1).upper()
+        if action == "LONG": action = "BUY"
+        if action == "SHORT": action = "SELL"
+        data["action"] = action
+
+    # 2. Price (@ 1.635,25 atau @ 62.430,7)
+    price_match = re.search(r"@\s*([0-9.,]+)", text)
+    if price_match:
+        price_str = price_match.group(1)
+        # Format desimal Indonesia (koma untuk desimal, titik untuk ribuan)
+        if "," in price_str:
+            price_str = price_str.replace(".", "").replace(",", ".")
+        try:
+            data["price"] = float(price_str)
+        except ValueError:
+            pass
+
+    # 3. Symbol setelah "terisi pada" atau "pada"
+    symbol_match = re.search(r"(?:terisi pada|pada)\s+([A-Z0-9.-]+)", text, re.IGNORECASE)
+    if symbol_match:
+        symbol = symbol_match.group(1).upper()
+        # Bersihkan karakter non-alphanumeric kecuali strip
+        symbol = re.sub(r'[^A-Z0-9-]', '', symbol)
+        symbol = symbol.replace("USDT.P", "USDT")
+        if symbol.endswith("USDT") and "-" not in symbol:
+            symbol = symbol[:-4] + "-USDT"
+        data["symbol"] = symbol
+
+    if "action" in data and "symbol" in data:
+        data["sl"] = data.get("sl", 0.0)
+        data["tp1"] = data.get("tp1", 0.0)
+        return data
+        
+    return None
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         import state_manager
-        if self.path in ("/health", "/"):
+        path = self.path.split('?')[0].rstrip('/')
+        if not path:
+            path = "/"
+
+        if path in ("/health", "/"):
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
             self.wfile.write(b"OK")
-        elif self.path == "/status":
+        elif path == "/status":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -70,15 +117,43 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
+        from urllib.parse import urlparse, parse_qs
+        parsed_url = urlparse(self.path)
+        path = parsed_url.path.rstrip('/')
+        if not path:
+            path = "/"
+            
+        query_params = {k: v[0] for k, v in parse_qs(parsed_url.query).items()}
+
         try:
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length)
-            data = json.loads(body) if body else {}
-            log.info(f"POST {self.path}: {json.dumps(data)[:200]}")
+            
+            # Coba decode body
+            text_body = body.decode('utf-8', errors='replace').strip() if body else ""
+            
+            data = {}
+            is_json = True
+            if text_body:
+                try:
+                    data = json.loads(text_body)
+                except json.JSONDecodeError:
+                    is_json = False
 
-            if self.path == "/tradingview":
-                # 1. Validasi Keamanan REDACTED_WEBHOOK_SECRET
-                incoming_secret = data.get("secret")
+            # Jika bukan JSON, coba parsing sebagai teks biasa dari alert TradingView
+            if not is_json and text_body:
+                log.info(f"Mencoba memparsing body teks biasa: {text_body[:300]}")
+                data = parse_plain_text_alert(text_body)
+                if not data:
+                    log.warning("Gagal memparsing sinyal dari teks biasa.")
+                    self._respond(400, {"error": "Invalid payload format. Failed to parse plain text alert."})
+                    return
+
+            log.info(f"POST {path}: {json.dumps(data)[:200]}")
+
+            if path == "/tradingview":
+                # 1. Validasi Keamanan REDACTED_WEBHOOK_SECRET (JSON atau query params)
+                incoming_secret = data.get("secret") or query_params.get("secret")
                 expected_secret = os.getenv("REDACTED_WEBHOOK_SECRET", "")
                 if expected_secret and incoming_secret != expected_secret:
                     log.warning(f"Unauthorized access attempt: secret mismatch")
@@ -185,18 +260,43 @@ def run_autonomous_self_test_loop():
             state_manager.set_mode(env_paper, env_demo, "TESTING_CONNECTION")
             
             # 1. Tes Inbound Jaringan Publik ke dirinya sendiri
-            domain = "sinyal-bingx-production.up.railway.app"
-            test_url = f"https://{domain}/health"
+            webhook_url = os.getenv("WEBHOOK_URL", "")
+            
+            # Deteksi otomatis trycloudflare tunnel dari log jika diatur atau kosong
+            if not webhook_url or "trycloudflare.com" in webhook_url:
+                try:
+                    if os.path.exists("bridge_tunnel.log"):
+                        with open("bridge_tunnel.log", "r") as f:
+                            lines = f.readlines()
+                        for line in reversed(lines):
+                            if "trycloudflare.com" in line:
+                                import re
+                                match = re.search(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", line)
+                                if match:
+                                    webhook_url = match.group(0)
+                                    log.info(f"🔄 Terdeteksi Cloudflare Tunnel aktif: {webhook_url}")
+                                    break
+                except Exception as ex_log:
+                    log.error(f"Gagal membaca URL dari bridge_tunnel.log: {ex_log}")
+
             inbound_ok = False
-            try:
-                res = requests.get(test_url, timeout=10)
-                if res.status_code == 200 and b"OK" in res.content:
-                    inbound_ok = True
-                    log.info(f"✅ SELF-TEST: Inbound Jaringan Publik ({test_url}) SUKSES.")
-                else:
-                    log.error(f"❌ SELF-TEST: Inbound Jaringan Publik gagal. Status: {res.status_code}")
-            except Exception as e:
-                log.error(f"❌ SELF-TEST: Inbound Jaringan Publik mengalami error: {e}")
+            if webhook_url:
+                from urllib.parse import urlparse
+                parsed = urlparse(webhook_url)
+                domain = parsed.netloc or parsed.path
+                test_url = f"https://{domain}/health"
+                try:
+                    res = requests.get(test_url, timeout=10)
+                    if res.status_code == 200 and b"OK" in res.content:
+                        inbound_ok = True
+                        log.info(f"✅ SELF-TEST: Inbound Jaringan Publik ({test_url}) SUKSES.")
+                    else:
+                        log.error(f"❌ SELF-TEST: Inbound Jaringan Publik gagal. Status: {res.status_code}")
+                except Exception as e:
+                    log.error(f"❌ SELF-TEST: Inbound Jaringan Publik mengalami error: {e}")
+            else:
+                inbound_ok = True
+                log.warning("⚠️ SELF-TEST: WEBHOOK_URL tidak dikonfigurasi. Melewati tes inbound eksternal.")
                 
             # 2. Tes API BingX
             bingx_ok = False
