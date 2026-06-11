@@ -161,95 +161,243 @@ def start_background_monitor():
     t.start()
 
 
-def run_autonomous_self_test():
+def run_autonomous_self_test_loop():
     import time
     import requests
     import state_manager
     import bingx_client as bx
     
-    # Tunggu 3 detik agar server HTTP siap mengikat port
-    time.sleep(3)
-    log.info("🧪 Memulai Uji Mandiri Sistem (Startup Self-Test)...")
+    # Tunggu 5 detik agar server HTTP siap mengikat port saat boot
+    time.sleep(5)
     
-    # 1. Tes Inbound Jaringan Publik ke dirinya sendiri
-    domain = "sinyal-bingx-production.up.railway.app"
-    test_url = f"https://{domain}/health"
-    inbound_ok = False
-    try:
-        res = requests.get(test_url, timeout=10)
-        if res.status_code == 200 and b"OK" in res.content:
-            inbound_ok = True
-            log.info(f"✅ SELF-TEST: Inbound Jaringan Publik ({test_url}) SUKSES.")
-        else:
-            log.error(f"❌ SELF-TEST: Inbound Jaringan Publik gagal. Status: {res.status_code}")
-    except Exception as e:
-        log.error(f"❌ SELF-TEST: Inbound Jaringan Publik mengalami error: {e}")
-        
-    # 2. Tes API BingX
-    bingx_ok = False
-    try:
-        price = bx.get_current_price("BTC-USDT")
-        if price > 0:
-            bingx_ok = True
-            log.info(f"✅ SELF-TEST: Koneksi API BingX SUKSES. Harga BTC: {price}")
-        else:
-            log.error("❌ SELF-TEST: Koneksi API BingX mengembalikan harga 0.")
-    except Exception as e:
-        log.error(f"❌ SELF-TEST: Koneksi API BingX mengalami error: {e}")
-        
-    # 3. Kirim Status ke Telegram
-    telegram_ok = False
-    try:
-        TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-        TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7809584261")
-        
-        status_emoji = "🟢" if (inbound_ok and bingx_ok) else "🔴"
-        status_text = "SEHAT" if (inbound_ok and bingx_ok) else "Bermasalah"
-        
-        tg_msg = (
-            f"🛠️ *LAPORAN STARTUP SELF-TEST*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🌐 *Inbound Jaringan:* `{'OK' if inbound_ok else 'ERROR'}`\n"
-            f"🪙 *API BingX:* `{'OK' if bingx_ok else 'ERROR'}`\n"
-            f"📊 *Status Sistem:* {status_emoji} `{status_text}`\n"
-            f"━━━━━━━━━━━━━━━━━━━━━"
-        )
-        
-        if TG_TOKEN:
-            res = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                                json={"chat_id": TG_CHAT_ID, "text": tg_msg, "parse_mode": "Markdown"}, timeout=5)
-            if res.status_code == 200:
-                telegram_ok = True
-    except Exception as e:
-        log.error(f"❌ SELF-TEST: Gagal kirim notif Telegram: {e}")
-        
-    # Logika Promosi Mode Trading
-    env_paper = os.getenv("PAPER_MODE", "true").lower() == "true"
-    env_demo = os.getenv("USE_DEMO", "true").lower() == "true"
-    
-    if inbound_ok and bingx_ok:
-        if not env_paper and not env_demo:
-            state_manager.promote_to_live()
-            log.info("🚀 SELF-TEST: Semua clear. Sistem otomatis dipromosikan ke LIVE MODE (Uang Asli).")
+    while True:
+        try:
+            log.info("🧪 Memulai Uji Mandiri Sistem (Self-Test Loop)...")
+            
+            # Target mode ditentukan oleh Env Var
+            env_paper = os.getenv("PAPER_MODE", "false").lower() == "true"
+            env_demo = os.getenv("USE_DEMO", "false").lower() == "true"
+            
+            # Simpan state status sebelumnya
+            prev_mode = state_manager.get_trading_mode()
+            
+            # Set mode sementara ke target untuk menguji endpoint target
+            state_manager.set_mode(env_paper, env_demo, "TESTING_CONNECTION")
+            
+            # 1. Tes Inbound Jaringan Publik ke dirinya sendiri
+            domain = "sinyal-bingx-production.up.railway.app"
+            test_url = f"https://{domain}/health"
+            inbound_ok = False
             try:
-                requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                              json={"chat_id": TG_CHAT_ID, "text": "🟢 *SYSTEM PROMOTED:* Uji mandiri sukses. Bot aktif berjalan di mode *LIVE (Uang Asli)*.", "parse_mode": "Markdown"}, timeout=5)
+                res = requests.get(test_url, timeout=10)
+                if res.status_code == 200 and b"OK" in res.content:
+                    inbound_ok = True
+                    log.info(f"✅ SELF-TEST: Inbound Jaringan Publik ({test_url}) SUKSES.")
+                else:
+                    log.error(f"❌ SELF-TEST: Inbound Jaringan Publik gagal. Status: {res.status_code}")
+            except Exception as e:
+                log.error(f"❌ SELF-TEST: Inbound Jaringan Publik mengalami error: {e}")
+                
+            # 2. Tes API BingX
+            bingx_ok = False
+            try:
+                price = bx.get_current_price("BTC-USDT")
+                if price > 0:
+                    try:
+                        # Panggil private endpoint untuk verifikasi validitas API keys
+                        balance = bx.get_balance()
+                        bingx_ok = True
+                        log.info(f"✅ SELF-TEST: Koneksi & API Key BingX SUKSES. Harga BTC: {price} | Saldo: {balance} USDT")
+                    except Exception as bal_err:
+                        log.error(f"❌ SELF-TEST: Koneksi API OK tetapi validasi API Key / Saldo GAGAL: {bal_err}")
+                else:
+                    log.error("❌ SELF-TEST: Koneksi API BingX mengembalikan harga 0.")
+            except Exception as e:
+                log.error(f"❌ SELF-TEST: Koneksi API BingX mengalami error: {e}")
+                
+            # Logika Promosi / Demotasi Mode Trading (Internal Tanpa Notif Telegram)
+            if inbound_ok and bingx_ok:
+                if not env_paper and not env_demo:
+                    state_manager.promote_to_live()
+                    if prev_mode["system_status"] != "LIVE":
+                        log.info("🚀 SELF-TEST: Koneksi & API sehat. Bot dipromosikan ke LIVE MODE (Uang Asli).")
+                else:
+                    state_manager.demote_to_safe_mode("Dibatasi oleh konfigurasi Env Var (PAPER_MODE/USE_DEMO=true)")
+                    if not prev_mode["system_status"].startswith("SAFE_MODE"):
+                        log.info("🔒 SELF-TEST: Koneksi sehat, tetapi bot tetap di SAFE MODE sesuai konfigurasi env var.")
+            else:
+                reason = []
+                if not inbound_ok: reason.append("Inbound Jaringan Error")
+                if not bingx_ok: reason.append("API BingX Error")
+                err_msg = ", ".join(reason)
+                state_manager.demote_to_safe_mode(err_msg)
+                log.warning(f"🚨 SELF-TEST: Gagal ({err_msg}). Bot dikunci di SAFE MODE (Simulasi) demi keamanan dana.")
+                
+        except Exception as e:
+            log.error(f"❌ Error dalam loop Self-Test: {e}")
+            
+        # Jalankan loop setiap 5 menit
+        time.sleep(300)
+
+
+# ─────────────────────────────────────────────
+#  TELEGRAM BOT COMMAND RESPONDERS
+# ─────────────────────────────────────────────
+import telebot
+
+bot = None
+if TG_TOKEN:
+    try:
+        bot = telebot.TeleBot(TG_TOKEN)
+        log.info("🤖 pyTelegramBotAPI initialized successfully.")
+    except Exception as e:
+        log.error(f"❌ Failed to initialize TeleBot: {e}")
+
+if bot:
+    # Middleware untuk validasi Chat ID (Cybersecurity Guard)
+    def is_authorized(message):
+        authorized = str(message.chat.id) == str(TG_CHAT_ID)
+        if not authorized:
+            log.warning(f"🔒 Unauthorized access attempt from Chat ID: {message.chat.id}")
+            try:
+                bot.reply_to(message, "⚠️ *Akses Ditolak:* Anda tidak memiliki izin untuk mengontrol bot ini.", parse_mode="Markdown")
             except:
                 pass
-        else:
-            state_manager.demote_to_safe_mode("Dibatasi oleh konfigurasi Env Var (PAPER_MODE/USE_DEMO=true)")
-            log.info("🔒 SELF-TEST: Jalur koneksi clear, tetapi bot dikunci di SAFE MODE sesuai konfigurasi env var.")
-    else:
-        reason = []
-        if not inbound_ok: reason.append("Inbound Jaringan Error")
-        if not bingx_ok: reason.append("API BingX Error")
-        state_manager.demote_to_safe_mode(", ".join(reason))
-        
+        return authorized
+
+    @bot.message_handler(commands=['status'])
+    def handle_status(message):
+        if not is_authorized(message):
+            return
         try:
-            requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                          json={"chat_id": TG_CHAT_ID, "text": f"🚨 *SYSTEM LOCKED:* Uji mandiri gagal ({', '.join(reason)}). Bot dikunci di *SAFE MODE (Simulasi)* demi keamanan dana Anda.", "parse_mode": "Markdown"}, timeout=5)
-        except:
-            pass
+            import state_manager
+            import order_manager
+            import bingx_client as bx
+            
+            mode = state_manager.get_trading_mode()
+            paper_mode = mode["paper_mode"]
+            status_str = mode["system_status"]
+            
+            if paper_mode:
+                trades = order_manager.load_paper_trades()
+                open_trades = [t for t in trades if t.get("status") == "OPEN_PAPER"]
+                pos_count = len(open_trades)
+                pos_details = "\n".join([f"• `{t['symbol']}` ({t['side']}) Entry: `{t['entry']}` | SL: `{t['sl']}`" for t in open_trades])
+            else:
+                positions = bx.get_open_positions()
+                pos_count = len(positions)
+                pos_details = "\n".join([f"• `{p['symbol']}` ({p['positionSide']}) x{p['leverage']} Qty: `{abs(float(p['positionAmt']))}` @ `{p['avgPrice']}`" for p in positions])
+                
+            response = (
+                f"📊 *STATUS BOT TRADING*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"⚙️ *Mode Trading:* `{'PAPER / SIMULASI' if paper_mode else 'LIVE / UANG ASLI'}`\n"
+                f"📡 *Status Koneksi:* `{status_str}`\n"
+                f"📈 *Posisi Terbuka:* `{pos_count} / 3`\n"
+                f"{pos_details if pos_details else '• (Tidak ada posisi aktif)'}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━"
+            )
+            bot.reply_to(message, response, parse_mode="Markdown")
+        except Exception as e:
+            log.error(f"Error handling /status command: {e}")
+            bot.reply_to(message, f"❌ Gagal memproses /status: {str(e)}")
+
+    @bot.message_handler(commands=['balance'])
+    def handle_balance(message):
+        if not is_authorized(message):
+            return
+        try:
+            import state_manager
+            import order_manager
+            import bingx_client as bx
+            
+            mode = state_manager.get_trading_mode()
+            paper_mode = mode["paper_mode"]
+            
+            if paper_mode:
+                trades = order_manager.load_paper_trades()
+                closed_pnl = sum([t.get("pnl_usdt", 0) for t in trades if t.get("status", "").startswith("CLOSED")])
+                balance = 1000.0 + closed_pnl
+                response = (
+                    f"💵 *SALDO SIMULASI (PAPER)*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💰 *Total Equity:* `${balance:.2f} USDT`\n"
+                    f"📝 *Catatan:* Berjalan di akun virtual/demo lokal.\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━"
+                )
+            else:
+                balance = bx.get_balance()
+                response = (
+                    f"💵 *SALDO LIVE BINGX*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💰 *Total Equity (Live):* `${balance:.2f} USDT`\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━"
+                )
+            bot.reply_to(message, response, parse_mode="Markdown")
+        except Exception as e:
+            log.error(f"Error handling /balance command: {e}")
+            bot.reply_to(message, f"❌ Gagal memproses /balance: {str(e)}")
+
+    @bot.message_handler(commands=['pnl'])
+    def handle_pnl(message):
+        if not is_authorized(message):
+            return
+        try:
+            import state_manager
+            import order_manager
+            import bingx_client as bx
+            
+            mode = state_manager.get_trading_mode()
+            paper_mode = mode["paper_mode"]
+            
+            if paper_mode:
+                trades = order_manager.load_paper_trades()
+                closed_trades = [t for t in trades if t.get("status", "").startswith("CLOSED")]
+                open_trades = [t for t in trades if t.get("status") == "OPEN_PAPER"]
+                total_pnl = sum([t.get("pnl_usdt", 0) for t in closed_trades])
+                
+                response = (
+                    f"📊 *LAPORAN PnL (PAPER)*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"✅ *Trade Tertutup:* `{len(closed_trades)}`\n"
+                    f"🟢 *Trade Terbuka:* `{len(open_trades)}`\n"
+                    f"💰 *Total PnL Bersih:* `{'+' if total_pnl >= 0 else ''}${total_pnl:.2f} USDT`\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━"
+                )
+            else:
+                positions = bx.get_open_positions()
+                unrealized_pnl = sum([float(p.get("unrealizedProfit", 0)) for p in positions])
+                
+                income = bx.get_income_history(days=7)
+                realized_pnl = sum([float(inc.get("income", 0)) for inc in income if inc.get("incomeType") in ["REALIZED_PNL", "COMMISSION"]])
+                
+                total_pnl = realized_pnl + unrealized_pnl
+                
+                response = (
+                    f"📊 *LAPORAN PnL LIVE (7 HARI TERAKHIR)*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🟢 *PnL Mengambang:* `${unrealized_pnl:.2f} USDT`\n"
+                    f"💵 *PnL Terealisasi:* `${realized_pnl:.2f} USDT`\n"
+                    f"💰 *Estimasi Total PnL:* `{'+' if total_pnl >= 0 else ''}${total_pnl:.2f} USDT`\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━"
+                )
+            bot.reply_to(message, response, parse_mode="Markdown")
+        except Exception as e:
+            log.error(f"Error handling /pnl command: {e}")
+            bot.reply_to(message, f"❌ Gagal memproses /pnl: {str(e)}")
+
+def start_telegram_bot_polling():
+    if bot:
+        def polling_thread():
+            log.info("📡 Memulai polling Telegram bot di background thread...")
+            while True:
+                try:
+                    bot.infinity_polling(timeout=30, long_polling_timeout=10)
+                except Exception as ex:
+                    log.error(f"⚠️ Error polling Telegram: {ex}")
+                    time.sleep(10)
+        t = threading.Thread(target=polling_thread, daemon=True)
+        t.start()
 
 
 if __name__ == "__main__":
@@ -263,8 +411,11 @@ if __name__ == "__main__":
     else:
         log.info("📡 Background monitor thread dinonaktifkan via env var.")
     
-    # Jalankan Autonomous Self-Test secara asinkron agar tidak memblokir bind socket
-    threading.Thread(target=run_autonomous_self_test, daemon=True).start()
+    # Jalankan Autonomous Self-Test loop secara asinkron di latar belakang
+    threading.Thread(target=run_autonomous_self_test_loop, daemon=True).start()
+    
+    # Jalankan Telegram bot polling secara asinkron di latar belakang
+    start_telegram_bot_polling()
     
     port = int(raw_port or 8080)
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
