@@ -30,6 +30,7 @@ const CONFIG = {
   WEBHOOK_SECRET:       'YOUR_WEBHOOK_SECRET',
   PAPER_MODE:           true,          // true = testing
   RISK_PER_TRADE:       2,             // % saldo per trade (1-5%)
+  POSITION_SIZE_USDT:   100,           // fallback ukuran posisi untuk mode paper
   MAX_LEVERAGE:         10,            // maksimal leverage
   TRAIL_ACTIVATE_PCT:   1.0,           // trail aktif setelah profit X%
   TRAIL_OFFSET_ATR:     1.5,           // jarak trailing dari harga (ATR)
