@@ -391,6 +391,37 @@ if bot:
             log.error(f"Error handling /pnl command: {e}")
             bot.reply_to(message, f"❌ Gagal memproses /pnl: {str(e)}")
 
+    @bot.message_handler(commands=['settings'])
+    def handle_settings(message):
+        if not is_authorized(message):
+            return
+        try:
+            auto_entry = os.getenv("AUTO_ENTRY", "true")
+            margin_mode = os.getenv("MARGIN_MODE", "ISOLATED")
+            leverage = os.getenv("LEVERAGE", "5")
+            risk_pct = os.getenv("RISK_PER_TRADE_PERCENT", "2.0")
+            webhook_url = os.getenv("WEBHOOK_URL", "-")
+            
+            # Mask API Key untuk keamanan
+            api_key = os.getenv("BINGX_API_KEY", "")
+            masked_key = f"{api_key[:6]}...{api_key[-6:]}" if len(api_key) > 12 else "Tidak Dikonfigurasi"
+            
+            response = (
+                f"⚙️ *PENGATURAN BOT TRADING*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🪙 *API Key BingX:* `{masked_key}`\n"
+                f"🛡️ *Leverage:* `{leverage}x`\n"
+                f"🎯 *Margin Mode:* `{margin_mode}`\n"
+                f"⚠️ *Risk per Trade:* `{risk_pct}%`\n"
+                f"🤖 *Auto Entry:* `{auto_entry}`\n"
+                f"🌐 *Webhook URL:* `{webhook_url}`\n"
+                f"━━━━━━━━━━━━━━━━━━━━━"
+            )
+            bot.reply_to(message, response, parse_mode="Markdown")
+        except Exception as e:
+            log.error(f"Error handling /settings command: {e}")
+            bot.reply_to(message, f"❌ Gagal memproses /settings: {str(e)}")
+
 def start_telegram_bot_polling():
     if bot:
         def polling_thread():
