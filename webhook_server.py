@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import sys
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -155,6 +155,6 @@ if __name__ == "__main__":
     start_background_monitor()
     
     port = int(os.getenv("PORT", 5000))
-    server = HTTPServer(("0.0.0.0", port), Handler)
+    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     log.info(f"Listening on :{port}")
     server.serve_forever()
