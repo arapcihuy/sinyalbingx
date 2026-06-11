@@ -155,8 +155,11 @@ if __name__ == "__main__":
     raw_port = os.getenv("PORT")
     log.info(f"Railway Raw PORT env: {raw_port}")
     
-    # Aktifkan background monitor
-    start_background_monitor()
+    # Aktifkan background monitor (default nonaktif untuk isolasi debug koneksi)
+    if os.getenv("ENABLE_MONITOR", "false").lower() == "true":
+        start_background_monitor()
+    else:
+        log.info("📡 Background monitor thread dinonaktifkan (Mode Debug Koneksi).")
     
     port = int(raw_port or 5000)
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
