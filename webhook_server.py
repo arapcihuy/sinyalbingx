@@ -53,10 +53,21 @@ def run_async_execution(data, pair, signal, price, sl, tp1, tp2, tp3, tp4, TG_TO
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"OK")
+        import state_manager
+        if self.path in ("/health", "/"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"OK")
+        elif self.path == "/status":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            mode = state_manager.get_trading_mode()
+            self.wfile.write(json.dumps(mode).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
 
     def do_POST(self):
         try:
@@ -150,6 +161,97 @@ def start_background_monitor():
     t.start()
 
 
+def run_autonomous_self_test():
+    import time
+    import requests
+    import state_manager
+    import bingx_client as bx
+    
+    # Tunggu 3 detik agar server HTTP siap mengikat port
+    time.sleep(3)
+    log.info("🧪 Memulai Uji Mandiri Sistem (Startup Self-Test)...")
+    
+    # 1. Tes Inbound Jaringan Publik ke dirinya sendiri
+    domain = "sinyal-bingx-production.up.railway.app"
+    test_url = f"https://{domain}/health"
+    inbound_ok = False
+    try:
+        res = requests.get(test_url, timeout=10)
+        if res.status_code == 200 and b"OK" in res.content:
+            inbound_ok = True
+            log.info(f"✅ SELF-TEST: Inbound Jaringan Publik ({test_url}) SUKSES.")
+        else:
+            log.error(f"❌ SELF-TEST: Inbound Jaringan Publik gagal. Status: {res.status_code}")
+    except Exception as e:
+        log.error(f"❌ SELF-TEST: Inbound Jaringan Publik mengalami error: {e}")
+        
+    # 2. Tes API BingX
+    bingx_ok = False
+    try:
+        price = bx.get_current_price("BTC-USDT")
+        if price > 0:
+            bingx_ok = True
+            log.info(f"✅ SELF-TEST: Koneksi API BingX SUKSES. Harga BTC: {price}")
+        else:
+            log.error("❌ SELF-TEST: Koneksi API BingX mengembalikan harga 0.")
+    except Exception as e:
+        log.error(f"❌ SELF-TEST: Koneksi API BingX mengalami error: {e}")
+        
+    # 3. Kirim Status ke Telegram
+    telegram_ok = False
+    try:
+        TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7809584261")
+        
+        status_emoji = "🟢" if (inbound_ok and bingx_ok) else "🔴"
+        status_text = "SEHAT" if (inbound_ok and bingx_ok) else "Bermasalah"
+        
+        tg_msg = (
+            f"🛠️ *LAPORAN STARTUP SELF-TEST*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🌐 *Inbound Jaringan:* `{'OK' if inbound_ok else 'ERROR'}`\n"
+            f"🪙 *API BingX:* `{'OK' if bingx_ok else 'ERROR'}`\n"
+            f"📊 *Status Sistem:* {status_emoji} `{status_text}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━"
+        )
+        
+        if TG_TOKEN:
+            res = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                                json={"chat_id": TG_CHAT_ID, "text": tg_msg, "parse_mode": "Markdown"}, timeout=5)
+            if res.status_code == 200:
+                telegram_ok = True
+    except Exception as e:
+        log.error(f"❌ SELF-TEST: Gagal kirim notif Telegram: {e}")
+        
+    # Logika Promosi Mode Trading
+    env_paper = os.getenv("PAPER_MODE", "true").lower() == "true"
+    env_demo = os.getenv("USE_DEMO", "true").lower() == "true"
+    
+    if inbound_ok and bingx_ok:
+        if not env_paper and not env_demo:
+            state_manager.promote_to_live()
+            log.info("🚀 SELF-TEST: Semua clear. Sistem otomatis dipromosikan ke LIVE MODE (Uang Asli).")
+            try:
+                requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                              json={"chat_id": TG_CHAT_ID, "text": "🟢 *SYSTEM PROMOTED:* Uji mandiri sukses. Bot aktif berjalan di mode *LIVE (Uang Asli)*.", "parse_mode": "Markdown"}, timeout=5)
+            except:
+                pass
+        else:
+            state_manager.demote_to_safe_mode("Dibatasi oleh konfigurasi Env Var (PAPER_MODE/USE_DEMO=true)")
+            log.info("🔒 SELF-TEST: Jalur koneksi clear, tetapi bot dikunci di SAFE MODE sesuai konfigurasi env var.")
+    else:
+        reason = []
+        if not inbound_ok: reason.append("Inbound Jaringan Error")
+        if not bingx_ok: reason.append("API BingX Error")
+        state_manager.demote_to_safe_mode(", ".join(reason))
+        
+        try:
+            requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                          json={"chat_id": TG_CHAT_ID, "text": f"🚨 *SYSTEM LOCKED:* Uji mandiri gagal ({', '.join(reason)}). Bot dikunci di *SAFE MODE (Simulasi)* demi keamanan dana Anda.", "parse_mode": "Markdown"}, timeout=5)
+        except:
+            pass
+
+
 if __name__ == "__main__":
     # Cetak info env PORT saat startup
     raw_port = os.getenv("PORT")
@@ -160,6 +262,9 @@ if __name__ == "__main__":
         start_background_monitor()
     else:
         log.info("📡 Background monitor thread dinonaktifkan via env var.")
+    
+    # Jalankan Autonomous Self-Test secara asinkron agar tidak memblokir bind socket
+    threading.Thread(target=run_autonomous_self_test, daemon=True).start()
     
     port = int(raw_port or 8080)
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
