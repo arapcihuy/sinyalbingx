@@ -2,3 +2,4 @@ requests
 python-dotenv
 certifi
 urllib3
+pyTelegramBotAPI

@@ -31,3 +31,12 @@ def demote_to_safe_mode(reason=""):
     _USE_DEMO = True
     _SYSTEM_STATUS = f"SAFE_MODE: {reason}"
     logger.warning(f"🔴 SYSTEM DEMOTED: Bot dikunci di mode simulasi aman. Alasan: {reason}")
+
+def set_mode(paper_mode: bool, use_demo: bool, system_status: str):
+    """Mengubah status mode trading secara dinamis di memori (misal saat pengujian)."""
+    global _PAPER_MODE, _USE_DEMO, _SYSTEM_STATUS
+    _PAPER_MODE = paper_mode
+    _USE_DEMO = use_demo
+    _SYSTEM_STATUS = system_status
+    logger.info(f"⚙️ SYSTEM STATE UPDATED: paper_mode={paper_mode}, use_demo={use_demo}, status={system_status}")
+
