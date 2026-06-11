@@ -415,6 +415,7 @@ def execute_signal(data: dict) -> dict:
         return {"status": f"failed: {order_res.get('msg')}", "symbol": symbol}
 
 def _close_position(symbol: str) -> dict:
+    global active_trade_data
     paper_mode = get_paper_mode()
     if paper_mode:
         trades = load_paper_trades()
@@ -433,6 +434,11 @@ def _close_position(symbol: str) -> dict:
         close_side = "SELL" if side == "LONG" else "BUY"
         bx.place_order(symbol, close_side, side, qty)
     bx.cancel_all_orders(symbol)
+    
+    if symbol in active_trade_data:
+        del active_trade_data[symbol]
+        save_active_trades()
+        
     return {"msg": f"Closed {symbol}"}
 
 # Counter global untuk meredam spam alert Telegram
