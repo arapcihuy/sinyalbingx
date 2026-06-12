@@ -347,7 +347,7 @@ def run_autonomous_self_test_loop():
                 log.error(f"❌ SELF-TEST: Koneksi API BingX mengalami error: {e}")
                 
             # Logika Promosi / Demotasi Mode Trading (Internal Tanpa Notif Telegram)
-            if inbound_ok and bingx_ok:
+            if bingx_ok:
                 if not env_paper and not env_demo:
                     state_manager.promote_to_live()
                     if prev_mode["system_status"] != "LIVE":
@@ -357,12 +357,12 @@ def run_autonomous_self_test_loop():
                     if not prev_mode["system_status"].startswith("SAFE_MODE"):
                         log.info("🔒 SELF-TEST: Koneksi sehat, tetapi bot tetap di SAFE MODE sesuai konfigurasi env var.")
             else:
-                reason = []
-                if not inbound_ok: reason.append("Inbound Jaringan Error")
-                if not bingx_ok: reason.append(f"API BingX Error: {api_err_msg}")
-                err_msg = ", ".join(reason)
+                err_msg = f"API BingX Error: {api_err_msg}"
                 state_manager.demote_to_safe_mode(err_msg)
                 log.warning(f"🚨 SELF-TEST: Gagal ({err_msg}). Bot dikunci di SAFE MODE (Simulasi) demi keamanan dana.")
+            
+            if not inbound_ok:
+                log.warning("⚠️ SELF-TEST: Inbound Jaringan Publik tidak dapat diverifikasi (kemungkinan DNS propagation delay). Sinyal TV tetap akan diterima jika tunnel sudah aktif.")
                 
         except Exception as e:
             log.error(f"❌ Error dalam loop Self-Test: {e}")

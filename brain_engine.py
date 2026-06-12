@@ -275,6 +275,26 @@ def calculate_smart_multi_tp_qty(balance: float, entry_price: float, tp_prices: 
         if tp_prices[i] > 0 and final_qtys[i] < cfg.get("min_qty", 0.001):
             final_qtys[i] = cfg.get("min_qty", 0.001)
             
+    # --- DYNAMIC TP LEVEL CONSOLIDATION FOR SMALL BALANCE ---
+    # Jika margin yang dibutuhkan setelah menerapkan min_qty melebihi 95% dari saldo tersedia,
+    # kurangi level TP satu per satu dari yang terjauh demi menghindari error "Insufficient margin".
+    while True:
+        current_total_qty = sum(final_qtys)
+        if current_total_qty == 0:
+            break
+        current_required_margin = (current_total_qty * entry_price) / leverage if leverage > 0 else 0
+        if current_required_margin > (balance * 0.95) and current_required_margin > 0:
+            active_indices = [idx for idx, price in enumerate(tp_prices) if price > 0 and final_qtys[idx] > 0]
+            if len(active_indices) > 1:
+                idx_to_disable = active_indices[-1]
+                logger.info(f"⚠️ DYNAMIC CONSOLIDATION: Margin ${current_required_margin:.2f} melebihi 95% saldo tersedia (${balance:.2f}). Menonaktifkan TP{idx_to_disable+1} ({tp_prices[idx_to_disable]}) untuk mengurangi beban margin.")
+                final_qtys[idx_to_disable] = 0.0
+                continue
+            else:
+                break
+        else:
+            break
+            
     return {
         "qtys": final_qtys,
         "total_qty": round(sum(final_qtys), qty_prec),
