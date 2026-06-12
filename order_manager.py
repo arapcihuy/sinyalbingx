@@ -339,6 +339,10 @@ def execute_signal(data: dict) -> dict:
     qtys = calc_result["qtys"]
     qty = calc_result["total_qty"]
     
+    if qty <= 0:
+        logger.warning(f"🚫 Saldo tersedia (${balance:.2f} USDT) terlalu kecil untuk membuka kuantitas minimum untuk {symbol}. Mengabaikan sinyal.")
+        return {"status": "insufficient_balance", "symbol": symbol}
+    
     # ATR untuk trailing
     atr = entry_price * 0.01  # fallback 1%
     try:
