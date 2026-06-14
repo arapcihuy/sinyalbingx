@@ -90,6 +90,11 @@ def clean_number(num_str):
         return 0.0
 
 def parse_plain_text_alert(text):
+    # Proteksi: Abaikan pesan default order fill dari TradingView Strategy
+    if re.search(r"order\s+(buy|sell|long|short)\s+@", text, re.IGNORECASE) or "terisi pada" in text.lower():
+        log.warning(f"🛡️ Ignored default TradingView strategy order fill notification: {text[:120]}")
+        return None
+
     data = {}
     
     # 1. Parse Action
