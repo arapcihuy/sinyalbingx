@@ -102,17 +102,16 @@ def get_symbol_precision(symbol):
         return _SYMBOL_PRECISION_CACHE[symbol]
     
     try:
-        res = bx._request('GET', '/openApi/swap/v2/quote/contracts', {"symbol": symbol})
-        if res.get("code") == 0 and res.get("data"):
-            data = res["data"][0] if isinstance(res["data"], list) else res["data"]
-            precision = {
-                "qty": int(data.get("quantityPrecision", 2)),
-                "price": int(data.get("pricePrecision", 2))
-            }
-            _SYMBOL_PRECISION_CACHE[symbol] = precision
-            return precision
+        import brain_engine
+        cfg = brain_engine.get_symbol_config(symbol)
+        precision = {
+            "qty": cfg["qty_precision"],
+            "price": cfg["price_precision"]
+        }
+        _SYMBOL_PRECISION_CACHE[symbol] = precision
+        return precision
     except Exception as e:
-        logger.error(f"Gagal ambil precision untuk {symbol}: {e}")
+        logger.error(f"Gagal ambil precision untuk {symbol} via brain_engine: {e}")
     
     return {"qty": 2, "price": 2}
 
@@ -141,6 +140,9 @@ def calculate_quantity_risk_based(balance: float, entry_price: float, sl_price: 
 
 def is_pair_eligible(symbol):
     """Cek apakah symbol ada dalam daftar eligible dari scanner."""
+    if os.getenv("FILTER_BY_SCANNER", "false").lower() != "true":
+        return True
+        
     try:
         if not os.path.exists("scanned_pairs.json"):
             return True
@@ -548,6 +550,10 @@ def sync_missing_tpsl():
 
             # Cek order yang ada
             orders_res = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
+            if orders_res.get("code") != 0:
+                logger.error(f"Gagal mengambil open orders untuk {symbol}: {orders_res}")
+                continue  # Lewati koin ini agar tidak menaruh order duplikat
+                
             open_orders_raw = orders_res.get("data", [])
             if isinstance(open_orders_raw, dict):
                 open_orders = open_orders_raw.get("orders", [])
@@ -856,6 +862,9 @@ def check_and_update_trailing_sl():
                     # 1. Batalkan semua SL lama di bursa (STOP_MARKET)
                     try:
                         orders_res = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
+                        if orders_res.get("code") != 0:
+                            raise Exception(f"API Error get open orders: {orders_res}")
+                            
                         open_orders = orders_res.get("data", [])
                         if isinstance(open_orders, dict):
                             open_orders = open_orders.get("orders", [])
@@ -864,7 +873,8 @@ def check_and_update_trailing_sl():
                             if order.get("type") == "STOP_MARKET":
                                 bx.cancel_order(symbol, order.get("orderId"))
                     except Exception as ce:
-                        logger.error(f"Gagal cancel SL lama: {ce}")
+                        logger.error(f"Gagal cancel SL lama, batalkan update SL baru demi keamanan: {ce}")
+                        continue  # SKIP placing new SL if we couldn't cancel old ones!
                         
                     # 2. Pasang SL baru di bursa
                     bx._request("POST", "/openApi/swap/v2/trade/order", {

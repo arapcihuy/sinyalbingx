@@ -68,10 +68,39 @@ RISK_TIERS = [
 ]
 
 
+_DYNAMIC_SYMBOL_CACHE = {}
+
 def get_symbol_config(symbol: str) -> dict:
-    """Ambil konfigurasi symbol (BTC/ETH) atau fallback."""
-    cfg = SYMBOL_CONFIG.get(symbol, DEFAULT_CONFIG)
-    return cfg
+    """Ambil konfigurasi symbol (BTC/ETH) atau fetch secara dinamis dari BingX."""
+    if symbol in SYMBOL_CONFIG:
+        return SYMBOL_CONFIG[symbol]
+        
+    global _DYNAMIC_SYMBOL_CACHE
+    if symbol in _DYNAMIC_SYMBOL_CACHE:
+        return _DYNAMIC_SYMBOL_CACHE[symbol]
+        
+    try:
+        import bingx_client as bx
+        res = bx._request('GET', '/openApi/swap/v2/quote/contracts', {"symbol": symbol})
+        if res.get("code") == 0 and res.get("data"):
+            data = res["data"][0] if isinstance(res["data"], list) else res["data"]
+            cfg = {
+                "atr_period": 14,
+                "tp_atr_multiplier": 2.0,
+                "sl_atr_multiplier": 1.0,
+                "trail_activate_atr": 1.0,
+                "trail_offset_atr": 0.5,
+                "min_qty": float(data.get("tradeMinQuantity", 0.001)),
+                "qty_precision": int(data.get("quantityPrecision", 2)),
+                "price_precision": int(data.get("pricePrecision", 2)),
+            }
+            _DYNAMIC_SYMBOL_CACHE[symbol] = cfg
+            logger.info(f"✨ DYNAMIC CONFIG LOADED FOR {symbol}: min_qty={cfg['min_qty']}, qty_prec={cfg['qty_precision']}, price_prec={cfg['price_precision']}")
+            return cfg
+    except Exception as e:
+        logger.error(f"⚠️ Gagal load dynamic config untuk {symbol}, menggunakan DEFAULT_CONFIG: {e}")
+        
+    return DEFAULT_CONFIG
 
 
 def calculate_atr(candles: list, period: int = 14) -> float:

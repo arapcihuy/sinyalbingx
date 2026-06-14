@@ -239,7 +239,7 @@ def get_open_positions(symbol: str = None) -> list:
             # Filter posisi berdasarkan symbol (misal: 'BTC-USDT')
             return [p for p in positions if p.get("symbol") == symbol and abs(float(p.get("positionAmt", 0))) > 0]
         return [p for p in positions if abs(float(p.get("positionAmt", 0))) > 0]
-    return []
+    raise Exception(f"Gagal mengambil posisi aktif dari BingX API (code={result.get('code')}, msg={result.get('msg')})")
 
 
 # ─────────────────────────────────────────────

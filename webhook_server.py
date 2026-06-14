@@ -53,6 +53,32 @@ def run_async_execution(data, pair, signal, price, sl, tp1, tp2, tp3, tp4, TG_TO
 
 import re
 
+_TRADEABLE_SYMBOLS_CACHE = {"BTC-USDT", "ETH-USDT"}
+
+def is_symbol_tradeable(symbol: str) -> bool:
+    """Cek apakah symbol valid dan aktif di BingX (dengan caching)."""
+    global _TRADEABLE_SYMBOLS_CACHE
+    if symbol in _TRADEABLE_SYMBOLS_CACHE:
+        return True
+        
+    try:
+        import bingx_client as bx
+        res = bx._request('GET', '/openApi/swap/v2/quote/contracts', {"symbol": symbol})
+        if res.get("code") == 0 and res.get("data"):
+            data = res["data"][0] if isinstance(res["data"], list) else res["data"]
+            if int(data.get("status", 0)) == 1:
+                _TRADEABLE_SYMBOLS_CACHE.add(symbol)
+                log.info(f"✅ Symbol {symbol} validated dynamically and added to cache.")
+                return True
+            else:
+                log.warning(f"⚠️ Symbol {symbol} exists but status is inactive ({data.get('status')}).")
+        else:
+            log.warning(f"❓ Symbol {symbol} not found or API error: {res}")
+    except Exception as e:
+        log.error(f"❌ Gagal verifikasi simbol {symbol} di BingX: {e}")
+        
+    return False
+
 def clean_number(num_str):
     if not num_str:
         return 0.0
@@ -216,8 +242,8 @@ class Handler(BaseHTTPRequestHandler):
                 if signal not in ("BUY", "SELL", "LONG", "SHORT"):
                     self._respond(400, {"error": "invalid signal"})
                     return
-                if pair not in ("BTC-USDT", "ETH-USDT"):
-                    self._respond(200, {"status": "ignored", "reason": "symbol not allowed"})
+                if not is_symbol_tradeable(pair):
+                    self._respond(200, {"status": "ignored", "reason": f"symbol {pair} not allowed or inactive"})
                     return
 
                 # 4. Jalankan Eksekusi secara Asinkron
