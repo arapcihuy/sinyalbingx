@@ -185,16 +185,18 @@ def check_paper_exit():
                 
                 # Kirim Notif Telegram Close
                 try:
-                    url_notif = f"https://api.telegram.org/bot861083...Fu7Y/sendMessage"
-                    chat_id = "7809584261"
+                    TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7809584261")
+                    url_notif = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+                    chat_id = TG_CHAT_ID
                     emoji = "🎯" if exit_trigger == "TP" else "🛑"
                     pnl_color = "+" if t["pnl_usdt"] >= 0 else ""
                     msg_text = (
-                        f"{emoji} *SINYAL SELESAI (CLOSE)*\n"
+                        f"{emoji} *SINYAL SELESAI (CLOSE) - PAPER*\n"
                         f"━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🪙 *Pair:* `{t['symbol']}`\n"
+                        f"🪙 *Pair:* `{t['symbol']}` ({t.get('side', 'LONG')})\n"
                         f"📈 *Exit:* `{exit_trigger}` @ `{t['exit_price']:.4f}`\n"
-                        f"💰 *PnL:* `{pnl_color}{t['pnl_usdt']:.2f} USDT`\n"
+                        f"💰 *PnL Bersih:* `{pnl_color}{t['pnl_usdt']:.2f} USDT`\n"
                         f"⚙️ *Mode:* `PAPER`\n"
                         f"━━━━━━━━━━━━━━━━━━━━━"
                     )
@@ -205,6 +207,71 @@ def check_paper_exit():
                 updated = True
     if updated:
         update_paper_trades(trades)
+
+def notify_live_close(symbol: str, trade_data: dict):
+    """Kirim notifikasi ke Telegram bahwa posisi LIVE telah selesai/tutup."""
+    try:
+        # Beri jeda 2 detik agar bursa mencatat data income
+        time.sleep(2)
+        income_history = bx.get_income_history(symbol=symbol, days=1)
+        
+        now_ms = time.time() * 1000
+        five_mins_ms = 5 * 60 * 1000
+        
+        recent_pnl_records = []
+        for inc in income_history:
+            try:
+                inc_time = int(inc.get("time", 0))
+                if inc.get("incomeType") in ["REALIZED_PNL", "COMMISSION"] and (now_ms - inc_time < five_mins_ms):
+                    recent_pnl_records.append(inc)
+            except:
+                continue
+        
+        realized_pnl = sum(float(r.get("income", 0)) for r in recent_pnl_records)
+        
+        if not recent_pnl_records:
+            # Fallback jika data income belum tercatat
+            try:
+                curr_price = bx.get_current_price(symbol)
+            except:
+                curr_price = trade_data.get("entry_price", 0.0)
+            side = trade_data.get("side", "LONG")
+            entry = trade_data.get("entry_price", curr_price)
+            qty = trade_data.get("qty", 0.0)
+            if side == "LONG":
+                realized_pnl = (curr_price - entry) * qty
+            else:
+                realized_pnl = (entry - curr_price) * qty
+            exit_price = curr_price
+            exit_trigger = "MANUAL/TP/SL"
+        else:
+            try:
+                curr_price = bx.get_current_price(symbol)
+            except:
+                curr_price = trade_data.get("entry_price", 0.0)
+            exit_price = curr_price
+            exit_trigger = "TP" if realized_pnl >= 0 else "SL"
+            
+        emoji = "🎯" if realized_pnl >= 0 else "🛑"
+        pnl_sign = "+" if realized_pnl >= 0 else ""
+        
+        TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7809584261")
+        
+        msg_text = (
+            f"{emoji} *SINYAL SELESAI (CLOSE) - LIVE*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🪙 *Pair:* `{symbol}` ({trade_data.get('side', 'LONG')})\n"
+            f"📈 *Exit:* `{exit_trigger}` @ `{exit_price:.4f}`\n"
+            f"💰 *PnL Bersih:* `{pnl_sign}{realized_pnl:.2f} USDT`\n"
+            f"⚙️ *Mode:* `LIVE`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━"
+        )
+        url_notif = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+        requests.post(url_notif, json={"chat_id": TG_CHAT_ID, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
+        logger.info(f"📨 LIVE CLOSE NOTIFICATION SENT for {symbol} | PnL: ${realized_pnl:.2f}")
+    except Exception as e:
+        logger.error(f"Gagal kirim notif live close untuk {symbol}: {e}")
 
 def is_position_open(symbol):
     """Cek apakah ada posisi terbuka untuk symbol ini di bursa atau paper."""
@@ -260,12 +327,12 @@ def execute_signal(data: dict) -> dict:
             return {"status": "already_open", "symbol": symbol}
 
     # ── SLOT MANAGEMENT ──
-    MAX_SLOTS = 3 
-    current_slots = get_total_open_positions_count()
-    
-    if current_slots >= MAX_SLOTS:
-        logger.warning(f"🚫 Slot Penuh ({current_slots}/{MAX_SLOTS}). Mengabaikan {symbol}.")
-        return {"status": "slots_full", "symbol": symbol}
+    # MAX_SLOTS = 3 
+    # current_slots = get_total_open_positions_count()
+    # 
+    # if current_slots >= MAX_SLOTS:
+    #     logger.warning(f"🚫 Slot Penuh ({current_slots}/{MAX_SLOTS}). Mengabaikan {symbol}.")
+    #     return {"status": "slots_full", "symbol": symbol}
     
     # ── MARGIN SAFETY GUARD ──
     # Jangan buka trade baru jika saldo yang tersisa terlalu mepet
@@ -662,19 +729,25 @@ def check_and_update_trailing_sl():
         else:
             positions = bx.get_open_positions()
             
-        if not positions:
-            # Jika tidak ada posisi terbuka, kosongkan active_trade_data
-            if active_trade_data:
-                active_trade_data.clear()
-                save_active_trades()
-            return
+        open_symbols = [p["symbol"] for p in positions] if positions else []
         
-        # Hapus symbol yang sudah tidak ada di bursa dari active_trade_data
-        open_symbols = [p["symbol"] for p in positions]
+        # Hapus symbol yang sudah tidak ada di bursa dari active_trade_data dengan notifikasi
+        updated_state = False
         for sym in list(active_trade_data.keys()):
             if sym not in open_symbols:
+                try:
+                    if not paper_mode:
+                        notify_live_close(sym, active_trade_data[sym])
+                except Exception as n_err:
+                    logger.error(f"Error notifying live close for {sym}: {n_err}")
                 del active_trade_data[sym]
-        save_active_trades()
+                updated_state = True
+                
+        if updated_state:
+            save_active_trades()
+            
+        if not positions:
+            return
         
         for pos in positions:
             symbol = pos["symbol"]

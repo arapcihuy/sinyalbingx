@@ -32,18 +32,76 @@ def run_async_execution(data, pair, signal, price, sl, tp1, tp2, tp3, tp4, TG_TO
 
         try:
             import requests as r
-            msg = (
-                f"⚡ *SINYAL DIEKSEKUSI ({dt:.1f}s)*\n"
-                f"━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🪙 *Pair:* `{pair}`\n"
-                f"📈 *Action:* `{signal}`\n"
-                f"💵 *Entry:* `{price}`\n"
-                f"🛑 *Stop Loss:* `{sl}`\n"
-                f"🎯 *TP1:* `{tp1}` | *TP2:* `{tp2}`\n"
-                f"🎯 *TP3:* `{tp3}` | *TP4:* `{tp4}`\n"
-                f"Result: `{result.get('status')}`\n"
-                f"━━━━━━━━━━━━━━━━━━━━━"
-            )
+            status = result.get("status", "failed")
+            
+            # 1. Tentukan Header & Emoji Indikator
+            if status in ["success", "success_paper"]:
+                mode_label = "PAPER" if status == "success_paper" else "LIVE"
+                header = f"🟢 *ENTRY BERHASIL ({mode_label})*"
+            elif status in ["already_open", "slots_full", "ignored_by_scanner"]:
+                reason_map = {
+                    "already_open": "Posisi sudah terbuka di bursa/simulasi.",
+                    "slots_full": "Slot posisi aktif sudah penuh (maksimal 3).",
+                    "ignored_by_scanner": "Diabaikan oleh scanner karena expectancy rendah."
+                }
+                header = f"🟡 *SINYAL DIABAIKAN*"
+                reason_text = reason_map.get(status, f"Status: `{status}`")
+            elif status in ["low_margin", "insufficient_balance"]:
+                reason_map = {
+                    "low_margin": "Margin tersedia di bursa terlalu kecil (< 20% equity).",
+                    "insufficient_balance": "Saldo akun terlalu kecil untuk entri minimal."
+                }
+                header = f"🔴 *EKSEKUSI BATAL (MANAJEMEN MODAL)*"
+                reason_text = reason_map.get(status, f"Status: `{status}`")
+            else:
+                header = f"🔴 *EKSEKUSI GAGAL*"
+                reason_text = f"Detail: `{status}`"
+
+            # 2. Ambil parameter tambahan dari state jika berhasil
+            extra_details = ""
+            if status in ["success", "success_paper"]:
+                try:
+                    trade_info = order_manager.active_trade_data.get(pair)
+                    if trade_info:
+                        lev = trade_info.get("leverage", 0)
+                        risk = trade_info.get("risk_pct", 0.0)
+                        ent = trade_info.get("entry_price", price) or price
+                        t_qty = trade_info.get("qty", 0.0)
+                        margin_val = (t_qty * ent) / lev if (lev and ent) else 0.0
+                        
+                        extra_details = (
+                            f"🛡️ *Leverage:* `{lev}x` | *Risk:* `{risk}%`\n"
+                            f"💰 *Margin:* `${margin_val:.2f} USDT` (Isolated)\n"
+                        )
+                except Exception as ex_err:
+                    log.error(f"Gagal memuat detail trade tambahan: {ex_err}")
+
+            # 3. Bangun isi pesan
+            msg_lines = [
+                f"{header}",
+                f"━━━━━━━━━━━━━━━━━━━━━",
+                f"🪙 *Pair:* `{pair}` ({'LONG' if signal in ['BUY', 'LONG'] else 'SHORT'})"
+            ]
+            
+            if status in ["success", "success_paper"]:
+                if extra_details:
+                    msg_lines.append(extra_details.strip())
+                msg_lines.extend([
+                    f"💵 *Entry Price:* `{price if price > 0 else 'MARKET'}`",
+                    f"🛑 *Stop Loss:* `{sl}`",
+                    f"🎯 *TP1:* `{tp1}` | *TP2:* `{tp2}`"
+                ])
+                if tp3 > 0 or tp4 > 0:
+                    msg_lines.append(f"🎯 *TP3:* `{tp3}` | *TP4:* `{tp4}`")
+            else:
+                msg_lines.append(f"⚠️ *Alasan:* {reason_text}")
+                if price > 0:
+                    msg_lines.append(f"💵 *Harga Sinyal:* `{price}`")
+                
+            msg_lines.append(f"⏱️ *Kecepatan:* `{dt:.2f}s`")
+            msg_lines.append(f"━━━━━━━━━━━━━━━━━━━━━")
+            
+            msg = "\n".join(msg_lines)
             r.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
                   json={"chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=5)
         except Exception as tg_err:
@@ -407,11 +465,25 @@ def run_autonomous_self_test_loop():
 # ─────────────────────────────────────────────
 import telebot
 
+def get_freshness_timestamp():
+    import datetime
+    return f"🕒 Diperbarui: {datetime.datetime.now().strftime('%d-%m-%Y %H:%M:%S')}"
+
 bot = None
 if TG_TOKEN:
     try:
         bot = telebot.TeleBot(TG_TOKEN)
         log.info("🤖 pyTelegramBotAPI initialized successfully.")
+        try:
+            bot.set_my_commands([
+                telebot.types.BotCommand("status", "Cek status bot & detail posisi aktif (LIVE/PAPER)"),
+                telebot.types.BotCommand("balance", "Cek saldo equity & margin bebas"),
+                telebot.types.BotCommand("pnl", "Laporan floating & realized PnL berkala"),
+                telebot.types.BotCommand("settings", "Lihat konfigurasi bot trading saat ini")
+            ])
+            log.info("📡 Clickable menu commands registered successfully in Telegram.")
+        except Exception as cmd_err:
+            log.error(f"❌ Gagal set menu commands Telegram: {cmd_err}")
     except Exception as e:
         log.error(f"❌ Failed to initialize TeleBot: {e}")
 
@@ -440,6 +512,7 @@ if bot:
             import state_manager
             import order_manager
             import bingx_client as bx
+            import time
             
             mode = state_manager.get_trading_mode()
             paper_mode = mode["paper_mode"]
@@ -449,25 +522,112 @@ if bot:
                 trades = order_manager.load_paper_trades()
                 open_trades = [t for t in trades if t.get("status") == "OPEN_PAPER"]
                 pos_count = len(open_trades)
-                pos_details = "\n".join([f"• `{t['symbol']}` ({t['side']}) Entry: `{t['entry']}` | SL: `{t['sl']}`" for t in open_trades])
+                
+                pos_details_list = []
+                for t in open_trades:
+                    symbol = t["symbol"]
+                    side = t["side"]
+                    entry = float(t["entry"])
+                    qty = float(t["qty"])
+                    sl = float(t["sl"])
+                    tp = float(t["tp"])
+                    
+                    try:
+                        curr_price = bx.get_current_price(symbol)
+                    except:
+                        curr_price = entry
+                        
+                    if side == "LONG":
+                        pnl = (curr_price - entry) * qty
+                    else:
+                        pnl = (entry - curr_price) * qty
+                        
+                    lev = 15
+                    margin = (qty * entry) / lev
+                    pnl_pct = (pnl / margin * 100) if margin > 0 else 0.0
+                    
+                    pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+                    pnl_sign = "+" if pnl >= 0 else ""
+                    
+                    detail = (
+                        f"🪙 `{symbol}` ({'🟢 LONG' if side == 'LONG' else '🔴 SHORT'})\n"
+                        f"  ├─ Leverage: `{lev}x` | Margin: `Isolated`\n"
+                        f"  ├─ Entry: `${entry:.4f}` ➔ Current: `${curr_price:.4f}`\n"
+                        f"  ├─ Size: `{qty} Qty` | Margin: `${margin:.2f} USDT`\n"
+                        f"  ├─ Unrealized PnL: `{pnl_sign}{pnl:.2f} USDT ({pnl_sign}{pnl_pct:.2f}%)` {pnl_emoji}\n"
+                        f"  └─ Targets: SL `${sl:.4f}` | TP `${tp:.4f}`"
+                    )
+                    pos_details_list.append(detail)
+                pos_details = "\n\n".join(pos_details_list)
             else:
                 positions = bx.get_open_positions()
                 pos_count = len(positions)
-                pos_details = "\n".join([f"• `{p['symbol']}` ({p['positionSide']}) x{p['leverage']} Qty: `{abs(float(p['positionAmt']))}` @ `{p['avgPrice']}`" for p in positions])
+                
+                pos_details_list = []
+                for p in positions:
+                    symbol = p["symbol"]
+                    side = p["positionSide"]
+                    lev = int(p["leverage"])
+                    amt = abs(float(p["positionAmt"]))
+                    entry = float(p["avgPrice"])
+                    
+                    try:
+                        curr_price = bx.get_current_price(symbol)
+                    except:
+                        curr_price = entry
+                        
+                    unrealized_pnl = float(p.get("unrealizedProfit", 0.0))
+                    margin = float(p.get("margin", 0.0))
+                    pnl_pct = (unrealized_pnl / margin * 100) if margin > 0 else 0.0
+                    
+                    pnl_emoji = "🟢" if unrealized_pnl >= 0 else "🔴"
+                    pnl_sign = "+" if unrealized_pnl >= 0 else ""
+                    
+                    sl_price = 0.0
+                    tp_list = []
+                    try:
+                        orders_res = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
+                        open_orders = orders_res.get("data", [])
+                        if isinstance(open_orders, dict):
+                            open_orders = open_orders.get("orders", [])
+                        
+                        for o in open_orders:
+                            o_type = o.get("type", "")
+                            if "STOP" in o_type:
+                                sl_price = float(o.get("stopPrice", 0.0))
+                            elif "TAKE_PROFIT" in o_type:
+                                tp_list.append(float(o.get("stopPrice", 0.0)))
+                    except:
+                        pass
+                    
+                    tp_str = " | ".join([f"TP{i+1} `${val:.4f}`" for i, val in enumerate(tp_list)]) if tp_list else "Belum dipasang"
+                    sl_str = f"`${sl_price:.4f}`" if sl_price > 0 else "Belum dipasang"
+                    
+                    detail = (
+                        f"🪙 `{symbol}` ({'🟢 LONG' if side == 'LONG' else '🔴 SHORT'})\n"
+                        f"  ├─ Leverage: `{lev}x` | Margin: `Isolated`\n"
+                        f"  ├─ Entry: `${entry:.4f}` ➔ Current: `${curr_price:.4f}`\n"
+                        f"  ├─ Size: `{amt} Qty` | Margin: `${margin:.2f} USDT`\n"
+                        f"  ├─ Unrealized PnL: `{pnl_sign}{unrealized_pnl:.2f} USDT ({pnl_sign}{pnl_pct:.2f}%)` {pnl_emoji}\n"
+                        f"  └─ Targets: SL {sl_str} | {tp_str}"
+                    )
+                    pos_details_list.append(detail)
+                pos_details = "\n\n".join(pos_details_list)
                 
             response = (
                 f"📊 *STATUS BOT TRADING*\n"
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
                 f"⚙️ *Mode Trading:* `{'PAPER / SIMULASI' if paper_mode else 'LIVE / UANG ASLI'}`\n"
                 f"📡 *Status Koneksi:* `{status_str}`\n"
-                f"📈 *Posisi Terbuka:* `{pos_count} / 3`\n"
+                f"📈 *Posisi Terbuka:* `{pos_count} Posisi` (Tanpa Batas)\n\n"
                 f"{pos_details if pos_details else '• (Tidak ada posisi aktif)'}\n"
-                f"━━━━━━━━━━━━━━━━━━━━━"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{get_freshness_timestamp()}"
             )
             bot.reply_to(message, response, parse_mode="Markdown")
         except Exception as e:
             log.error(f"Error handling /status command: {e}")
-            bot.reply_to(message, f"❌ Gagal memproses /status: {str(e)}")
+            bot.reply_to(message, "❌ Gagal memproses /status. Terjadi gangguan pada koneksi API atau rate limit tercapai. Silakan coba beberapa saat lagi.", parse_mode="Markdown")
 
     @bot.message_handler(commands=['balance'])
     def handle_balance(message):
@@ -484,26 +644,47 @@ if bot:
             if paper_mode:
                 trades = order_manager.load_paper_trades()
                 closed_pnl = sum([t.get("pnl_usdt", 0) for t in trades if t.get("status", "").startswith("CLOSED")])
-                balance = 1000.0 + closed_pnl
+                total_equity = 1000.0 + closed_pnl
+                
+                open_trades = [t for t in trades if t.get("status") == "OPEN_PAPER"]
+                locked_margin = sum([(float(t["qty"]) * float(t["entry"])) / 15 for t in open_trades])
+                available_margin = total_equity - locked_margin
+                
                 response = (
-                    f"💵 *SALDO SIMULASI (PAPER)*\n"
+                    f"🏦 *SALDO SIMULASI (PAPER)*\n"
                     f"━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"💰 *Total Equity:* `${balance:.2f} USDT`\n"
+                    f"💰 *Total Equity:* `${total_equity:.2f} USDT`\n"
+                    f"💵 *Available Margin:* `${available_margin:.2f} USDT` (Bisa untuk entry baru)\n"
+                    f"🔒 *Locked Margin:* `${locked_margin:.2f} USDT` (Sedang di posisi aktif)\n"
                     f"📝 *Catatan:* Berjalan di akun virtual/demo lokal.\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━"
+                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"{get_freshness_timestamp()}"
                 )
             else:
-                balance = bx.get_balance()
+                balance_res = bx._request("GET", "/openApi/swap/v2/user/balance")
+                if balance_res.get("code") == 0:
+                    bal_data = balance_res.get("data", {}).get("balance", {})
+                    equity = float(bal_data.get("equity", 0.0))
+                    available = float(bal_data.get("availableMargin", 0.0))
+                    locked = equity - available
+                else:
+                    equity = bx.get_balance()
+                    available = equity
+                    locked = 0.0
+                    
                 response = (
-                    f"💵 *SALDO LIVE BINGX*\n"
+                    f"🏦 *SALDO LIVE BINGX*\n"
                     f"━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"💰 *Total Equity (Live):* `${balance:.2f} USDT`\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━"
+                    f"💰 *Total Equity:* `${equity:.2f} USDT`\n"
+                    f"💵 *Available Margin:* `${available:.2f} USDT` (Bisa untuk entry baru)\n"
+                    f"🔒 *Locked Margin:* `${locked:.2f} USDT` (Sedang di posisi aktif)\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"{get_freshness_timestamp()}"
                 )
             bot.reply_to(message, response, parse_mode="Markdown")
         except Exception as e:
             log.error(f"Error handling /balance command: {e}")
-            bot.reply_to(message, f"❌ Gagal memproses /balance: {str(e)}")
+            bot.reply_to(message, "❌ Gagal memproses /balance. Terjadi gangguan pada koneksi API atau rate limit tercapai. Silakan coba beberapa saat lagi.", parse_mode="Markdown")
 
     @bot.message_handler(commands=['pnl'])
     def handle_pnl(message):
@@ -513,6 +694,8 @@ if bot:
             import state_manager
             import order_manager
             import bingx_client as bx
+            import time
+            import datetime
             
             mode = state_manager.get_trading_mode()
             paper_mode = mode["paper_mode"]
@@ -521,68 +704,133 @@ if bot:
                 trades = order_manager.load_paper_trades()
                 closed_trades = [t for t in trades if t.get("status", "").startswith("CLOSED")]
                 open_trades = [t for t in trades if t.get("status") == "OPEN_PAPER"]
-                total_pnl = sum([t.get("pnl_usdt", 0) for t in closed_trades])
+                
+                unrealized_pnl = 0.0
+                for t in open_trades:
+                    symbol = t["symbol"]
+                    side = t["side"]
+                    entry = float(t["entry"])
+                    qty = float(t["qty"])
+                    try:
+                        curr_price = bx.get_current_price(symbol)
+                    except:
+                        curr_price = entry
+                    if side == "LONG":
+                        unrealized_pnl += (curr_price - entry) * qty
+                    else:
+                        unrealized_pnl += (entry - curr_price) * qty
+                
+                now = datetime.datetime.now()
+                pnl_24h = 0.0
+                pnl_3d = 0.0
+                pnl_7d = 0.0
+                for t in closed_trades:
+                    try:
+                        c_time = datetime.datetime.strptime(t.get("close_time", ""), "%Y-%m-%d %H:%M:%S")
+                        diff = now - c_time
+                        val = float(t.get("pnl_usdt", 0.0))
+                        if diff.total_seconds() < 24 * 3600:
+                            pnl_24h += val
+                        if diff.total_seconds() < 3 * 24 * 3600:
+                            pnl_3d += val
+                        if diff.total_seconds() < 7 * 24 * 3600:
+                            pnl_7d += val
+                    except:
+                        continue
+                
+                total_pnl = pnl_7d + unrealized_pnl
+                
+                pnl_float_sign = "+" if unrealized_pnl >= 0 else ""
+                pnl_24h_sign = "+" if pnl_24h >= 0 else ""
+                pnl_3d_sign = "+" if pnl_3d >= 0 else ""
+                pnl_7d_sign = "+" if pnl_7d >= 0 else ""
+                total_pnl_sign = "+" if total_pnl >= 0 else ""
                 
                 response = (
-                    f"📊 *LAPORAN PnL (PAPER)*\n"
+                    f"📊 *LAPORAN PnL SIMULASI (PAPER)*\n"
                     f"━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"✅ *Trade Tertutup:* `{len(closed_trades)}`\n"
-                    f"🟢 *Trade Terbuka:* `{len(open_trades)}`\n"
-                    f"💰 *Total PnL Bersih:* `{'+' if total_pnl >= 0 else ''}${total_pnl:.2f} USDT`\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━"
+                    f"🟢 *PnL Mengambang (Floating):* `{pnl_float_sign}{unrealized_pnl:.2f} USDT`\n"
+                    f"💵 *PnL Terealisasi (Realized):*\n"
+                    f"  ├─ Hari Ini (24j): `{pnl_24h_sign}{pnl_24h:.2f} USDT`\n"
+                    f"  ├─ 3 Hari Terakhir: `{pnl_3d_sign}{pnl_3d:.2f} USDT`\n"
+                    f"  └─ 7 Hari Terakhir: `{pnl_7d_sign}{pnl_7d:.2f} USDT`\n"
+                    f"💰 *Estimasi Total PnL:* `{total_pnl_sign}{total_pnl:.2f} USDT`\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"{get_freshness_timestamp()}"
                 )
             else:
                 positions = bx.get_open_positions()
                 unrealized_pnl = sum([float(p.get("unrealizedProfit", 0)) for p in positions])
                 
                 income = bx.get_income_history(days=7)
-                realized_pnl = sum([float(inc.get("income", 0)) for inc in income if inc.get("incomeType") in ["REALIZED_PNL", "COMMISSION"]])
                 
-                total_pnl = realized_pnl + unrealized_pnl
+                now_ms = time.time() * 1000
+                ms_in_day = 24 * 3600 * 1000
+                
+                pnl_24h = sum([float(inc.get("income", 0)) for inc in income if inc.get("incomeType") in ["REALIZED_PNL", "COMMISSION"] and (now_ms - int(inc.get("time", 0)) < ms_in_day)])
+                pnl_3d = sum([float(inc.get("income", 0)) for inc in income if inc.get("incomeType") in ["REALIZED_PNL", "COMMISSION"] and (now_ms - int(inc.get("time", 0)) < 3 * ms_in_day)])
+                pnl_7d = sum([float(inc.get("income", 0)) for inc in income if inc.get("incomeType") in ["REALIZED_PNL", "COMMISSION"]])
+                
+                total_pnl = pnl_7d + unrealized_pnl
+                
+                pnl_float_sign = "+" if unrealized_pnl >= 0 else ""
+                pnl_24h_sign = "+" if pnl_24h >= 0 else ""
+                pnl_3d_sign = "+" if pnl_3d >= 0 else ""
+                pnl_7d_sign = "+" if pnl_7d >= 0 else ""
+                total_pnl_sign = "+" if total_pnl >= 0 else ""
                 
                 response = (
-                    f"📊 *LAPORAN PnL LIVE (7 HARI TERAKHIR)*\n"
+                    f"📊 *LAPORAN PnL LIVE BINGX*\n"
                     f"━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🟢 *PnL Mengambang:* `${unrealized_pnl:.2f} USDT`\n"
-                    f"💵 *PnL Terealisasi:* `${realized_pnl:.2f} USDT`\n"
-                    f"💰 *Estimasi Total PnL:* `{'+' if total_pnl >= 0 else ''}${total_pnl:.2f} USDT`\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━"
+                    f"🟢 *PnL Mengambang (Floating):* `{pnl_float_sign}{unrealized_pnl:.2f} USDT`\n"
+                    f"💵 *PnL Terealisasi (Realized):*\n"
+                    f"  ├─ Hari Ini (24j): `{pnl_24h_sign}{pnl_24h:.2f} USDT`\n"
+                    f"  ├─ 3 Hari Terakhir: `{pnl_3d_sign}{pnl_3d:.2f} USDT`\n"
+                    f"  └─ 7 Hari Terakhir: `{pnl_7d_sign}{pnl_7d:.2f} USDT`\n"
+                    f"💰 *Estimasi Total PnL:* `{total_pnl_sign}{total_pnl:.2f} USDT`\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"{get_freshness_timestamp()}"
                 )
             bot.reply_to(message, response, parse_mode="Markdown")
         except Exception as e:
             log.error(f"Error handling /pnl command: {e}")
-            bot.reply_to(message, f"❌ Gagal memproses /pnl: {str(e)}")
+            bot.reply_to(message, "❌ Gagal memproses /pnl. Terjadi gangguan pada koneksi API atau rate limit tercapai. Silakan coba beberapa saat lagi.", parse_mode="Markdown")
 
     @bot.message_handler(commands=['settings'])
     def handle_settings(message):
         if not is_authorized(message):
             return
         try:
+            import state_manager
+            mode = state_manager.get_trading_mode()
+            paper_mode = mode["paper_mode"]
+            
             auto_entry = os.getenv("AUTO_ENTRY", "true")
             margin_mode = os.getenv("MARGIN_MODE", "ISOLATED")
             leverage = os.getenv("LEVERAGE", "5")
             risk_pct = os.getenv("RISK_PER_TRADE_PERCENT", "2.0")
             webhook_url = os.getenv("WEBHOOK_URL", "-")
             
-            # Mask API Key untuk keamanan
             api_key = os.getenv("BINGX_API_KEY", "")
             masked_key = f"{api_key[:6]}...{api_key[-6:]}" if len(api_key) > 12 else "Tidak Dikonfigurasi"
             
             response = (
                 f"⚙️ *PENGATURAN BOT TRADING*\n"
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"⚙️ *Mode Default:* `{'PAPER / SIMULASI' if paper_mode else 'LIVE / UANG ASLI'}`\n"
                 f"🪙 *API Key BingX:* `{masked_key}`\n"
                 f"🛡️ *Leverage:* `{leverage}x`\n"
                 f"🎯 *Margin Mode:* `{margin_mode}`\n"
                 f"⚠️ *Risk per Trade:* `{risk_pct}%`\n"
                 f"🤖 *Auto Entry:* `{auto_entry}`\n"
                 f"🌐 *Webhook URL:* `{webhook_url}`\n"
-                f"━━━━━━━━━━━━━━━━━━━━━"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{get_freshness_timestamp()}"
             )
             bot.reply_to(message, response, parse_mode="Markdown")
         except Exception as e:
             log.error(f"Error handling /settings command: {e}")
-            bot.reply_to(message, f"❌ Gagal memproses /settings: {str(e)}")
+            bot.reply_to(message, "❌ Gagal memproses /settings. Terjadi gangguan pada koneksi API atau rate limit tercapai. Silakan coba beberapa saat lagi.", parse_mode="Markdown")
 
 def start_telegram_bot_polling():
     if bot:
