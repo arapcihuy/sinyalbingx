@@ -713,31 +713,25 @@ def sync_missing_tpsl():
             has_tp = any("TAKE_PROFIT" in o.get("type", "") for o in open_orders)
             
             if not has_sl or not has_tp:
-                # Ambil dari active_trade_data terlebih dahulu, jika tidak ada baru latest_signals
+                # Ambil dari active_trade_data terlebih dahulu
                 trade_state = active_trade_data.get(symbol)
+                tp_prices = []
+                sl_price = 0.0
+
                 if trade_state:
                     sl_price = float(trade_state.get("sl", 0))
-                    tp_price = float(trade_state.get("tp1", 0))
+                    tp_prices = [
+                        float(trade_state.get("tp1", 0)),
+                        float(trade_state.get("tp2", 0)),
+                        float(trade_state.get("tp3", 0)),
+                        float(trade_state.get("tp4", 0))
+                    ]
                 else:
-                    latest = load_latest_signals()
-                    signal = latest.get(symbol)
-                    
-                    # Cek apakah side sinyal cocok dengan side posisi
-                    signal_action = signal.get("action", "").upper() if signal else ""
-                    side_matches = (side == "LONG" and signal_action in ["BUY", "LONG"]) or \
-                                   (side == "SHORT" and signal_action in ["SELL", "SHORT"])
-
-                    if side_matches:
-                        sl_price = float(signal.get("sl", 0))
-                        tp_price = float(signal.get("tp1", 0))
-                    else:
-                        # Estimasi aman jika data sinyal tidak cocok atau tidak ada
-                        if side == "LONG":
-                            sl_price = round(entry * 0.985, 2)
-                            tp_price = round(entry * 1.01, 2)
-                        else:
-                            sl_price = round(entry * 1.015, 2)
-                            tp_price = round(entry * 0.99, 2)
+                    import brain_engine
+                    logger.info(f"🧠 Posisi {symbol} tanpa state, generate plan via brain_engine...")
+                    plan = brain_engine.get_full_trade_plan(100.0, entry, side, symbol) # Balance dummy, plan fokus di TP/SL
+                    sl_price = plan["sl"]
+                    tp_prices = [plan["tp1"], plan["tp2"], plan.get("tp3", 0), plan.get("tp4", 0)]
 
                 sl_side = "SELL" if side == "LONG" else "BUY"
                 
@@ -750,14 +744,23 @@ def sync_missing_tpsl():
                     })
                     results.append(f"✅ {symbol}: SL dipasang ({sl_price})")
                 
-                # Pasang Take Profit jika belum ada
-                if not has_tp and tp_price > 0:
-                    logger.info(f"⚠️ {symbol} tidak punya TP. Memasang TP {tp_price}...")
-                    bx._request("POST", "/openApi/swap/v2/trade/order", {
-                        "symbol": symbol, "side": sl_side, "positionSide": side,
-                        "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price, "quantity": amt
-                    })
-                    results.append(f"✅ {symbol}: TP dipasang ({tp_price})")
+                # Pasang Take Profit yang belum ada
+                tp_count = 0
+                weights = [0.4, 0.3, 0.2, 0.1] # Standar distribusi qty
+                for i, tp_val in enumerate(tp_prices):
+                    if tp_val > 0:
+                        # Cek apakah harga TP ini sudah ada di open orders
+                        already_has_this_tp = any(abs(float(o.get("stopPrice", 0)) - tp_val) < (tp_val * 0.001) for o in open_orders if "TAKE_PROFIT" in o.get("type", ""))
+                        if not already_has_this_tp:
+                            tp_qty = round(amt * weights[i], 3) if i < len(weights) else round(amt * 0.1, 3)
+                            if tp_qty > 0:
+                                bx._request("POST", "/openApi/swap/v2/trade/order", {
+                                    "symbol": symbol, "side": sl_side, "positionSide": side,
+                                    "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_val, "quantity": tp_qty
+                                })
+                                tp_count += 1
+                if tp_count > 0:
+                    results.append(f"✅ {symbol}: {tp_count} TP baru dipasang")
             else:
                 results.append(f"✔️ {symbol}: Sudah memiliki SL dan TP.")
 
