@@ -4,6 +4,9 @@ import logging
 import sys
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor
+
+executor = ThreadPoolExecutor(max_workers=5)
 
 load_dotenv()
 
@@ -11,7 +14,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 log = logging.getLogger(__name__)
 
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7809584261")
+TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 import threading
 
@@ -22,10 +25,59 @@ def run_async_execution(data, pair, signal, price, sl, tp1, tp2, tp3, tp4, TG_TO
         sys.path.insert(0, os.path.dirname(__file__))
         import order_manager
 
-        result = order_manager.execute_signal({
-            "symbol": pair, "action": signal, "price": price,
-            "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3, "tp4": tp4
-        })
+        # ── RUN AI SIGNAL FILTER ──
+        approved = True
+        ai_reason = ""
+        try:
+            from ai_trading.gemini_filter import validate_signal
+            log.info(f"🧠 Memulai filter AI untuk {pair} {signal}...")
+            approved, ai_reason = validate_signal(
+                pair=pair,
+                action=signal,
+                price=float(price or 0),
+                sl=float(sl or 0),
+                tp1=float(tp1 or 0),
+                tp2=float(tp2 or 0)
+            )
+        except Exception as filter_err:
+            log.warning(f"⚠️ Gagal memanggil AI filter: {filter_err}. Melanjutkan eksekusi tanpa filter.")
+
+        # ── INISIALISASI DATABASE LOGGER ──
+        db_logger = None
+        row_id = -1
+        try:
+            from ai_trading import db_logger
+            row_id = db_logger.log_validation(
+                pair=pair,
+                action=signal,
+                price=float(price or 0),
+                sl=float(sl or 0),
+                tp1=float(tp1 or 0),
+                tp2=float(tp2 or 0),
+                approved=approved,
+                reason=ai_reason,
+                status="rejected_by_ai" if not approved else "pending"
+            )
+        except Exception as db_err:
+            log.warning(f"⚠️ Gagal mencatat log validasi AI ke database: {db_err}")
+
+        if approved:
+            result = order_manager.execute_signal({
+                "symbol": pair, "action": signal, "price": price,
+                "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3, "tp4": tp4
+            })
+            # Perbarui status eksekusi ril ke database
+            if db_logger and row_id != -1:
+                try:
+                    db_logger.update_log_status(row_id, result.get("status", "failed"))
+                except Exception as db_up_err:
+                    log.warning(f"⚠️ Gagal memperbarui status eksekusi di database: {db_up_err}")
+        else:
+            result = {
+                "status": "rejected_by_ai",
+                "symbol": pair,
+                "reason": ai_reason
+            }
 
         dt = time.time() - t0
         log.info(f"Executed asynchronously in {dt:.1f}s: {result}")
@@ -38,13 +90,14 @@ def run_async_execution(data, pair, signal, price, sl, tp1, tp2, tp3, tp4, TG_TO
             if status in ["success", "success_paper"]:
                 mode_label = "PAPER" if status == "success_paper" else "LIVE"
                 header = f"🟢 *ENTRY BERHASIL ({mode_label})*"
-            elif status in ["already_open", "slots_full", "ignored_by_scanner"]:
+            elif status in ["already_open", "slots_full", "ignored_by_scanner", "rejected_by_ai"]:
                 reason_map = {
                     "already_open": "Posisi sudah terbuka di bursa/simulasi.",
                     "slots_full": "Slot posisi aktif sudah penuh (maksimal 3).",
-                    "ignored_by_scanner": "Diabaikan oleh scanner karena expectancy rendah."
+                    "ignored_by_scanner": "Diabaikan oleh scanner karena expectancy rendah.",
+                    "rejected_by_ai": f"Ditolak AI:\n`{ai_reason}`"
                 }
-                header = f"🟡 *SINYAL DIABAIKAN*"
+                header = f"🧠 *SINYAL DITOLAK AI*" if status == "rejected_by_ai" else f"🟡 *SINYAL DIABAIKAN*"
                 reason_text = reason_map.get(status, f"Status: `{status}`")
             elif status in ["low_margin", "insufficient_balance"]:
                 reason_map = {
@@ -140,20 +193,49 @@ def is_symbol_tradeable(symbol: str) -> bool:
 def clean_number(num_str):
     if not num_str:
         return 0.0
-    if "," in num_str:
-        num_str = num_str.replace(".", "").replace(",", ".")
+    num_str = str(num_str).strip()
+    
+    # Deteksi dan tangani format angka US dan Eropa/Indonesia secara dinamis
+    if "," in num_str and "." in num_str:
+        if num_str.rfind(",") < num_str.rfind("."):
+            # Koma sebelum titik -> Format US (misal: 65,230.50) -> Hapus koma
+            num_str = num_str.replace(",", "")
+        else:
+            # Titik sebelum koma -> Format Eropa/ID (misal: 65.230,50) -> Hapus titik, ganti koma dengan titik
+            num_str = num_str.replace(".", "").replace(",", ".")
+    elif "," in num_str:
+        # Hanya ada koma (bisa ribuan US 65,230 atau desimal Eropa 65,23)
+        parts = num_str.split(",")
+        if len(parts[-1]) == 3 and len(parts) == 2:
+            # Kemungkinan besar ribuan (misal: 65,000) -> Hapus koma
+            num_str = num_str.replace(",", "")
+        else:
+            # Kemungkinan besar desimal (misal: 1,5) -> Ganti koma dengan titik
+            num_str = num_str.replace(",", ".")
+    elif "." in num_str:
+        # Hanya ada titik (bisa ribuan Eropa/ID 65.000 atau desimal US 65230.50)
+        parts = num_str.split(".")
+        if len(parts[-1]) == 3 and len(parts) == 2:
+            # Kemungkinan besar ribuan format Eropa/ID (misal: 65.000) -> Hapus titik
+            num_str = num_str.replace(".", "")
+            
     try:
         return float(num_str)
     except ValueError:
         return 0.0
 
 def parse_plain_text_alert(text):
-    # Proteksi: Abaikan pesan default order fill dari TradingView Strategy
-    if re.search(r"order\s+(buy|sell|long|short)\s+@", text, re.IGNORECASE) or "terisi pada" in text.lower():
+    # Proteksi: Abaikan pesan default order fill dari TradingView Strategy, kecuali jika merupakan sinyal Tradentix
+    if (re.search(r"order\s+(buy|sell|long|short)\s+@", text, re.IGNORECASE) or "terisi pada" in text.lower()) and "tradentix" not in text.lower():
         log.warning(f"🛡️ Ignored default TradingView strategy order fill notification: {text[:120]}")
         return None
 
     data = {}
+    
+    # 0. Parse Secret/Password/Key dari body teks
+    secret_match = re.search(r"(?:secret|password|key)\s*[:=]\s*(\S+)", text, re.IGNORECASE)
+    if secret_match:
+        data["secret"] = secret_match.group(1).strip()
     
     # 1. Parse Action
     action_match = re.search(r"(?:order|zone|side)?\s*(buy|sell|long|short)\s*(?:entry|zone|order|side)?", text, re.IGNORECASE)
@@ -269,9 +351,14 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/tradingview":
                 # 1. Validasi Keamanan WEBHOOK_SECRET (JSON atau query params)
-                incoming_secret = data.get("secret") or query_params.get("secret")
+                import secrets
+                incoming_secret = data.get("secret") or query_params.get("secret") or ""
                 expected_secret = os.getenv("WEBHOOK_SECRET", "")
-                if expected_secret and incoming_secret != expected_secret:
+                if not expected_secret:
+                    log.error("WEBHOOK_SECRET is not configured in environment. Rejecting request for security.")
+                    self._respond(500, {"error": "Internal Server Error: Webhook configuration missing"})
+                    return
+                if not secrets.compare_digest(incoming_secret, expected_secret):
                     log.warning(f"Unauthorized access attempt: secret mismatch")
                     self._respond(401, {"error": "unauthorized"})
                     return
@@ -310,11 +397,10 @@ class Handler(BaseHTTPRequestHandler):
                     return
 
                 # 4. Jalankan Eksekusi secara Asinkron
-                threading.Thread(
-                    target=run_async_execution,
-                    args=(data, pair, signal, price, sl, tp1, tp2, tp3, tp4, TG_TOKEN, TG_CHAT_ID),
-                    daemon=True
-                ).start()
+                executor.submit(
+                    run_async_execution,
+                    data, pair, signal, price, sl, tp1, tp2, tp3, tp4, TG_TOKEN, TG_CHAT_ID
+                )
 
                 # 5. Segera respon ke TradingView
                 self._respond(200, {"status": "accepted", "message": "Signal received and executing"})
@@ -490,7 +576,9 @@ if TG_TOKEN:
 if bot:
     # Middleware untuk validasi Chat ID (Cybersecurity Guard)
     def is_authorized(message):
-        allowed_ids = [str(TG_CHAT_ID), "7809584261"]
+        allowed_ids = []
+        if TG_CHAT_ID:
+            allowed_ids.append(str(TG_CHAT_ID))
         admin_id = os.getenv("TELEGRAM_ADMIN_ID")
         if admin_id:
             allowed_ids.append(str(admin_id))
@@ -831,6 +919,54 @@ if bot:
         except Exception as e:
             log.error(f"Error handling /settings command: {e}")
             bot.reply_to(message, "❌ Gagal memproses /settings. Terjadi gangguan pada koneksi API atau rate limit tercapai. Silakan coba beberapa saat lagi.", parse_mode="Markdown")
+
+    @bot.message_handler(commands=['aistats'])
+    def handle_aistats(message):
+        if not is_authorized(message):
+            return
+        try:
+            from ai_trading import db_logger
+            stats = db_logger.get_summary_stats()
+            recent_logs = db_logger.get_recent_logs(limit=5)
+            
+            response_lines = [
+                "🧠 *STATISTIK VALIDASI AI FILTER*",
+                "━━━━━━━━━━━━━━━━━━━━━",
+                f"📊 *Total Sinyal Masuk:* `{stats['total']}`",
+                f"🟢 *Disetujui (Approved):* `{stats['approved']}`",
+                f"🔴 *Ditolak (Rejected):* `{stats['rejected']}`",
+                f"📈 *Rasio Persetujuan:* `{stats['approval_rate']}%`",
+                "━━━━━━━━━━━━━━━━━━━━━",
+                "🕒 *5 RIWAYAT KEPUTUSAN TERBARU:*"
+            ]
+            
+            if not recent_logs:
+                response_lines.append(" (Belum ada catatan aktivitas validasi AI)")
+            else:
+                for idx, log_entry in enumerate(recent_logs):
+                    timestamp_str = log_entry["timestamp"]
+                    try:
+                        time_part = timestamp_str.split(" ")[1]
+                    except:
+                        time_part = timestamp_str
+                        
+                    emoji = "🟢" if log_entry["approved"] == 1 else "🔴"
+                    status_emoji = "✅" if log_entry["status"] in ["success", "success_paper"] else ("⚠️" if log_entry["status"] == "rejected_by_ai" else "⚪")
+                    
+                    response_lines.append(
+                        f"{idx+1}. {emoji} *{log_entry['pair']}* | {log_entry['action']}\n"
+                        f"  ├─ *Waktu:* `{time_part}` | *Status:* `{log_entry['status']} {status_emoji}`\n"
+                        f"  └─ *Alasan:* `{log_entry['reason']}`"
+                    )
+            
+            response_lines.append("━━━━━━━━━━━━━━━━━━━━━")
+            response_lines.append(get_freshness_timestamp())
+            
+            response = "\n".join(response_lines)
+            bot.reply_to(message, response, parse_mode="Markdown")
+        except Exception as e:
+            log.error(f"Error handling /aistats command: {e}")
+            bot.reply_to(message, "❌ Gagal memproses /aistats. Silakan coba beberapa saat lagi.", parse_mode="Markdown")
 
 def start_telegram_bot_polling():
     if bot:
