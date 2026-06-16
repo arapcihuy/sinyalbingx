@@ -15,6 +15,7 @@ latest_signals = {}
 active_trade_data = {}
 last_known_positions = {}
 _SYMBOL_PRECISION_CACHE = {}
+_LAST_KNOWN_BALANCE = None
 
 PAPER_TRADES_FILE = "paper_trades.json"
 ACTIVE_TRADES_FILE = "active_trades.json"
@@ -360,11 +361,22 @@ def execute_signal(data: dict) -> dict:
     paper_mode = get_paper_mode()
     entry_price = float(data.get("price", 0)) or bx.get_current_price(symbol)
     
+    global _LAST_KNOWN_BALANCE
     # Jika paper_mode, hindari panggil API saldo real jika error
     try:
-        balance = bx.get_balance() if not paper_mode else 100.0
-    except:
-        balance = 100.0
+        if not paper_mode:
+            balance = bx.get_balance()
+            _LAST_KNOWN_BALANCE = balance
+        else:
+            balance = 100.0
+    except Exception as e:
+        logger.error(f"⚠️ Gagal ambil balance via bx.get_balance(): {e}")
+        if _LAST_KNOWN_BALANCE is not None:
+            logger.info(f"🔄 Menggunakan saldo terakhir yang dicache: ${_LAST_KNOWN_BALANCE:.2f}")
+            balance = _LAST_KNOWN_BALANCE
+        else:
+            logger.warning("⚠️ Saldo terakhir tidak dicache. Fallback aman ke $25.00 USDT.")
+            balance = 25.0
 
     risk_cfg = get_dynamic_risk_settings(balance)
     leverage = risk_cfg["leverage"]
@@ -376,6 +388,7 @@ def execute_signal(data: dict) -> dict:
             balance_data = bx._request('GET', '/openApi/swap/v2/user/balance')
             if balance_data and balance_data.get("code") == 0:
                 balance = float(balance_data["data"]["balance"]["availableMargin"])
+                _LAST_KNOWN_BALANCE = float(balance_data["data"]["balance"]["equity"])
     except Exception as e:
         logger.error(f"Gagal update balance live: {e}")
     
