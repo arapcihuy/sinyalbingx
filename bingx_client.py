@@ -242,9 +242,17 @@ def get_open_positions(symbol: str = None) -> list:
     raise Exception(f"Gagal mengambil posisi aktif dari BingX API (code={result.get('code')}, msg={result.get('msg')})")
 
 
-# ─────────────────────────────────────────────
-#  ORDER
-# ─────────────────────────────────────────────
+def get_candles(symbol: str, interval: str = "1h", limit: int = 100) -> list:
+    """Ambil data candlestick/klines dari BingX."""
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "limit": limit
+    }
+    result = _request("GET", "/openApi/swap/v2/quote/klines", params)
+    if result.get("code") == 0:
+        return result.get("data", [])
+    return []
 
 def place_order(
     symbol: str,

@@ -1,6 +1,9 @@
 import time
 import os
 import sys
+import logging
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
 # Tambahkan direktori root agar bisa import module bot
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

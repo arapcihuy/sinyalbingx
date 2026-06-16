@@ -34,7 +34,10 @@ def get_all_bingx_symbols():
         logger.error(f"Gagal ambil simbol dari BingX: {e}")
     
     # Fallback jika API gagal
-    return ["BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "DOGE-USDT"]
+    return [
+        "BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "BNB-USDT", 
+        "ADA-USDT", "LINK-USDT", "AVAX-USDT", "DOGE-USDT"
+    ]
 
 # ── STRATEGY CALCULATIONS ──
 def calc_rma(series, length):
@@ -178,8 +181,8 @@ def scan_all():
         "top_picks": eligible[:10]
     }
     
-    with open(SCAN_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+    import order_manager
+    order_manager._atomic_write_json(SCAN_FILE, data)
     
     # Kirim Laporan ke Telegram
     report = f"🤖 *AUTOMATIC MARKET SCAN COMPLETED*\n"

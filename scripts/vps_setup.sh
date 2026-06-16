@@ -49,29 +49,11 @@ Environment=PYTHONUNBUFFERED=1
 WantedBy=multi-user.target
 EOF"
 
-# SERVICE 2: HUNTER (Active Otonom)
-sudo bash -c "cat > /etc/systemd/system/bingx-hunter.service <<EOF
-[Unit]
-Description=BingX Hunter Otonom
-After=network.target
-
-[Service]
-User=$USER
-WorkingDirectory=$HOME/$PROJECT_DIR
-ExecStart=$HOME/$PROJECT_DIR/venv/bin/python3 hunter_engine.py
-Restart=always
-RestartSec=5
-Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=multi-user.target
-EOF"
-
 # 5. Start Services
 sudo systemctl daemon-reload
-sudo systemctl enable bingx-webhook bingx-hunter
-sudo systemctl restart bingx-webhook bingx-hunter
+sudo systemctl enable bingx-webhook
+sudo systemctl restart bingx-webhook
 
-echo "✅ DUAL DEPLOYMENT SUCCESSFUL!"
+echo "✅ WEBHOOK DEPLOYMENT SUCCESSFUL!"
 echo "📊 Status Webhook: sudo systemctl status bingx-webhook"
-echo "🎯 Status Hunter : sudo systemctl status bingx-hunter"
+

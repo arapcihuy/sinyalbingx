@@ -28,10 +28,11 @@ def run_async_execution(data, pair, signal, price, sl, tp1, tp2, tp3, tp4, TG_TO
         # ── RUN AI SIGNAL FILTER ──
         approved = True
         ai_reason = ""
+        suggested_params = {}
         try:
             from ai_trading.gemini_filter import validate_signal
             log.info(f"🧠 Memulai filter AI untuk {pair} {signal}...")
-            approved, ai_reason = validate_signal(
+            res = validate_signal(
                 pair=pair,
                 action=signal,
                 price=float(price or 0),
@@ -39,6 +40,11 @@ def run_async_execution(data, pair, signal, price, sl, tp1, tp2, tp3, tp4, TG_TO
                 tp1=float(tp1 or 0),
                 tp2=float(tp2 or 0)
             )
+            if isinstance(res, tuple) and len(res) == 3:
+                approved, ai_reason, suggested_params = res
+            else:
+                approved, ai_reason = res
+                suggested_params = {}
         except Exception as filter_err:
             log.warning(f"⚠️ Gagal memanggil AI filter: {filter_err}. Melanjutkan eksekusi tanpa filter.")
 
@@ -56,15 +62,34 @@ def run_async_execution(data, pair, signal, price, sl, tp1, tp2, tp3, tp4, TG_TO
                 tp2=float(tp2 or 0),
                 approved=approved,
                 reason=ai_reason,
-                status="rejected_by_ai" if not approved else "pending"
+                status="rejected_by_ai" if not approved else "pending",
+                suggested_sl=suggested_params.get("suggested_sl"),
+                suggested_tp1=suggested_params.get("suggested_tp1"),
+                suggested_tp2=suggested_params.get("suggested_tp2"),
+                suggested_leverage=suggested_params.get("suggested_leverage")
             )
         except Exception as db_err:
             log.warning(f"⚠️ Gagal mencatat log validasi AI ke database: {db_err}")
 
         if approved:
+            # Overwrite parameter asli dengan saran dinamis dari AI jika tersedia
+            final_sl = suggested_params.get("suggested_sl") or sl
+            final_tp1 = suggested_params.get("suggested_tp1") or tp1
+            final_tp2 = suggested_params.get("suggested_tp2") or tp2
+            final_leverage = suggested_params.get("suggested_leverage")
+            
+            if any([
+                suggested_params.get("suggested_sl"),
+                suggested_params.get("suggested_tp1"),
+                suggested_params.get("suggested_tp2"),
+                suggested_params.get("suggested_leverage")
+            ]):
+                log.info(f"🧠 AI PARAMETER OVERWRITE: SL={final_sl} (TV: {sl}) | TP1={final_tp1} (TV: {tp1}) | TP2={final_tp2} (TV: {tp2}) | Leverage={final_leverage}")
+
             result = order_manager.execute_signal({
                 "symbol": pair, "action": signal, "price": price,
-                "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3, "tp4": tp4
+                "sl": final_sl, "tp1": final_tp1, "tp2": final_tp2, "tp3": tp3, "tp4": tp4,
+                "leverage": final_leverage
             })
             # Perbarui status eksekusi ril ke database
             if db_logger and row_id != -1:
@@ -139,10 +164,24 @@ def run_async_execution(data, pair, signal, price, sl, tp1, tp2, tp3, tp4, TG_TO
             if status in ["success", "success_paper"]:
                 if extra_details:
                     msg_lines.append(extra_details.strip())
+                
+                # Visualisasikan coretan jika disarankan oleh AI
+                sl_str = f"`{sl}`"
+                if suggested_params.get("suggested_sl") and float(suggested_params["suggested_sl"]) != float(sl):
+                    sl_str = f"~~`{sl}`~~ 🧠 `{suggested_params['suggested_sl']}`"
+                    
+                tp1_str = f"`{tp1}`"
+                if suggested_params.get("suggested_tp1") and float(suggested_params["suggested_tp1"]) != float(tp1):
+                    tp1_str = f"~~`{tp1}`~~ 🧠 `{suggested_params['suggested_tp1']}`"
+                    
+                tp2_str = f"`{tp2}`"
+                if suggested_params.get("suggested_tp2") and float(suggested_params["suggested_tp2"]) != float(tp2):
+                    tp2_str = f"~~`{tp2}`~~ 🧠 `{suggested_params['suggested_tp2']}`"
+                
                 msg_lines.extend([
                     f"💵 *Entry Price:* `{price if price > 0 else 'MARKET'}`",
-                    f"🛑 *Stop Loss:* `{sl}`",
-                    f"🎯 *TP1:* `{tp1}` | *TP2:* `{tp2}`"
+                    f"🛑 *Stop Loss:* {sl_str}",
+                    f"🎯 *TP1:* {tp1_str} | *TP2:* {tp2_str}"
                 ])
                 if tp3 > 0 or tp4 > 0:
                     msg_lines.append(f"🎯 *TP3:* `{tp3}` | *TP4:* `{tp4}`")
@@ -396,19 +435,23 @@ class Handler(BaseHTTPRequestHandler):
                     self._respond(200, {"status": "ignored", "reason": f"symbol {pair} not allowed or inactive"})
                     return
 
-                # 4. Jalankan Eksekusi secara Asinkron
+                # 4. Jalankan Eksekusi secara Asinkron (mask sensitive in logs)
+                clean_payload = {k: ("***" if k in ["secret", "key", "password"] else v) for k, v in data.items()}
+                log.info(f"📥 Webhook payload: {clean_payload}")
                 executor.submit(
                     run_async_execution,
                     data, pair, signal, price, sl, tp1, tp2, tp3, tp4, TG_TOKEN, TG_CHAT_ID
                 )
 
                 # 5. Segera respon ke TradingView
-                self._respond(200, {"status": "accepted", "message": "Signal received and executing"})
+                self._respond(200, {"status": "accepted", "message": "Signal received and executing", "pair": pair})
+                log.info(f"✅ Webhook Responded: {pair} accepted.")
             else:
                 self._respond(404, {"error": "not found"})
         except Exception as e:
             log.error(f"Error: {e}")
             self._respond(500, {"error": str(e)})
+
 
     def _respond(self, code, body):
         self.send_response(code)
