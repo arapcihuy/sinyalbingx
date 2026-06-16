@@ -340,8 +340,9 @@ def execute_signal(data: dict) -> dict:
             if not get_paper_mode():
                 time.sleep(1.5)
         elif pos_side_str == target_pos_side:
-            logger.warning(f"⚠️ Posisi {target_pos_side} untuk {symbol} sudah terbuka. Mengabaikan sinyal duplikat.")
-            return {"status": "already_open", "symbol": symbol}
+            reason = f"Posisi {target_pos_side} untuk {symbol} sudah terbuka. Sinyal duplikat diabaikan."
+            logger.warning(f"⚠️ {reason}")
+            return {"status": "already_open", "symbol": symbol, "reason": reason}
 
     # ── SLOT MANAGEMENT ──
     # Batasi posisi aktif sesuai setting
@@ -351,8 +352,9 @@ def execute_signal(data: dict) -> dict:
         current_slots = get_total_open_positions_count()
         
         if max_slots > 0 and current_slots >= max_slots:
-            logger.warning(f"🚫 Slot Penuh ({current_slots}/{max_slots}). Mengabaikan {symbol}.")
-            return {"status": "slots_full", "symbol": symbol}
+            reason = f"Slot penuh ({current_slots}/{max_slots}). Ini hanya aktif jika max_slots > 0."
+            logger.warning(f"🚫 {reason} Mengabaikan {symbol}.")
+            return {"status": "slots_full", "symbol": symbol, "reason": reason}
     except Exception as slot_err:
         logger.error(f"Error checking slot management: {slot_err}")
     
@@ -366,14 +368,16 @@ def execute_signal(data: dict) -> dict:
                 equity = float(balance_data["data"]["balance"]["equity"])
                 # Jika margin tersedia kurang dari 20% dari total equity, jangan entry
                 if available < (equity * 0.2):
-                    logger.warning(f"⚠️ Margin Mepeet! (Avail: {available}). Membatalkan entry {symbol}.")
-                    return {"status": "low_margin", "symbol": symbol}
+                    reason = f"Available margin {available:.4f} < 20% equity {equity:.4f}. Entry dibatalkan untuk proteksi modal."
+                    logger.warning(f"⚠️ Margin Mepet! {reason}")
+                    return {"status": "low_margin", "symbol": symbol, "reason": reason}
     except:
         pass # Lanjut jika gagal cek balance (pakai pengaman saldo tetap)
 
     if not is_pair_eligible(symbol):
-        logger.warning(f"🚫 {symbol} diabaikan oleh scanner (Low Expectancy).")
-        return {"status": "ignored_by_scanner", "symbol": symbol}
+        reason = f"{symbol} diabaikan oleh scanner karena expectancy rendah / pair tidak eligible."
+        logger.warning(f"🚫 {reason}")
+        return {"status": "ignored_by_scanner", "symbol": symbol, "reason": reason}
 
     pos_side = "LONG" if action in ["BUY", "LONG"] else "SHORT"
     order_side = "BUY" if pos_side == "LONG" else "SELL"
@@ -489,8 +493,9 @@ def execute_signal(data: dict) -> dict:
     qty = calc_result["total_qty"]
     
     if qty <= 0:
-        logger.warning(f"🚫 Saldo tersedia (${balance:.2f} USDT) terlalu kecil untuk membuka kuantitas minimum untuk {symbol}. Mengabaikan sinyal.")
-        return {"status": "insufficient_balance", "symbol": symbol}
+        reason = f"Saldo tersedia ${balance:.2f} terlalu kecil untuk qty minimum {symbol}."
+        logger.warning(f"🚫 {reason} Mengabaikan sinyal.")
+        return {"status": "insufficient_balance", "symbol": symbol, "reason": reason}
     
     # ATR untuk trailing
     atr = entry_price * 0.01  # fallback 1%
@@ -583,7 +588,8 @@ def execute_signal(data: dict) -> dict:
                     logger.warning(f"🎯 Gagal pasang TP{i+1} untuk {symbol}: {tp_res.get('msg')}")
         return {"status": "success", "symbol": symbol, "qty": qty}
     else:
-        return {"status": f"failed: {order_res.get('msg')}", "symbol": symbol}
+        reason = order_res.get('msg') or str(order_res)
+        return {"status": f"failed: {reason}", "symbol": symbol, "reason": reason}
 
 
 def _close_position(symbol: str) -> dict:
