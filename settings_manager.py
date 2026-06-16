@@ -13,7 +13,7 @@ def load_settings():
         "tp_mode": "tp1_only",  # Default aman buat scalping / small account
         "paper_mode": os.getenv("PAPER_MODE", "true").lower() == "true",
         "min_rr_ratio": 1.5,  # Minimal Risk:Reward ratio
-        "max_slots": 3,  # Maksimal posisi bersamaan
+        "max_slots": 0,  # 0 = tanpa batas posisi bersamaan
         "brain_enabled": True,  # 🧠 Brain engine aktif
         "trailing_enabled": True,  # Trailing SL aktif
     }
