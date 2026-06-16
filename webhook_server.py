@@ -593,6 +593,7 @@ def run_autonomous_self_test_loop():
 #  TELEGRAM BOT COMMAND RESPONDERS
 # ─────────────────────────────────────────────
 import telebot
+from telebot import types as tg_types
 
 def get_freshness_timestamp():
     import datetime
@@ -629,10 +630,8 @@ if bot:
         authorized = str(message.chat.id) in allowed_ids
         if not authorized:
             log.warning(f"🔒 Unauthorized access attempt from Chat ID: {message.chat.id}")
-            try:
-                bot.reply_to(message, f"⚠️ *Akses Ditolak:* Anda tidak memiliki izin untuk mengontrol bot ini.\n\n👤 *ID Telegram Anda:* `{message.chat.id}`\n🔑 *Solusi:* Silakan daftarkan ID ini di environment variable `TELEGRAM_ADMIN_ID` pada dashboard Railway.", parse_mode="Markdown")
-            except:
-                pass
+            # Selalu balas untuk debugging user
+            bot.reply_to(message, f"⚠️ *Akses Ditolak:* Anda tidak memiliki izin.\n\n👤 *ID Telegram Anda:* `{message.chat.id}`\n🔑 *Solusi:* Daftarkan ID ini di dashboard Railway sebagai `TELEGRAM_ADMIN_ID`.", parse_mode="Markdown")
         return authorized
 
     @bot.message_handler(commands=['status'])
@@ -755,10 +754,33 @@ if bot:
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
                 f"{get_freshness_timestamp()}"
             )
-            bot.reply_to(message, response, parse_mode="Markdown")
+            markup = tg_types.InlineKeyboardMarkup(row_width=2)
+            btn_sync = tg_types.InlineKeyboardButton("🚀 AUTO-SYNC TP", callback_data="sync_tpsl")
+            btn_refresh = tg_types.InlineKeyboardButton("🔄 REFRESH", callback_data="refresh_status")
+            markup.add(btn_sync, btn_refresh)
+            bot.reply_to(message, response, parse_mode="Markdown", reply_markup=markup)
         except Exception as e:
             log.error(f"Error handling /status command: {e}")
             bot.reply_to(message, "❌ Gagal memproses /status. Terjadi gangguan pada koneksi API atau rate limit tercapai. Silakan coba beberapa saat lagi.", parse_mode="Markdown")
+
+    @bot.callback_query_handler(func=lambda call: call.data == "sync_tpsl")
+    def callback_sync_tpsl(call):
+        try:
+            bot.answer_callback_query(call.id, "Sedang sinkronisasi TP/SL...")
+            bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text="⏳ *Memproses Auto-Sync TP/SL ke BingX...*", parse_mode="Markdown")
+            import order_manager
+            hasil = order_manager.sync_missing_tpsl()
+            bot.send_message(call.message.chat.id, f"✅ *HASIL SYNC TP/SL:*\n\n{hasil}", parse_mode="Markdown")
+        except Exception as e:
+            bot.send_message(call.message.chat.id, f"❌ Gagal Sync TP/SL: {e}")
+
+    @bot.callback_query_handler(func=lambda call: call.data == "refresh_status")
+    def callback_refresh_status(call):
+        try:
+            bot.answer_callback_query(call.id, "Refreshing...")
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except:
+            pass
 
     @bot.message_handler(commands=['balance'])
     def handle_balance(message):
