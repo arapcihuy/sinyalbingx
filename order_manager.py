@@ -853,16 +853,11 @@ def check_and_update_trailing_sl():
             # 2. Proses state (DI DALAM LOCK)
             with state_lock:
                 if symbol not in active_trade_data:
-                    # Logic adopsi...
-
-                            balance = bx.get_balance()
-                    except:
-                        pass
-                    
-                    # Buat rencana TP/SL otomatis berbasis ATR
-                    plan = brain_engine.get_full_trade_plan(balance, avg_price, pos_side, symbol)
-                    
-                    with state_lock:
+                    try:
+                        import brain_engine
+                        # Buat rencana TP/SL otomatis berbasis ATR
+                        plan = brain_engine.get_full_trade_plan(balance, avg_price, pos_side, symbol)
+                        
                         active_trade_data[symbol] = {
                             "symbol": symbol,
                             "side": pos_side,
@@ -888,32 +883,35 @@ def check_and_update_trailing_sl():
                             "open_time": time.strftime("%Y-%m-%d %H:%M:%S"),
                             "adopted": True
                         }
-                    save_active_trades()
-                    
-                    # Kirim Telegram Notif Auto-Adopt
-                    TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7809584261")
-                    mode_label = "PAPER" if paper_mode else "LIVE"
-                    msg_adopt = (
-                        f"📥 *POSISI MANUAL DIADOPSI ({mode_label})*\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🪙 *Pair:* `{symbol}` ({pos_side})\n"
-                        f"📈 *Entry:* `{avg_price}`\n"
-                        f"🛡️ *SL Otomatis:* `{plan['sl']}`\n"
-                        f"🎯 *TP1:* `{plan['tp1']}` | *TP2:* `{plan['tp2']}`\n"
-                        f"📝 *Status:* Berhasil diadopsi & diproteksi.\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━"
-                    )
-                    import requests as r
-                    r.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                          json={"chat_id": TG_CHAT_ID, "text": msg_adopt, "parse_mode": "Markdown"}, timeout=5)
-                    logger.info(f"📥 AUTO-ADOPT: Posisi manual {symbol} {pos_side} diadopsi pada entry {avg_price}")
-                except Exception as adopt_err:
-                    logger.error(f"Gagal auto-adopt posisi {symbol}: {adopt_err}")
+                        save_active_trades()
+                        
+                        # Kirim Telegram Notif Auto-Adopt
+                        TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+                        TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7809584261")
+                        mode_label = "PAPER" if paper_mode else "LIVE"
+                        msg_adopt = (
+                            f"📥 *POSISI MANUAL DIADOPSI ({mode_label})*\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"🪙 *Pair:* `{symbol}` ({pos_side})\n"
+                            f"📈 *Entry:* `{avg_price}`\n"
+                            f"🛡️ *SL Otomatis:* `{plan['sl']}`\n"
+                            f"🎯 *TP1:* `{plan['tp1']}` | *TP2:* `{plan['tp2']}`\n"
+                            f"📝 *Status:* Berhasil diadopsi & diproteksi.\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━"
+                        )
+                        import requests as r
+                        r.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                              json={"chat_id": TG_CHAT_ID, "text": msg_adopt, "parse_mode": "Markdown"}, timeout=5)
+                        logger.info(f"📥 AUTO-ADOPT: Posisi manual {symbol} {pos_side} diadopsi pada entry {avg_price}")
+                    except Exception as adopt_err:
+                        logger.error(f"Gagal auto-adopt posisi {symbol}: {adopt_err}")
+                        continue
+                
+                if symbol not in active_trade_data:
                     continue
-            
-            trade = active_trade_data[symbol]
-            entry_price = trade["entry_price"]
+                    
+                trade = active_trade_data[symbol]
+                entry_price = trade["entry_price"]
             
             # --- 2. AUTO-CALIBRATION: Kalibrasi ulang jika entry di bursa berbeda dengan state ---
             # Jika selisih entry bursa vs state > 0.1%, lakukan kalibrasi ulang level TP/SL
