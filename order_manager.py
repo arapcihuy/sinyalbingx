@@ -347,10 +347,10 @@ def execute_signal(data: dict) -> dict:
     # Batasi posisi aktif sesuai setting
     try:
         settings = settings_manager.load_settings()
-        max_slots = int(settings.get("max_slots", 3))
+        max_slots = int(settings.get("max_slots", 0))
         current_slots = get_total_open_positions_count()
         
-        if current_slots >= max_slots:
+        if max_slots > 0 and current_slots >= max_slots:
             logger.warning(f"🚫 Slot Penuh ({current_slots}/{max_slots}). Mengabaikan {symbol}.")
             return {"status": "slots_full", "symbol": symbol}
     except Exception as slot_err:
@@ -416,53 +416,72 @@ def execute_signal(data: dict) -> dict:
     import brain_engine
     risk_pct = brain_engine.get_dynamic_risk_percent(balance)
 
-    # TP/SL dari TV (ngikutin script TRADENTIX PRO)
-    sl_price = _round_price(float(data.get("sl", 0)), symbol)
-    tp1_price = _round_price(float(data.get("tp1", 0)), symbol)
-    tp2_price = _round_price(float(data.get("tp2", 0)), symbol)
-    tp3_price = _round_price(float(data.get("tp3", 0)), symbol)
-    tp4_price = _round_price(float(data.get("tp4", 0)), symbol)
+    settings = settings_manager.load_settings()
+    brain_enabled = settings.get("brain_enabled", True)
 
-    tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
+    # Default input TV
+    tv_sl_price = _round_price(float(data.get("sl", 0)), symbol)
+    tv_tp1_price = _round_price(float(data.get("tp1", 0)), symbol)
+    tv_tp2_price = _round_price(float(data.get("tp2", 0)), symbol)
+    tv_tp3_price = _round_price(float(data.get("tp3", 0)), symbol)
+    tv_tp4_price = _round_price(float(data.get("tp4", 0)), symbol)
 
-    # ── Terapkan mode TP dari setting global ──
-    try:
-        settings = settings_manager.load_settings()
-        tp_mode = settings.get("tp_mode", "conservative")
-
-        if tp_mode == "tp1_only" and tp1_price > 0:
-            logger.info(f"📌 Mode TP1 Only → Hanya menggunakan TP1: {tp1_price}")
-            tp2_price = 0.0
-            tp3_price = 0.0
-            tp4_price = 0.0
-            tp_prices = [tp1_price, 0.0, 0.0, 0.0]
-    except Exception as tp_err:
-        logger.error(f"Error applying tp_mode setting: {tp_err}")
-
-    
-    # Fallback: kalau TV nggak kirim TP/SL, pakai brain
-    if sl_price == 0 and tp1_price == 0:
-        logger.info("📺 TV tidak kirim TP/SL, pakai brain engine")
+    if brain_enabled:
+        logger.info(f"🧠 BRAIN ENABLED → {symbol} pakai trade plan bot sebagai sumber utama TP/SL/lev/risk")
         trade_plan = brain_engine.get_full_trade_plan(balance, entry_price, pos_side, symbol)
-        sl_price = trade_plan["sl"]
-        tp1_price = trade_plan["tp1"]
-        tp2_price = trade_plan["tp2"]
-        tp_prices = [tp1_price, tp2_price, 0.0, 0.0]
-    
-    # Hitung safe leverage agar SL berada sebelum likuidasi
-    safe_leverage = brain_engine.get_safe_leverage(balance, entry_price, sl_price, pos_side, symbol)
-    
-    # Ambil saran leverage dari AI (jika ada), tapi batasi dengan safe_leverage untuk keamanan
-    suggested_lev = data.get("leverage")
-    if suggested_lev:
-        try:
-            leverage = min(int(suggested_lev), safe_leverage)
-            logger.info(f"🧠 AI Suggested Leverage: {suggested_lev}x | Safe Cap: {safe_leverage}x | Final: {leverage}x")
-        except Exception as lev_err:
-            logger.warning(f"⚠️ Gagal memparse saran leverage dari AI ({suggested_lev}): {lev_err}. Menggunakan safe leverage.")
-            leverage = safe_leverage
+        sl_price = _round_price(float(trade_plan.get("sl", 0)), symbol)
+        tp1_price = _round_price(float(trade_plan.get("tp1", 0)), symbol)
+        tp2_price = _round_price(float(trade_plan.get("tp2", 0)), symbol)
+        tp3_price = _round_price(float(trade_plan.get("tp3", 0)), symbol)
+        tp4_price = _round_price(float(trade_plan.get("tp4", 0)), symbol)
+        tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
+        leverage = int(trade_plan.get("leverage", leverage))
+        risk_pct = float(trade_plan.get("risk_percent", risk_pct))
     else:
-        leverage = safe_leverage
+        logger.info(f"📺 BRAIN DISABLED → {symbol} pakai TP/SL dari TV")
+        sl_price = tv_sl_price
+        tp1_price = tv_tp1_price
+        tp2_price = tv_tp2_price
+        tp3_price = tv_tp3_price
+        tp4_price = tv_tp4_price
+        tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
+
+        try:
+            tp_mode = settings.get("tp_mode", "conservative")
+            if tp_mode == "tp1_only" and tp1_price > 0:
+                logger.info(f"📌 Mode TP1 Only → Hanya menggunakan TP1: {tp1_price}")
+                tp2_price = 0.0
+                tp3_price = 0.0
+                tp4_price = 0.0
+                tp_prices = [tp1_price, 0.0, 0.0, 0.0]
+        except Exception as tp_err:
+            logger.error(f"Error applying tp_mode setting: {tp_err}")
+
+        if sl_price == 0 and tp1_price == 0:
+            logger.info("📺 TV tidak kirim TP/SL, fallback ke brain engine")
+            trade_plan = brain_engine.get_full_trade_plan(balance, entry_price, pos_side, symbol)
+            sl_price = _round_price(float(trade_plan.get("sl", 0)), symbol)
+            tp1_price = _round_price(float(trade_plan.get("tp1", 0)), symbol)
+            tp2_price = _round_price(float(trade_plan.get("tp2", 0)), symbol)
+            tp3_price = _round_price(float(trade_plan.get("tp3", 0)), symbol)
+            tp4_price = _round_price(float(trade_plan.get("tp4", 0)), symbol)
+            tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
+
+        safe_leverage = brain_engine.get_safe_leverage(balance, entry_price, sl_price, pos_side, symbol)
+        suggested_lev = data.get("leverage")
+        if suggested_lev:
+            try:
+                leverage = min(int(suggested_lev), safe_leverage)
+                logger.info(f"🧠 AI Suggested Leverage: {suggested_lev}x | Safe Cap: {safe_leverage}x | Final: {leverage}x")
+            except Exception as lev_err:
+                logger.warning(f"⚠️ Gagal memparse saran leverage dari AI ({suggested_lev}): {lev_err}. Menggunakan safe leverage.")
+                leverage = safe_leverage
+        else:
+            leverage = safe_leverage
+
+    if brain_enabled:
+        safe_leverage = brain_engine.get_safe_leverage(balance, entry_price, sl_price, pos_side, symbol)
+        leverage = min(int(leverage), safe_leverage) if safe_leverage > 0 else int(leverage)
     
     # Hitung kuantitas cerdas multi-TP dengan pengaman 50%
     calc_result = brain_engine.calculate_smart_multi_tp_qty(balance, entry_price, sl_price, tp_prices, leverage, risk_pct, symbol)
