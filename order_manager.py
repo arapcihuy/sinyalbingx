@@ -3,14 +3,17 @@ import math
 import logging
 import json
 import time
+import threading
 import requests
+import tempfile
 from dotenv import load_dotenv
 import bingx_client as bx
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-# Global State
+# Global State & Locks
+state_lock = threading.RLock()
 latest_signals = {}
 active_trade_data = {}
 last_known_positions = {}
@@ -23,8 +26,22 @@ LATEST_SIGNALS_FILE = "latest_signals.json"
 
 import settings_manager
 
-# Lazy import — jangan import di level module (cepatkan cold start)
-# import brain_engine  # di-import di dalam fungsi saja
+def _atomic_write_json(file_path, data):
+    """Securely write JSON using a temporary file to prevent corruption."""
+    try:
+        dir_name = os.path.dirname(os.path.abspath(file_path))
+        with tempfile.NamedTemporaryFile('w', dir=dir_name, delete=False) as tf:
+            json.dump(data, tf, indent=4)
+            tempname = tf.name
+        os.replace(tempname, file_path)
+    except Exception as e:
+        logger.error(f"CRITICAL: Atomic write failed for {file_path}: {e}")
+        # Fallback to normal write if replace fails
+        try:
+            with open(file_path, "w") as f:
+                json.dump(data, f, indent=4)
+        except:
+            pass
 
 def get_paper_mode():
     """Mengambil status mode trading secara dinamis dari state_manager."""
@@ -47,14 +64,14 @@ def load_paper_trades():
     return []
 
 def save_paper_trade(trade):
-    trades = load_paper_trades()
-    trades.append(trade)
-    with open(PAPER_TRADES_FILE, "w") as f:
-        json.dump(trades, f, indent=4)
+    with state_lock:
+        trades = load_paper_trades()
+        trades.append(trade)
+        _atomic_write_json(PAPER_TRADES_FILE, trades)
 
 def update_paper_trades(trades):
-    with open(PAPER_TRADES_FILE, "w") as f:
-        json.dump(trades, f, indent=4)
+    with state_lock:
+        _atomic_write_json(PAPER_TRADES_FILE, trades)
 
 def load_latest_signals():
     global latest_signals
@@ -67,29 +84,25 @@ def load_latest_signals():
     return latest_signals
 
 def save_latest_signals():
-    try:
-        with open(LATEST_SIGNALS_FILE, "w") as f:
-            json.dump(latest_signals, f, indent=4)
-    except Exception as e:
-        logger.error(f"Gagal simpan latest_signals: {e}")
+    with state_lock:
+        _atomic_write_json(LATEST_SIGNALS_FILE, latest_signals)
 
 def save_active_trades():
-    try:
-        with open(ACTIVE_TRADES_FILE, "w") as f:
-            json.dump(active_trade_data, f, indent=4)
-    except Exception as e:
-        logger.error(f"Gagal simpan active_trades: {e}")
+    with state_lock:
+        _atomic_write_json(ACTIVE_TRADES_FILE, active_trade_data)
 
 def load_active_trades():
     global active_trade_data
     if os.path.exists(ACTIVE_TRADES_FILE):
         try:
             with open(ACTIVE_TRADES_FILE, "r") as f:
-                active_trade_data = json.load(f)
-                logger.info(f"💾 State active trades di-load: {list(active_trade_data.keys())}")
+                with state_lock:
+                    active_trade_data = json.load(f)
+                    logger.info(f"💾 State active trades di-load: {list(active_trade_data.keys())}")
         except Exception as e:
             logger.error(f"Gagal load active_trades: {e}")
-            active_trade_data = {}
+            with state_lock:
+                active_trade_data = {}
     return active_trade_data
 
 # Inisialisasi state saat modul di-load
@@ -141,17 +154,20 @@ def calculate_quantity_risk_based(balance: float, entry_price: float, sl_price: 
 
 def is_pair_eligible(symbol):
     """Cek apakah symbol ada dalam daftar eligible dari scanner."""
+    # Selalu ijinkan jika diatur UNLIMITED (DEFAULT)
     if os.getenv("FILTER_BY_SCANNER", "false").lower() != "true":
         return True
         
     try:
         if not os.path.exists("scanned_pairs.json"):
-            return True
+            # Jika file tidak ada tapi filter ON, maka blokir demi keamanan (conservative)
+            return False
         with open("scanned_pairs.json", "r") as f:
             data = json.load(f)
             return symbol in data.get("eligible_pairs", [])
-    except:
-        return True
+    except Exception as e:
+        logger.error(f"Error checking pair eligibility: {e}")
+        return False
 
 def check_paper_exit():
     """Monitor paper trades for TP/SL hits using current prices."""
@@ -328,12 +344,17 @@ def execute_signal(data: dict) -> dict:
             return {"status": "already_open", "symbol": symbol}
 
     # ── SLOT MANAGEMENT ──
-    # MAX_SLOTS = 3 
-    # current_slots = get_total_open_positions_count()
-    # 
-    # if current_slots >= MAX_SLOTS:
-    #     logger.warning(f"🚫 Slot Penuh ({current_slots}/{MAX_SLOTS}). Mengabaikan {symbol}.")
-    #     return {"status": "slots_full", "symbol": symbol}
+    # Batasi posisi aktif sesuai setting
+    try:
+        settings = settings_manager.load_settings()
+        max_slots = int(settings.get("max_slots", 3))
+        current_slots = get_total_open_positions_count()
+        
+        if current_slots >= max_slots:
+            logger.warning(f"🚫 Slot Penuh ({current_slots}/{max_slots}). Mengabaikan {symbol}.")
+            return {"status": "slots_full", "symbol": symbol}
+    except Exception as slot_err:
+        logger.error(f"Error checking slot management: {slot_err}")
     
     # ── MARGIN SAFETY GUARD ──
     # Jangan buka trade baru jika saldo yang tersisa terlalu mepet
@@ -394,15 +415,30 @@ def execute_signal(data: dict) -> dict:
     
     import brain_engine
     risk_pct = brain_engine.get_dynamic_risk_percent(balance)
-    
+
     # TP/SL dari TV (ngikutin script TRADENTIX PRO)
     sl_price = _round_price(float(data.get("sl", 0)), symbol)
     tp1_price = _round_price(float(data.get("tp1", 0)), symbol)
     tp2_price = _round_price(float(data.get("tp2", 0)), symbol)
     tp3_price = _round_price(float(data.get("tp3", 0)), symbol)
     tp4_price = _round_price(float(data.get("tp4", 0)), symbol)
-    
+
     tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
+
+    # ── Terapkan mode TP dari setting global ──
+    try:
+        settings = settings_manager.load_settings()
+        tp_mode = settings.get("tp_mode", "conservative")
+
+        if tp_mode == "tp1_only" and tp1_price > 0:
+            logger.info(f"📌 Mode TP1 Only → Hanya menggunakan TP1: {tp1_price}")
+            tp2_price = 0.0
+            tp3_price = 0.0
+            tp4_price = 0.0
+            tp_prices = [tp1_price, 0.0, 0.0, 0.0]
+    except Exception as tp_err:
+        logger.error(f"Error applying tp_mode setting: {tp_err}")
+
     
     # Fallback: kalau TV nggak kirim TP/SL, pakai brain
     if sl_price == 0 and tp1_price == 0:
@@ -414,10 +450,22 @@ def execute_signal(data: dict) -> dict:
         tp_prices = [tp1_price, tp2_price, 0.0, 0.0]
     
     # Hitung safe leverage agar SL berada sebelum likuidasi
-    leverage = brain_engine.get_safe_leverage(balance, entry_price, sl_price, pos_side, symbol)
+    safe_leverage = brain_engine.get_safe_leverage(balance, entry_price, sl_price, pos_side, symbol)
+    
+    # Ambil saran leverage dari AI (jika ada), tapi batasi dengan safe_leverage untuk keamanan
+    suggested_lev = data.get("leverage")
+    if suggested_lev:
+        try:
+            leverage = min(int(suggested_lev), safe_leverage)
+            logger.info(f"🧠 AI Suggested Leverage: {suggested_lev}x | Safe Cap: {safe_leverage}x | Final: {leverage}x")
+        except Exception as lev_err:
+            logger.warning(f"⚠️ Gagal memparse saran leverage dari AI ({suggested_lev}): {lev_err}. Menggunakan safe leverage.")
+            leverage = safe_leverage
+    else:
+        leverage = safe_leverage
     
     # Hitung kuantitas cerdas multi-TP dengan pengaman 50%
-    calc_result = brain_engine.calculate_smart_multi_tp_qty(balance, entry_price, tp_prices, leverage, symbol)
+    calc_result = brain_engine.calculate_smart_multi_tp_qty(balance, entry_price, sl_price, tp_prices, leverage, risk_pct, symbol)
     qtys = calc_result["qtys"]
     qty = calc_result["total_qty"]
     
@@ -428,38 +476,45 @@ def execute_signal(data: dict) -> dict:
     # ATR untuk trailing
     atr = entry_price * 0.01  # fallback 1%
     try:
-        atr = brain_engine.calculate_atr([], 14) or atr
-    except:
-        pass
+        # Ambil data candle real (1h atau 15m) untuk ATR yang presisi
+        candles = bx.get_candles(symbol, "1h", limit=30)
+        if candles:
+            real_atr = brain_engine.calculate_atr(candles, 14)
+            if real_atr > 0:
+                atr = real_atr
+                logger.info(f"📊 ATR Real ({symbol}): {atr:.4f}")
+    except Exception as atr_err:
+        logger.warning(f"⚠️ Gagal ambil ATR real untuk {symbol}: {atr_err}. Pakai fallback 1%.")
     
     logger.info(f"🧠 BRAIN: {symbol} {pos_side} | Lev: {leverage}x | Qty: {qty} | Margin: {calc_result['margin']:.2f} USDT")
     logger.info(f"📺 TV TP/SL: SL={sl_price} TP1={tp1_price} TP2={tp2_price} TP3={tp3_price} TP4={tp4_price}")
     
     # Simpan trade data (untuk trailing)
-    active_trade_data[symbol] = {
-        "symbol": symbol,
-        "side": pos_side,
-        "entry_price": entry_price,
-        "sl": sl_price,
-        "tp1": tp1_price,
-        "tp2": tp2_price,
-        "tp3": tp3_price,
-        "tp4": tp4_price,
-        "qtys": qtys,
-        "qty": qty,
-        "leverage": leverage,
-        "risk_pct": risk_pct,
-        "atr": atr,
-        "trailing": {
-            "activate_atr_mult": 1.0,
-            "offset_atr_mult": 0.5,
-            "active": False,
-            "highest_price": entry_price if pos_side == "LONG" else 0,
-            "lowest_price": entry_price if pos_side == "SHORT" else 0,
-        },
-        "status": "OPEN",
-        "open_time": time.strftime("%Y-%m-%d %H:%M:%S"),
-    }
+    with state_lock:
+        active_trade_data[symbol] = {
+            "symbol": symbol,
+            "side": pos_side,
+            "entry_price": entry_price,
+            "sl": sl_price,
+            "tp1": tp1_price,
+            "tp2": tp2_price,
+            "tp3": tp3_price,
+            "tp4": tp4_price,
+            "qtys": qtys,
+            "qty": qty,
+            "leverage": leverage,
+            "risk_pct": risk_pct,
+            "atr": atr,
+            "trailing": {
+                "activate_atr_mult": 1.0,
+                "offset_atr_mult": 0.5,
+                "active": False,
+                "highest_price": entry_price if pos_side == "LONG" else 0,
+                "lowest_price": entry_price if pos_side == "SHORT" else 0,
+            },
+            "status": "OPEN",
+            "open_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
     save_active_trades()
  
     if paper_mode:
@@ -483,22 +538,34 @@ def execute_signal(data: dict) -> dict:
  
     if order_res.get("code") == 0:
         # 1. Pasang STOP LOSS Tunggal
-        bx._request("POST", "/openApi/swap/v2/trade/order", {
+        sl_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": symbol, "side": sl_side, "positionSide": pos_side,
             "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": qty
         })
-        
+
+        if sl_res.get("code") != 0:
+            logger.error(f"🛑 CRITICAL: Gagal pasang STOP LOSS untuk {symbol}: {sl_res.get('msg')}")
+            # Notif Telegram Emergency
+            try:
+                r_msg = f"⚠️ *EMERGENCY: SL FAILED* ⚠️\nPair: `{symbol}`\nError: `{sl_res.get('msg')}`\n*POSISI TERBUKA TANPA PROTEKSI!*"
+                requests.post(f"https://api.telegram.org/bot{os.getenv('TELEGRAM_BOT_TOKEN')}/sendMessage",
+                              json={"chat_id": os.getenv("TELEGRAM_CHAT_ID"), "text": r_msg, "parse_mode": "Markdown"})
+            except: pass
+
         # 2. Pasang Tiap Level TP yang Valid
         for i, tp_price in enumerate(tp_prices):
             tp_qty = qtys[i]
             if tp_price > 0 and tp_qty > 0:
-                bx._request("POST", "/openApi/swap/v2/trade/order", {
+                tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
                     "symbol": symbol, "side": sl_side, "positionSide": pos_side,
                     "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price, "quantity": tp_qty
                 })
+                if tp_res.get("code") != 0:
+                    logger.warning(f"🎯 Gagal pasang TP{i+1} untuk {symbol}: {tp_res.get('msg')}")
         return {"status": "success", "symbol": symbol, "qty": qty}
     else:
         return {"status": f"failed: {order_res.get('msg')}", "symbol": symbol}
+
 
 def _close_position(symbol: str) -> dict:
     global active_trade_data
@@ -522,7 +589,9 @@ def _close_position(symbol: str) -> dict:
     bx.cancel_all_orders(symbol)
     
     if symbol in active_trade_data:
-        del active_trade_data[symbol]
+        with state_lock:
+            if symbol in active_trade_data:
+                del active_trade_data[symbol]
         save_active_trades()
         
     return {"msg": f"Closed {symbol}"}
@@ -746,15 +815,16 @@ def check_and_update_trailing_sl():
         
         # Hapus symbol yang sudah tidak ada di bursa dari active_trade_data dengan notifikasi
         updated_state = False
-        for sym in list(active_trade_data.keys()):
-            if sym not in open_symbols:
-                try:
-                    if not paper_mode:
-                        notify_live_close(sym, active_trade_data[sym])
-                except Exception as n_err:
-                    logger.error(f"Error notifying live close for {sym}: {n_err}")
-                del active_trade_data[sym]
-                updated_state = True
+        with state_lock:
+            for sym in list(active_trade_data.keys()):
+                if sym not in open_symbols:
+                    try:
+                        if not paper_mode:
+                            notify_live_close(sym, active_trade_data[sym])
+                    except Exception as n_err:
+                        logger.error(f"Error notifying live close for {sym}: {n_err}")
+                    del active_trade_data[sym]
+                    updated_state = True
                 
         if updated_state:
             save_active_trades()
@@ -772,14 +842,19 @@ def check_and_update_trailing_sl():
             if current_price == 0:
                 continue
                 
-            # --- 1. AUTO-ADOPT: Adopsi posisi manual jika tidak ada di state lokal ---
-            if symbol not in active_trade_data:
-                try:
-                    import brain_engine
-                    # Hitung balance akun untuk sizing / risk
-                    balance = 100.0
-                    try:
-                        if not paper_mode:
+            # 1. Ambil data bursa dulu (DI LUAR LOCK agar tidak freeze)
+            try:
+                positions = bx.get_open_positions(symbol)
+                balance = bx.get_balance()
+            except Exception as e:
+                logger.error(f"⚠️ Gagal fetch data bursa untuk {symbol}: {e}")
+                continue
+
+            # 2. Proses state (DI DALAM LOCK)
+            with state_lock:
+                if symbol not in active_trade_data:
+                    # Logic adopsi...
+
                             balance = bx.get_balance()
                     except:
                         pass
@@ -787,31 +862,32 @@ def check_and_update_trailing_sl():
                     # Buat rencana TP/SL otomatis berbasis ATR
                     plan = brain_engine.get_full_trade_plan(balance, avg_price, pos_side, symbol)
                     
-                    active_trade_data[symbol] = {
-                        "symbol": symbol,
-                        "side": pos_side,
-                        "entry_price": avg_price,
-                        "sl": plan["sl"],
-                        "tp1": plan["tp1"],
-                        "tp2": plan["tp2"],
-                        "tp3": 0.0,
-                        "tp4": 0.0,
-                        "qtys": [qty/2, qty/2, 0.0, 0.0],
-                        "qty": qty,
-                        "leverage": plan["leverage"],
-                        "risk_pct": plan["risk_percent"],
-                        "atr": plan["atr"],
-                        "trailing": {
-                            "activate_atr_mult": 1.0,
-                            "offset_atr_mult": 0.5,
-                            "active": False,
-                            "highest_price": avg_price if pos_side == "LONG" else 0,
-                            "lowest_price": avg_price if pos_side == "SHORT" else 0,
-                        },
-                        "status": "OPEN",
-                        "open_time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "adopted": True
-                    }
+                    with state_lock:
+                        active_trade_data[symbol] = {
+                            "symbol": symbol,
+                            "side": pos_side,
+                            "entry_price": avg_price,
+                            "sl": plan["sl"],
+                            "tp1": plan["tp1"],
+                            "tp2": plan["tp2"],
+                            "tp3": 0.0,
+                            "tp4": 0.0,
+                            "qtys": [qty/2, qty/2, 0.0, 0.0],
+                            "qty": qty,
+                            "leverage": plan["leverage"],
+                            "risk_pct": plan["risk_percent"],
+                            "atr": plan["atr"],
+                            "trailing": {
+                                "activate_atr_mult": 1.0,
+                                "offset_atr_mult": 0.5,
+                                "active": False,
+                                "highest_price": avg_price if pos_side == "LONG" else 0,
+                                "lowest_price": avg_price if pos_side == "SHORT" else 0,
+                            },
+                            "status": "OPEN",
+                            "open_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            "adopted": True
+                        }
                     save_active_trades()
                     
                     # Kirim Telegram Notif Auto-Adopt
@@ -854,25 +930,24 @@ def check_and_update_trailing_sl():
                     tp3_pct = (trade["tp3"] - entry_price) / entry_price if trade.get("tp3", 0) > 0 else 0
                     tp4_pct = (trade["tp4"] - entry_price) / entry_price if trade.get("tp4", 0) > 0 else 0
                     
-                    # Set entry baru ke avg_price bursa
-                    trade["entry_price"] = avg_price
-                    trade["qty"] = qty
-                    
                     # Terapkan persentase ke entry baru
-                    trade["sl"] = round(avg_price * (1 + sl_pct), price_prec)
-                    if tp1_pct != 0: trade["tp1"] = round(avg_price * (1 + tp1_pct), price_prec)
-                    if tp2_pct != 0: trade["tp2"] = round(avg_price * (1 + tp2_pct), price_prec)
-                    if tp3_pct != 0: trade["tp3"] = round(avg_price * (1 + tp3_pct), price_prec)
-                    if tp4_pct != 0: trade["tp4"] = round(avg_price * (1 + tp4_pct), price_prec)
-                    
-                    # Reset peak price di trailing
-                    if "trailing" in trade:
-                        trade["trailing"]["highest_price"] = avg_price if pos_side == "LONG" else 0
-                        trade["trailing"]["lowest_price"] = avg_price if pos_side == "SHORT" else 0
-                    
-                    active_trade_data[symbol] = trade
+                    with state_lock:
+                        trade["entry_price"] = avg_price
+                        trade["qty"] = qty
+                        trade["sl"] = round(avg_price * (1 + sl_pct), price_prec)
+                        if tp1_pct != 0: trade["tp1"] = round(avg_price * (1 + tp1_pct), price_prec)
+                        if tp2_pct != 0: trade["tp2"] = round(avg_price * (1 + tp2_pct), price_prec)
+                        if tp3_pct != 0: trade["tp3"] = round(avg_price * (1 + tp3_pct), price_prec)
+                        if tp4_pct != 0: trade["tp4"] = round(avg_price * (1 + tp4_pct), price_prec)
+                        
+                        # Reset peak price di trailing
+                        if "trailing" in trade:
+                            trade["trailing"]["highest_price"] = avg_price if pos_side == "LONG" else 0
+                            trade["trailing"]["lowest_price"] = avg_price if pos_side == "SHORT" else 0
+                        
+                        active_trade_data[symbol] = trade
                     save_active_trades()
-                    
+
                     # Kirim Telegram Notif Auto-Calibration
                     TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
                     TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7809584261")
@@ -911,20 +986,21 @@ def check_and_update_trailing_sl():
                 }
             
             # Update harga tertinggi/terendah (peak price) sejak posisi dibuka
-            if pos_side == "LONG":
-                highest_price = max(current_price, trade["trailing"].get("highest_price", entry_price))
-                trade["trailing"]["highest_price"] = highest_price
-                peak_price = highest_price
-            else:
-                lowest_price = trade["trailing"].get("lowest_price", entry_price)
-                if lowest_price == 0:
-                    lowest_price = entry_price
-                lowest_price = min(current_price, lowest_price)
-                trade["trailing"]["lowest_price"] = lowest_price
-                peak_price = lowest_price
-                
-            # Simpan update peak price ke state lokal
-            active_trade_data[symbol] = trade
+            with state_lock:
+                if pos_side == "LONG":
+                    highest_price = max(current_price, trade["trailing"].get("highest_price", entry_price))
+                    trade["trailing"]["highest_price"] = highest_price
+                    peak_price = highest_price
+                else:
+                    lowest_price = trade["trailing"].get("lowest_price", entry_price)
+                    if lowest_price == 0:
+                        lowest_price = entry_price
+                    lowest_price = min(current_price, lowest_price)
+                    trade["trailing"]["lowest_price"] = lowest_price
+                    peak_price = lowest_price
+                    
+                # Simpan update peak price ke state lokal
+                active_trade_data[symbol] = trade
             save_active_trades()
             
             import brain_engine
@@ -969,8 +1045,9 @@ def check_and_update_trailing_sl():
                     })
                 
                 # 3. Update state lokal
-                trade["sl"] = new_sl
-                active_trade_data[symbol] = trade
+                with state_lock:
+                    trade["sl"] = new_sl
+                    active_trade_data[symbol] = trade
                 save_active_trades()
                 
                 # 4. Kirim notifikasi Telegram tentang trailing SL

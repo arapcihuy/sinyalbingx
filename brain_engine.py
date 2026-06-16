@@ -175,14 +175,23 @@ def calculate_tp_sl(entry_price: float, side: str, atr: float, symbol: str) -> d
 
 
 def get_dynamic_leverage(balance: float) -> int:
-    """
-    Tentukan leverage optimal berdasarkan saldo futures.
-    Semakin kecil saldo, semakin kecil leverage (aman).
-    """
+    """Tentukan leverage optimal berdasarkan saldo futures (override by settings if available)."""
+    try:
+        import os
+        import json
+        settings_path = "bot_settings.json"
+        if os.path.exists(settings_path):
+            with open(settings_path, "r") as f:
+                settings = json.load(f)
+                if "leverage" in settings:
+                    return int(settings["leverage"])
+    except:
+        pass
+
     for min_bal, max_bal, lev in LEVERAGE_TIERS:
         if min_bal <= balance < max_bal:
             return lev
-    return 10  # Default fallback
+    return 10
 
 
 def get_safe_leverage(balance: float, entry_price: float, sl_price: float, side: str, symbol: str) -> int:
@@ -226,84 +235,101 @@ def get_safe_leverage(balance: float, entry_price: float, sl_price: float, side:
 
 
 def get_dynamic_risk_percent(balance: float) -> float:
-    """
-    Tentukan risk per trade berdasarkan saldo.
-    """
+    """Tentukan risk per trade berdasarkan saldo (override by settings if available)."""
+    try:
+        import os
+        import json
+        settings_path = "bot_settings.json"
+        if os.path.exists(settings_path):
+            with open(settings_path, "r") as f:
+                settings = json.load(f)
+                if "risk_per_trade_percent" in settings:
+                    return float(settings["risk_per_trade_percent"])
+    except:
+        pass
+        
     for min_bal, max_bal, risk in RISK_TIERS:
         if min_bal <= balance < max_bal:
             return risk
-    return 1.5  # Default fallback
+    return 1.5
 
 
-def calculate_position_size(balance: float, entry_price: float, sl_price: float, risk_percent: float, symbol: str) -> float:
+def calculate_position_size(balance: float, entry_price: float, sl_price: float, risk_percent: float, symbol: str, leverage: int = 1) -> float:
     """
     Hitung ukuran posisi berdasarkan risk management.
     Formula: qty = (balance * risk%) / |entry - sl|
+    Ditambah pengaman leverage: qty * entry / leverage <= balance (Isolated Margin Guard)
     """
     cfg = get_symbol_config(symbol)
     price_diff = abs(entry_price - sl_price)
     
-    if price_diff == 0 or price_diff < entry_price * 0.001:
-        # Minimal risk $1
-        risk_amount = max(balance * (risk_percent / 100), 1.0)
-        qty = risk_amount / entry_price
+    # 1. Hitung Qty berdasarkan Risk budget ($)
+    risk_amount = balance * (risk_percent / 100)
+    
+    if price_diff == 0 or price_diff < entry_price * 0.0001:
+        # Fallback jika SL terlalu dekat: batasi margin max 5%
+        qty = (balance * 0.05 * leverage) / entry_price
     else:
-        risk_amount = balance * (risk_percent / 100)
         qty = risk_amount / price_diff
     
-    # Apply precision
-    qty_prec = cfg["qty_precision"]
-    qty = round(qty, qty_prec)
-    
-    # Minimal qty
-    qty = max(qty, cfg["min_qty"])
+    # 2. Leverage Guard: Pastikan margin awal (qty * entry / lev) tidak melebihi saldo tersedia
+    # Kita beri buffer: max 80% dari balance untuk satu trade tunggal agar akun tidak over-leveraged
+    max_qty_by_margin = (balance * 0.8 * leverage) / entry_price
+    if qty > max_qty_by_margin:
+        logger.warning(f"⚠️ RISK OVERSIZE: Qty {qty:.4f} butuh margin terlalu besar. Scaled down to {max_qty_by_margin:.4f}")
+        qty = max_qty_by_margin
+
+    # 3. Apply precision & min_qty
+    qty_prec = cfg.get("qty_precision", 2)
+    qty = round(float(qty), qty_prec)
+    qty = max(qty, cfg.get("min_qty", 0.001))
     
     return qty
 
 
-def calculate_smart_multi_tp_qty(balance: float, entry_price: float, tp_prices: list, leverage: int, symbol: str) -> dict:
+def calculate_smart_multi_tp_qty(balance: float, entry_price: float, sl_price: float, tp_prices: list, leverage: int, risk_percent: float, symbol: str) -> dict:
     """
-    Menghitung kuantitas parsial untuk setiap level TP agar memberikan profit absolut $1 per level.
-    Juga menerapkan safety guard margin maksimal 50% dari saldo.
+    Menghitung kuantitas parsial untuk setiap level TP.
+    Total kuantitas tetap mengikuti budget risk (Stop Loss based).
     """
     cfg = get_symbol_config(symbol)
-    qtys = []
+    qty_prec = cfg.get("qty_precision", 2)
     
-    # Target profit $1 per level TP yang valid (>0)
-    step_profit = 1.0 
+    # 1. Hitung total qty berdasarkan budget risk
+    total_qty = calculate_position_size(balance, entry_price, sl_price, risk_percent, symbol, leverage)
     
-    for tp_price in tp_prices:
-        if tp_price <= 0:
-            qtys.append(0.0)
-            continue
-        diff = abs(tp_price - entry_price)
-        if diff == 0:
-            qtys.append(0.0)
-            continue
-        qty = step_profit / diff
-        qtys.append(qty)
-        
-    total_qty = sum(qtys)
+    # 2. Bagi qty ke TP levels
+    valid_tps = [p for p in tp_prices if p > 0]
+    if not valid_tps:
+        return {"qtys": [total_qty], "total_qty": total_qty, "margin": (total_qty * entry_price) / leverage}
     
-    # Safety Guard: Batasi margin awal maksimal 50% dari saldo tersedia
-    required_margin = (total_qty * entry_price) / leverage if leverage > 0 else 0
-    max_allowed_margin = balance * 0.5
+    # Pembagian: TP1 (40%), TP2 (30%), TP3 (20%), TP4 (10%) jika semua ada
+    # Jika cuma 2 TP: TP1 (60%), TP2 (40%)
+    weights = [0.4, 0.3, 0.2, 0.1]
+    if len(valid_tps) == 1: weights = [1.0]
+    elif len(valid_tps) == 2: weights = [0.6, 0.4]
+    elif len(valid_tps) == 3: weights = [0.5, 0.3, 0.2]
     
-    if required_margin > max_allowed_margin and required_margin > 0:
-        factor = max_allowed_margin / required_margin
-        qtys = [q * factor for q in qtys]
-        total_qty = total_qty * factor
-        logger.info(f"⚠️ SAFETY GUARD: Margin ${required_margin:.2f} melebihi 50% saldo (${max_allowed_margin:.2f}). Downscale factor: {factor:.4f}")
+    final_qtys = [0.0] * 4
+    tp_idx = 0
+    assigned_qty = 0.0
     
-    # Terapkan presisi kuantitas per simbol
-    qty_prec = cfg.get("qty_precision", 3)
-    final_qtys = [round(q, qty_prec) for q in qtys]
-    
-    # Pastikan min_qty terpenuhi untuk level yang aktif
-    for i in range(len(final_qtys)):
-        if tp_prices[i] > 0 and final_qtys[i] < cfg.get("min_qty", 0.001):
-            final_qtys[i] = cfg.get("min_qty", 0.001)
+    for i, price in enumerate(tp_prices):
+        if price > 0 and tp_idx < len(weights):
+            # TP terakhir ambil sisa agar presisi
+            if tp_idx == len(valid_tps) - 1:
+                q = total_qty - assigned_qty
+            else:
+                q = total_qty * weights[tp_idx]
             
+            q = round(max(q, cfg.get("min_qty", 0.001)), qty_prec)
+            final_qtys[i] = q
+            assigned_qty += q
+            tp_idx += 1
+            
+    # 3. Recalculate total qty after rounding
+    actual_total = round(sum(final_qtys), qty_prec)
+    
     # --- DYNAMIC TP LEVEL CONSOLIDATION FOR SMALL BALANCE ---
     # Jika margin yang dibutuhkan setelah menerapkan min_qty melebihi 95% dari saldo tersedia,
     # kurangi level TP satu per satu dari yang terjauh demi menghindari error "Insufficient margin".

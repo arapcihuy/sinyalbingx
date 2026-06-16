@@ -4,7 +4,52 @@ import requests
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from hunter_engine import get_signal, logger, calc_rsi, calc_supertrend
+import logging
+
+# ── LOGGING ──
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logger = logging.getLogger(__name__)
+
+def calc_rma(series, length):
+    return series.ewm(alpha=1/length, min_periods=length, adjust=False).mean()
+
+def calc_atr(df, length=14):
+    high_low = df['High'] - df['Low']
+    high_close = np.abs(df['High'] - df['Close'].shift())
+    low_close = np.abs(df['Low'] - df['Close'].shift())
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    return calc_rma(tr, length)
+
+def calc_rsi(series, length=14):
+    delta = series.diff()
+    up = delta.clip(lower=0)
+    down = -1 * delta.clip(upper=0)
+    ema_up = calc_rma(up, length)
+    ema_down = calc_rma(down, length)
+    rs = ema_up / ema_down
+    return 100 - (100 / (1 + rs))
+
+def calc_supertrend(df, period=15, multiplier=5.0):
+    hl2 = (df['High'] + df['Low']) / 2
+    atr = calc_atr(df, period)
+    up = hl2 - (multiplier * atr)
+    dn = hl2 + (multiplier * atr)
+    st = pd.Series(0.0, index=df.index)
+    trend = pd.Series(1, index=df.index)
+    for i in range(1, len(df)):
+        if df['Close'].iloc[i-1] > up.iloc[i-1]:
+            up.iloc[i] = max(up.iloc[i], up.iloc[i-1])
+        if df['Close'].iloc[i-1] < dn.iloc[i-1]:
+            dn.iloc[i] = min(dn.iloc[i], dn.iloc[i-1])
+        if trend.iloc[i-1] == -1 and df['Close'].iloc[i] > dn.iloc[i-1]:
+            trend.iloc[i] = 1
+        elif trend.iloc[i-1] == 1 and df['Close'].iloc[i] < up.iloc[i-1]:
+            trend.iloc[i] = -1
+        else:
+            trend.iloc[i] = trend.iloc[i-1]
+        st.iloc[i] = up.iloc[i] if trend.iloc[i] == 1 else dn.iloc[i]
+    return st, trend
+
 
 def manual_realtime_check():
     print("🔍 **MEMULAI REAL-TIME SCAN SEKARANG...**\n")

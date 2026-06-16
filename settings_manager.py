@@ -19,8 +19,12 @@ def load_settings():
     }
     
     if not os.path.exists(SETTINGS_FILE):
-        with open(SETTINGS_FILE, "w") as f:
-            json.dump(default_settings, f, indent=4)
+        try:
+            import order_manager
+            order_manager._atomic_write_json(SETTINGS_FILE, default_settings)
+        except Exception:
+            with open(SETTINGS_FILE, "w") as f:
+                json.dump(default_settings, f, indent=4)
         return default_settings
         
     try:
@@ -33,11 +37,17 @@ def load_settings():
         return default_settings
 
 def save_settings(settings):
-    """Save settings to JSON file."""
+    """Save settings to JSON file atomicly."""
     try:
-        with open(SETTINGS_FILE, "w") as f:
-            json.dump(settings, f, indent=4)
+        import order_manager
+        order_manager._atomic_write_json(SETTINGS_FILE, settings)
         return True
     except Exception as e:
-        logger.error(f"Gagal save settings: {e}")
-        return False
+        logger.error(f"Gagal save settings atomic: {e}")
+        # Fallback
+        try:
+            with open(SETTINGS_FILE, "w") as f:
+                json.dump(settings, f, indent=4)
+            return True
+        except:
+            return False
