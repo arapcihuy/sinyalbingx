@@ -117,23 +117,23 @@ def run_async_execution(data, pair, signal, price, sl, tp1, tp2, tp3, tp4, TG_TO
                 header = f"🟢 *ENTRY BERHASIL ({mode_label})*"
             elif status in ["already_open", "slots_full", "ignored_by_scanner", "rejected_by_ai"]:
                 reason_map = {
-                    "already_open": "Posisi sudah terbuka di bursa/simulasi.",
-                    "slots_full": "Slot posisi aktif sudah penuh (maksimal 3).",
-                    "ignored_by_scanner": "Diabaikan oleh scanner karena expectancy rendah.",
+                    "already_open": result.get("reason") or "Posisi sudah terbuka di bursa/simulasi.",
+                    "slots_full": result.get("reason") or "Slot posisi aktif penuh. Catatan: default sekarang unlimited; ini hanya aktif jika max_slots > 0.",
+                    "ignored_by_scanner": result.get("reason") or "Diabaikan scanner karena expectancy rendah / pair tidak eligible.",
                     "rejected_by_ai": f"Ditolak AI:\n`{ai_reason}`"
                 }
                 header = f"🧠 *SINYAL DITOLAK AI*" if status == "rejected_by_ai" else f"🟡 *SINYAL DIABAIKAN*"
-                reason_text = reason_map.get(status, f"Status: `{status}`")
+                reason_text = reason_map.get(status, result.get("reason") or f"Status: `{status}`")
             elif status in ["low_margin", "insufficient_balance"]:
                 reason_map = {
-                    "low_margin": "Margin tersedia di bursa terlalu kecil (< 20% equity).",
-                    "insufficient_balance": "Saldo akun terlalu kecil untuk entri minimal."
+                    "low_margin": result.get("reason") or "Margin tersedia di bursa terlalu kecil (< 20% equity).",
+                    "insufficient_balance": result.get("reason") or "Saldo akun terlalu kecil untuk entri minimal."
                 }
                 header = f"🔴 *EKSEKUSI BATAL (MANAJEMEN MODAL)*"
-                reason_text = reason_map.get(status, f"Status: `{status}`")
+                reason_text = reason_map.get(status, result.get("reason") or f"Status: `{status}`")
             else:
                 header = f"🔴 *EKSEKUSI GAGAL*"
-                reason_text = f"Detail: `{status}`"
+                reason_text = result.get("reason") or f"Detail: `{status}`"
 
             # 2. Ambil parameter tambahan dari state jika berhasil
             extra_details = ""
