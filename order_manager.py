@@ -649,6 +649,26 @@ def execute_signal(data: dict) -> dict:
                 })
                 if tp_res.get("code") != 0:
                     logger.warning(f"🎯 Gagal pasang TP{i+1} untuk {symbol}: {tp_res.get('msg')}")
+        
+        # Kirim Telegram Notif Entry Sukses
+        try:
+            msg_entry = (
+                f"🚀 *ENTRY {pos_side}* | `{symbol}`\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📈 *Entry:* `{entry_price}`\n"
+                f"⚖️ *Leverage:* `{leverage}x`\n"
+                f"💰 *Margin/Qty:* `{qty}`\n"
+                f"🛡️ *SL:* `{sl_price}`\n"
+            )
+            for i, p in enumerate(tp_prices):
+                if p > 0: msg_entry += f"🎯 *TP{i+1}:* `{p}`\n"
+            msg_entry += f"━━━━━━━━━━━━━━━━━━━━━"
+            import requests as req
+            req.post(f"https://api.telegram.org/bot{os.getenv('TELEGRAM_BOT_TOKEN')}/sendMessage",
+                     json={"chat_id": os.getenv("TELEGRAM_CHAT_ID"), "text": msg_entry, "parse_mode": "Markdown"}, timeout=5)
+        except Exception as e:
+            logger.error(f"Gagal kirim notif telegram entry: {e}")
+
         return {"status": "success", "symbol": symbol, "qty": qty}
     else:
         reason = order_res.get('msg') or str(order_res)
