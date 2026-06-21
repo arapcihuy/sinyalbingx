@@ -203,12 +203,34 @@ def sync_from_exchange_on_startup():
                 old_trade = active_trade_data.get(sym, {})
                 last_signal = latest_signals.get(sym, {})
                 
-                # TP/SL: sinyal TV > state lama > 0
+                # TP/SL: sinyal TV > state lama > exchange orders > 0
                 sl_val = float(last_signal.get("sl", 0)) or old_trade.get("sl", 0)
                 tp1_val = float(last_signal.get("tp1", 0)) or old_trade.get("tp1", 0)
                 tp2_val = float(last_signal.get("tp2", 0)) or old_trade.get("tp2", 0)
                 tp3_val = float(last_signal.get("tp3", 0)) or old_trade.get("tp3", 0)
                 tp4_val = float(last_signal.get("tp4", 0)) or old_trade.get("tp4", 0)
+                
+                # Jika TV & state kosong, baca ulang dari exchange orders
+                if not sl_val and not tp1_val:
+                    try:
+                        ex_res = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": sym})
+                        if ex_res.get("code") == 0:
+                            ex_data = ex_res.get("data", [])
+                            ex_ords = ex_data.get("orders", []) if isinstance(ex_data, dict) else (ex_data if isinstance(ex_data, list) else [])
+                            tp_ex = []
+                            for o in ex_ords:
+                                if "TAKE_PROFIT" in o.get("type", ""):
+                                    tp_ex.append(float(o.get("stopPrice", 0)))
+                                elif "STOP" in o.get("type", ""):
+                                    sl_val = float(o.get("stopPrice", 0))
+                            tp_ex.sort()
+                            if len(tp_ex) >= 1: tp1_val = tp_ex[0]
+                            if len(tp_ex) >= 2: tp2_val = tp_ex[1]
+                            if len(tp_ex) >= 3: tp3_val = tp_ex[2]
+                            if len(tp_ex) >= 4: tp4_val = tp_ex[3]
+                            _logger.info(f"📥 {sym}: TP/SL dibaca dari exchange orders (no TV/state)")
+                    except Exception as ex_err:
+                        _logger.warning(f"Gagal baca exchange orders untuk {sym}: {ex_err}")
                 
                 synced[sym] = {
                     "symbol": sym,
@@ -1006,6 +1028,16 @@ def sync_missing_tpsl():
             else:
                 results.append(f"✔️ {symbol}: Sudah memiliki SL.")
             
+            # UPDATE active_trade_data dengan harga TP/SL yg dipakai (TV > state > brain_engine)
+            # agar check_tp_hits pakai harga sama dengan di exchange
+            with state_lock:
+                if symbol in active_trade_data:
+                    active_trade_data[symbol]["sl"] = sl_price
+                    for i, tpv in enumerate(tp_prices):
+                        if tpv > 0:
+                            active_trade_data[symbol][f"tp{i+1}"] = tpv
+                    save_active_trades()
+
             # Pasang Take Profit yang belum ada
             tp_count = 0
             weights = [0.35, 0.30, 0.20, 0.15]  # Distribusi qty: TP1=35%, TP2=30%, TP3=20%, TP4=15%
