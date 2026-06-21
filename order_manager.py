@@ -269,6 +269,28 @@ def check_paper_exit():
     if updated:
         update_paper_trades(trades)
 
+def notify_tp_hit(symbol: str, tp_level: int, tp_price: float, trade_data: dict):
+    """Kirim notifikasi ke Telegram bahwa level TP sudah tercapai (order TP terisi di bursa)."""
+    try:
+        TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7809584261")
+        entry = trade_data.get("entry_price", 0)
+        side = trade_data.get("side", "LONG")
+        pct = ((tp_price - entry) / entry * 100) if entry > 0 else 0
+        msg = (
+            f"🎯 *TP{tp_level} KENA! ({side})*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🪙 *Pair:* `{symbol}`\n"
+            f"📈 *Entry:* `{entry}` → *TP{tp_level}:* `{tp_price}` (`+{pct:.2f}%`)\n"
+            f"━━━━━━━━━━━━━━━━━━━━━"
+        )
+        import requests as r
+        r.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+               json={"chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=5)
+        logger.info(f"📨 TP{tp_level} HIT NOTIFICATION for {symbol} @ {tp_price}")
+    except Exception as e:
+        logger.error(f"Gagal kirim notif TP hit untuk {symbol}: {e}")
+
 def notify_live_close(symbol: str, trade_data: dict):
     """Kirim notifikasi ke Telegram bahwa posisi LIVE telah selesai/tutup."""
     try:
@@ -776,11 +798,16 @@ def audit_position_reconciliation():
         logger.error(f"Gagal melakukan audit rekonsiliasi: {e}")
 
 def monitor_and_sync_positions():
-    """Background monitor: cek paper exits + trailing SL + sync TP/SL posisi live."""
+    """Background monitor: cek paper exits + trailing SL + TP hit notif + sync TP/SL posisi live."""
     try:
         check_paper_exit()  # Cek apakah paper trade sudah kena TP/SL
     except Exception as e:
         logger.error(f"Error monitor check_paper_exit: {e}")
+    
+    try:
+        check_tp_hits()  # 🎯 Cek & notif TP yang kena
+    except Exception as e:
+        logger.error(f"Error monitor check_tp_hits: {e}")
     
     try:
         check_and_update_trailing_sl()  # 🧠 Trailing SL otomatis
@@ -907,6 +934,62 @@ def apply_manual_tpsl(symbol, tp_price, sl_price):
     except Exception as e:
         return {"error": str(e)}
 
+def check_tp_hits():
+    """Cek apakah order TP sudah ter-fill di bursa, kirim notif Telegram per level."""
+    try:
+        paper_mode = get_paper_mode()
+        if paper_mode:
+            return  # Paper mode: tidak ada order real
+        
+        for symbol, trade in list(active_trade_data.items()):
+            if trade.get("status") != "OPEN":
+                continue
+            
+            tp_levels = {
+                "tp1": (1, trade.get("tp1", 0)),
+                "tp2": (2, trade.get("tp2", 0)),
+                "tp3": (3, trade.get("tp3", 0)),
+                "tp4": (4, trade.get("tp4", 0)),
+            }
+            notified_key = "tp_notified"
+            if notified_key not in trade:
+                trade[notified_key] = {}
+            
+            # Ambil open orders di bursa
+            orders_res = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol, "pageSize": 50})
+            if orders_res.get("code") != 0:
+                continue
+            open_orders = orders_res.get("data", {}).get("orders", [])
+            open_tp_prices = set()
+            for o in open_orders:
+                if o.get("type") == "TAKE_PROFIT_MARKET":
+                    try:
+                        open_tp_prices.add(float(o["stopPrice"]))
+                    except (ValueError, KeyError):
+                        pass
+            
+            for tp_key, (level, tp_price) in tp_levels.items():
+                if tp_price <= 0:
+                    continue
+                if trade[notified_key].get(tp_key):
+                    continue  # Sudah dinotif
+                
+                # Jika TP price tidak ada di open orders → sudah ter-fill
+                tp_rounded = round(tp_price, 2)
+                found_open = any(abs(float(o.get("stopPrice", 0)) - tp_rounded) < 0.5 
+                                  for o in open_orders if o.get("type") == "TAKE_PROFIT_MARKET")
+                
+                if not found_open:
+                    # TP sudah terkena (order hilang dari open orders)
+                    notify_tp_hit(symbol, level, tp_price, trade)
+                    trade[notified_key][tp_key] = True
+            
+            with state_lock:
+                active_trade_data[symbol] = trade
+            save_active_trades()
+    except Exception as e:
+        logger.error(f"Error check_tp_hits: {e}")
+
 def check_and_update_trailing_sl():
     """
     Memantau harga real-time dan menggeser SL saat menyentuh milestone TP1/TP2/TP3.
@@ -984,9 +1067,9 @@ def check_and_update_trailing_sl():
                             "sl": plan["sl"],
                             "tp1": plan["tp1"],
                             "tp2": plan["tp2"],
-                            "tp3": 0.0,
-                            "tp4": 0.0,
-                            "qtys": [qty/2, qty/2, 0.0, 0.0],
+                            "tp3": plan["tp3"],
+                            "tp4": plan["tp4"],
+                            "qtys": brain_engine.calculate_smart_multi_tp_qty(balance, avg_price, plan["sl"], [plan["tp1"], plan["tp2"], plan["tp3"], plan["tp4"]], plan["leverage"], plan["risk_percent"], symbol)["qtys"],
                             "qty": qty,
                             "leverage": plan["leverage"],
                             "risk_pct": plan["risk_percent"],
