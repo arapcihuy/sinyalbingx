@@ -131,8 +131,17 @@ def sync_from_exchange_on_startup():
                 amt = float(p["positionAmt"])
                 if amt == 0: continue
                 side = "LONG" if amt > 0 else "SHORT"
-                # Preserve TP/SL data dari state lama agar tidak hilang saat restart
+                # Preserve TP/SL: prioritas dari sinyal TV terakhir, lalu state lama
                 old_trade = active_trade_data.get(sym, {})
+                last_signal = latest_signals.get(sym, {})
+                
+                # TP/SL: sinyal TV > state lama > 0
+                sl_val = float(last_signal.get("sl", 0)) or old_trade.get("sl", 0)
+                tp1_val = float(last_signal.get("tp1", 0)) or old_trade.get("tp1", 0)
+                tp2_val = float(last_signal.get("tp2", 0)) or old_trade.get("tp2", 0)
+                tp3_val = float(last_signal.get("tp3", 0)) or old_trade.get("tp3", 0)
+                tp4_val = float(last_signal.get("tp4", 0)) or old_trade.get("tp4", 0)
+                
                 synced[sym] = {
                     "symbol": sym,
                     "side": side,
@@ -140,11 +149,11 @@ def sync_from_exchange_on_startup():
                     "qty": abs(amt),
                     "leverage": int(p.get("leverage", 10)),
                     "status": "OPEN_SYNCED",
-                    "sl": old_trade.get("sl", 0),
-                    "tp1": old_trade.get("tp1", 0),
-                    "tp2": old_trade.get("tp2", 0),
-                    "tp3": old_trade.get("tp3", 0),
-                    "tp4": old_trade.get("tp4", 0),
+                    "sl": sl_val,
+                    "tp1": tp1_val,
+                    "tp2": tp2_val,
+                    "tp3": tp3_val,
+                    "tp4": tp4_val,
                     "tp_notified": old_trade.get("tp_notified", {}),
                     "trailing_enabled": old_trade.get("trailing_enabled", True),
                     "peak_price": old_trade.get("peak_price", 0),
@@ -870,19 +879,34 @@ def sync_missing_tpsl():
             has_tp = any("TAKE_PROFIT" in o.get("type", "") for o in open_orders)
             
             # Selalu periksa dan sinkronkan TP1-4 terlepas dari apakah sudah ada sebagian TP
-            if symbol in active_trade_data:
-                trade_state = active_trade_data[symbol]
-                sl_price = float(trade_state.get("sl", 0))
-                tp_prices = [
-                    float(trade_state.get("tp1", 0)),
-                    float(trade_state.get("tp2", 0)),
-                    float(trade_state.get("tp3", 0)),
-                    float(trade_state.get("tp4", 0))
-                ]
-            else:
+            # Prioritas: sinyal TV terakhir > active_trade_data > brain_engine fallback
+            last_signal = latest_signals.get(symbol, {})
+            trade_state = active_trade_data.get(symbol, {})
+            
+            tv_sl = float(last_signal.get("sl", 0))
+            tv_tp1 = float(last_signal.get("tp1", 0))
+            tv_tp2 = float(last_signal.get("tp2", 0))
+            tv_tp3 = float(last_signal.get("tp3", 0))
+            tv_tp4 = float(last_signal.get("tp4", 0))
+            
+            state_sl = float(trade_state.get("sl", 0))
+            state_tp1 = float(trade_state.get("tp1", 0))
+            state_tp2 = float(trade_state.get("tp2", 0))
+            state_tp3 = float(trade_state.get("tp3", 0))
+            state_tp4 = float(trade_state.get("tp4", 0))
+            
+            # TP/SL: sinyal TV > state lama
+            sl_price = tv_sl or state_sl
+            tp1_price = tv_tp1 or state_tp1
+            tp2_price = tv_tp2 or state_tp2
+            tp3_price = tv_tp3 or state_tp3
+            tp4_price = tv_tp4 or state_tp4
+            tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
+            
+            # Jika semua TP/SL masih 0, fallback ke brain_engine
+            if sl_price == 0 and tp1_price == 0:
                 import brain_engine
-                logger.info(f"🧠 Posisi {symbol} tanpa state, generate plan via brain_engine...")
-                # Gunakan balance yang cukup untuk menghitung qty yang sesuai dengan amt posisi
+                logger.warning(f"⚠️ {symbol} tidak punya TP/SL dari sinyal TV maupun state. Fallback ke brain_engine.")
                 plan = brain_engine.get_full_trade_plan(10000.0, entry, side, symbol) 
                 sl_price = plan["sl"]
                 tp_prices = [plan["tp1"], plan["tp2"], plan.get("tp3", 0), plan.get("tp4", 0)]
@@ -1076,13 +1100,29 @@ def check_and_update_trailing_sl():
             with state_lock:
                 if symbol not in active_trade_data:
                     try:
-                        import brain_engine
-                        # Buat rencana TP/SL otomatis berbasis ATR
-                        plan = brain_engine.get_full_trade_plan(balance, avg_price, pos_side, symbol)
+                        # Prioritas: sinyal TV terakhir > brain_engine fallback
+                        last_signal = latest_signals.get(symbol, {})
+                        tv_sl = float(last_signal.get("sl", 0))
+                        tv_tp1 = float(last_signal.get("tp1", 0))
+                        tv_tp2 = float(last_signal.get("tp2", 0))
+                        tv_tp3 = float(last_signal.get("tp3", 0))
+                        tv_tp4 = float(last_signal.get("tp4", 0))
+                        
+                        if tv_sl > 0 and tv_tp1 > 0:
+                            # Gunakan TP/SL dari sinyal TV
+                            sl_val = tv_sl
+                            tp_prices = [tv_tp1, tv_tp2, tv_tp3, tv_tp4]
+                            logger.info(f"📺 Auto-adopt {symbol}: pakai TP/SL dari sinyal TV (SL={sl_val}, TP1={tv_tp1})")
+                        else:
+                            # Fallback ke brain_engine jika tidak ada sinyal TV
+                            import brain_engine
+                            plan = brain_engine.get_full_trade_plan(balance, avg_price, pos_side, symbol)
+                            sl_val = plan["sl"]
+                            tp_prices = [plan["tp1"], plan["tp2"], plan["tp3"], plan["tp4"]]
+                            logger.info(f"🧠 Auto-adopt {symbol}: tidak ada sinyal TV, fallback ke brain_engine")
                         
                         # 4 TP weights konsisten (35/30/20/15)
                         weights = [0.35, 0.30, 0.20, 0.15]
-                        tp_prices = [plan["tp1"], plan["tp2"], plan["tp3"], plan["tp4"]]
                         
                         # Pasang TP/SL hanya jika BELUM ada di bursa (hindari duplikasi)
                         if not paper_mode:
@@ -1095,13 +1135,13 @@ def check_and_update_trailing_sl():
                                 has_sl = any("STOP" in o.get("type", "") for o in existing_orders_list)
                                 has_tp = any("TAKE_PROFIT" in o.get("type", "") for o in existing_orders_list)
                                 
-                                if not has_sl and plan["sl"] > 0:
+                                if not has_sl and sl_val > 0:
                                     bx._request("POST", "/openApi/swap/v2/trade/order", {
                                         "symbol": symbol, "side": "BUY" if pos_side == "SHORT" else "SELL",
                                         "positionSide": pos_side, "type": "STOP_MARKET",
-                                        "stopPrice": plan["sl"], "quantity": qty
+                                        "stopPrice": sl_val, "quantity": qty
                                     })
-                                    logger.info(f"✅ Adopt SL dipasang {symbol} @ {plan['sl']}")
+                                    logger.info(f"✅ Adopt SL dipasang {symbol} @ {sl_val}")
                                 
                                 if not has_tp:
                                     for i, tp_price in enumerate(tp_prices):
@@ -1122,11 +1162,11 @@ def check_and_update_trailing_sl():
                             "symbol": symbol,
                             "side": pos_side,
                             "entry_price": avg_price,
-                            "sl": plan["sl"],
-                            "tp1": plan["tp1"],
-                            "tp2": plan["tp2"],
-                            "tp3": plan["tp3"],
-                            "tp4": plan["tp4"],
+                            "sl": sl_val,
+                            "tp1": tp_prices[0],
+                            "tp2": tp_prices[1],
+                            "tp3": tp_prices[2],
+                            "tp4": tp_prices[3],
                             "qty": qty,
                             "trailing": {
                                 "activate_atr_mult": 1.0,
@@ -1151,9 +1191,9 @@ def check_and_update_trailing_sl():
                             f"━━━━━━━━━━━━━━━━━━━━━\n"
                             f"🪙 *Pair:* `{symbol}` ({pos_side})\n"
                             f"📈 *Entry:* `{avg_price}`\n"
-                            f"🛡️ *SL Otomatis:* `{plan['sl']}`\n"
-                            f"🎯 *TP1:* `{plan['tp1']}` | *TP2:* `{plan['tp2']}`\n"
-                            f"🎯 *TP3:* `{plan['tp3']}` | *TP4:* `{plan['tp4']}`\n"
+                            f"🛡️ *SL:* `{sl_val}`\n"
+                            f"🎯 *TP1:* `{tp_prices[0]}` | *TP2:* `{tp_prices[1]}`\n"
+                            f"🎯 *TP3:* `{tp_prices[2]}` | *TP4:* `{tp_prices[3]}`\n"
                             f"📝 *Status:* Berhasil diadopsi & diproteksi.\n"
                             f"━━━━━━━━━━━━━━━━━━━━━"
                         )
