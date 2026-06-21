@@ -192,12 +192,19 @@ def calculate_tp_sl(entry_price: float, side: str, atr: float, symbol: str, leve
             if side == "LONG":
                 min_safe_sl = est_liq * (1.0 + buffer_pct)
                 sl_price = max(sl_price, min_safe_sl)
+                # SL untuk LONG wajib di BAWAH entry (tidak boleh di atas)
+                sl_price = min(sl_price, entry_price * (1.0 - 0.001))
             else:
                 max_safe_sl = est_liq * (1.0 - buffer_pct)
                 sl_price = min(sl_price, max_safe_sl)
+                # SL untuk SHORT wajib di ATAS entry (tidak boleh di bawah)
+                sl_price = max(sl_price, entry_price * (1.0 + 0.001))
 
     # TP ikut jarak SL final → RR stabil
     risk_dist = abs(entry_price - sl_price)
+    # Minimum risk_dist 1% entry → TPs tidak terlalu rapat saat SL di-clamp dekat entry
+    min_risk = entry_price * 0.01
+    risk_dist = max(risk_dist, min_risk)
     
     # Target RR default (misal SL 1% → TP1 1.5%, TP2 3%, TP3 4.5%, TP4 6%)
     if side == "LONG":
@@ -355,6 +362,12 @@ def calculate_position_size(balance: float, entry_price: float, sl_price: float,
 
     # 3. Apply precision & min_qty
     qty_prec = cfg.get("qty_precision", 2)
+    # Minimum qty per TP = min_qty (biar semua TP muat walau qty kecil)
+    min_qty_tp = cfg.get("min_qty", 0.001)
+    # Jika qty terlalu kecil untuk 4 TP (qty * 0.15 < min_qty_tp), naikkan ke min
+    if qty < min_qty_tp * 4:
+        logger.warning(f"⚠️ Qty {qty:.4f} terlalu kecil untuk 4 TP (min={min_qty_tp}). Ditingkatkan ke {min_qty_tp * 4:.4f}")
+        qty = min_qty_tp * 4
     qty = round(float(qty), qty_prec)
     qty = max(qty, cfg.get("min_qty", 0.001))
     
