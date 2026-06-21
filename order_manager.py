@@ -1064,24 +1064,37 @@ def check_and_update_trailing_sl():
                         weights = [0.35, 0.30, 0.20, 0.15]
                         tp_prices = [plan["tp1"], plan["tp2"], plan["tp3"], plan["tp4"]]
                         
-                        # Langsung pasang TP & SL ke bursa (Sinkronisasi Instan)
+                        # Pasang TP/SL hanya jika BELUM ada di bursa (hindari duplikasi)
                         if not paper_mode:
                             try:
-                                # 1. Pasang SL
-                                bx._request("POST", "/openApi/swap/v2/trade/order", {
-                                    "symbol": symbol, "side": "BUY" if pos_side == "SHORT" else "SELL",
-                                    "positionSide": pos_side, "type": "STOP_MARKET",
-                                    "stopPrice": plan["sl"], "quantity": qty
-                                })
-                                # 2. Pasang 4 TP
-                                for i, tp_price in enumerate(tp_prices):
-                                    tp_qty = round(qty * weights[i], 4)
-                                    if tp_price > 0 and tp_qty > 0:
-                                        bx._request("POST", "/openApi/swap/v2/trade/order", {
-                                            "symbol": symbol, "side": "BUY" if pos_side == "SHORT" else "SELL",
-                                            "positionSide": pos_side, "type": "TAKE_PROFIT_MARKET",
-                                            "stopPrice": tp_price, "quantity": tp_qty
-                                        })
+                                existing_orders = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
+                                existing_data = existing_orders.get("data", [])
+                                if isinstance(existing_data, dict):
+                                    existing_data = existing_data.get("orders", [])
+                                existing_orders_list = existing_data if isinstance(existing_data, list) else []
+                                has_sl = any("STOP" in o.get("type", "") for o in existing_orders_list)
+                                has_tp = any("TAKE_PROFIT" in o.get("type", "") for o in existing_orders_list)
+                                
+                                if not has_sl and plan["sl"] > 0:
+                                    bx._request("POST", "/openApi/swap/v2/trade/order", {
+                                        "symbol": symbol, "side": "BUY" if pos_side == "SHORT" else "SELL",
+                                        "positionSide": pos_side, "type": "STOP_MARKET",
+                                        "stopPrice": plan["sl"], "quantity": qty
+                                    })
+                                    logger.info(f"✅ Adopt SL dipasang {symbol} @ {plan['sl']}")
+                                
+                                if not has_tp:
+                                    for i, tp_price in enumerate(tp_prices):
+                                        tp_qty = round(qty * weights[i], 4)
+                                        if tp_price > 0 and tp_qty > 0:
+                                            bx._request("POST", "/openApi/swap/v2/trade/order", {
+                                                "symbol": symbol, "side": "BUY" if pos_side == "SHORT" else "SELL",
+                                                "positionSide": pos_side, "type": "TAKE_PROFIT_MARKET",
+                                                "stopPrice": tp_price, "quantity": tp_qty
+                                    })
+                                    logger.info(f"✅ Adopt {len(tp_prices)} TP dipasang {symbol}")
+                                else:
+                                    logger.info(f"ℹ️ Adopt skip — TP/SL sudah ada di bursa {symbol}")
                             except Exception as order_err:
                                 logger.error(f"⚠️ Gagal pasang TP/SL adopt {symbol}: {order_err}")
                         
