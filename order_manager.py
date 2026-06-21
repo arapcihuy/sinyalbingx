@@ -639,7 +639,7 @@ def execute_signal(data: dict) -> dict:
             else:
                 if tp2_price == 0: tp2_price = _round_price(entry_price - (risk_dist * 3.0), symbol)
                 if tp3_price == 0: tp3_price = _round_price(entry_price - (risk_dist * 4.5), symbol)
-                if tp4_price == 0: tp_prices = _round_price(entry_price - (risk_dist * 6.0), symbol)
+                if tp4_price == 0: tp4_price = _round_price(entry_price - (risk_dist * 6.0), symbol)
             
         # CEK DUPLIKASI: filter tp_prices unik (set) & urutkan (sort)
         raw_tps = [tp1_price, tp2_price, tp3_price, tp4_price]
@@ -1009,20 +1009,41 @@ def sync_missing_tpsl():
             # Pasang Take Profit yang belum ada
             tp_count = 0
             weights = [0.35, 0.30, 0.20, 0.15]  # Distribusi qty: TP1=35%, TP2=30%, TP3=20%, TP4=15%
+            
+            # CEK: Berapa total TP qty yang sudah ada?
+            current_tp_qty = sum(float(o.get("origQty", 0)) for o in open_orders if "TAKE_PROFIT" in o.get("type", ""))
+            if current_tp_qty >= amt * 0.99:
+                results.append(f"✔️ {symbol}: TP sudah lengkap (qty tertutup).")
+                continue
+
             for i, tp_val in enumerate(tp_prices):
                 if tp_val > 0:
-                    # Cek apakah harga TP ini sudah ada di open orders
-                    already_has_this_tp = any(abs(float(o.get("stopPrice", 0)) - tp_val) < (tp_val * 0.001) for o in open_orders if "TAKE_PROFIT" in o.get("type", ""))
+                    # Cek apakah harga TP ini sudah ada di open orders (toleransi 0.5%)
+                    already_has_this_tp = any(abs(float(o.get("stopPrice", 0)) - tp_val) < (tp_val * 0.005) for o in open_orders if "TAKE_PROFIT" in o.get("type", ""))
                     if not already_has_this_tp:
                         # Gunakan try/except untuk mencegah kegagalan satu TP membatalkan yang lain
                         try:
+                            # Split sisa qty yang belum ada TP nya
+                            remaining_qty_to_cover = amt - current_tp_qty
+                            if remaining_qty_to_cover <= 0:
+                                break # Stop jika qty sudah fully covered
+                                
+                            from brain_engine import get_symbol_config
+                            cfg = get_symbol_config(symbol)
+                            min_qty = cfg.get("min_qty", 0.001)
+                            
+                            # Coba pakai standard weight, tapi clamp agar gak lewat amt, minimal min_qty
                             tp_qty = round(amt * weights[i], 3) if i < len(weights) else round(amt * 0.1, 3)
+                            tp_qty = max(min_qty, tp_qty)
+                            tp_qty = min(remaining_qty_to_cover, tp_qty)
+                            
                             if tp_qty > 0:
                                 logger.info(f"⚠️ {symbol} missing TP{i+1}. Memasang TP {tp_val} (qty: {tp_qty})...")
                                 bx._request("POST", "/openApi/swap/v2/trade/order", {
                                     "symbol": symbol, "side": sl_side, "positionSide": side,
                                     "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_val, "quantity": tp_qty
                                 })
+                                current_tp_qty += tp_qty
                                 tp_count += 1
                         except Exception as e:
                             logger.error(f"Gagal pasang TP{i+1} untuk {symbol}: {e}")
