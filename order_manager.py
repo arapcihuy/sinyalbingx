@@ -521,6 +521,21 @@ def execute_signal(data: dict) -> dict:
         tp3_price = _round_price(float(trade_plan.get("tp3", 0)), symbol)
         tp4_price = _round_price(float(trade_plan.get("tp4", 0)), symbol)
         tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
+    elif tp_mode == "multiple" and tp1_price > 0 and (tp2_price == 0 or tp3_price == 0 or tp4_price == 0):
+        # TV kirim tp1 tapi kurang tp2/3/4 → auto-generate dari brain berdasarkan risk_dist
+        logger.info("🎯 TV kurang TP level → auto-generate dari brain")
+        risk_dist = abs(entry_price - sl_price)
+        if risk_dist > 0:
+            if pos_side == "LONG":
+                if tp2_price == 0: tp2_price = _round_price(entry_price + (risk_dist * 3.0), symbol)
+                if tp3_price == 0: tp3_price = _round_price(entry_price + (risk_dist * 4.5), symbol)
+                if tp4_price == 0: tp4_price = _round_price(entry_price + (risk_dist * 6.0), symbol)
+            else:
+                if tp2_price == 0: tp2_price = _round_price(entry_price - (risk_dist * 3.0), symbol)
+                if tp3_price == 0: tp3_price = _round_price(entry_price - (risk_dist * 4.5), symbol)
+                if tp4_price == 0: tp4_price = _round_price(entry_price - (risk_dist * 6.0), symbol)
+        tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
+        logger.info(f"🎯 Auto-generated: TP1={tp1_price} TP2={tp2_price} TP3={tp3_price} TP4={tp4_price}")
 
     if brain_enabled:
         logger.info(f"🧠 BRAIN ENABLED → {symbol} pakai TV TP/SL + brain lev/margin")
