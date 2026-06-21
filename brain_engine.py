@@ -36,6 +36,16 @@ SYMBOL_CONFIG = {
         "qty_precision": 2,
         "price_precision": 2,
     },
+    "BNB-USDT": {
+        "atr_period": 14,
+        "tp_atr_multiplier": 2.0,
+        "sl_atr_multiplier": 1.0,
+        "trail_activate_atr": 1.0,
+        "trail_offset_atr": 0.5,
+        "min_qty": 0.01,
+        "qty_precision": 2,
+        "price_precision": 2,
+    },
 }
 
 # Fallback config untuk symbol lain
