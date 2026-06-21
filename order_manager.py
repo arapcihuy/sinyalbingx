@@ -874,7 +874,8 @@ def sync_missing_tpsl():
                 else:
                     import brain_engine
                     logger.info(f"🧠 Posisi {symbol} tanpa state, generate plan via brain_engine...")
-                    plan = brain_engine.get_full_trade_plan(100.0, entry, side, symbol) # Balance dummy, plan fokus di TP/SL
+                    # Gunakan balance yang cukup untuk menghitung qty yang sesuai dengan amt posisi
+                    plan = brain_engine.get_full_trade_plan(10000.0, entry, side, symbol) 
                     sl_price = plan["sl"]
                     tp_prices = [plan["tp1"], plan["tp2"], plan.get("tp3", 0), plan.get("tp4", 0)]
 
