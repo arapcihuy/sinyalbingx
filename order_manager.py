@@ -629,7 +629,7 @@ def execute_signal(data: dict) -> dict:
         tp4_price = _round_price(float(trade_plan.get("tp4", 0)), symbol)
         tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
     elif tp1_price > 0 and sl_price > 0:
-        # TV kirim tp1+sl → pastikan tp2/3/4 ada, kurang? auto-generate
+        # TV kirim tp1+sl -> auto-generate sisanya tanpa duplikasi
         risk_dist = abs(entry_price - sl_price)
         if risk_dist > 0:
             if pos_side == "LONG":
@@ -639,8 +639,22 @@ def execute_signal(data: dict) -> dict:
             else:
                 if tp2_price == 0: tp2_price = _round_price(entry_price - (risk_dist * 3.0), symbol)
                 if tp3_price == 0: tp3_price = _round_price(entry_price - (risk_dist * 4.5), symbol)
-                if tp4_price == 0: tp4_price = _round_price(entry_price - (risk_dist * 6.0), symbol)
-        tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
+                if tp4_price == 0: tp_prices = _round_price(entry_price - (risk_dist * 6.0), symbol)
+            
+        # CEK DUPLIKASI: filter tp_prices unik (set) & urutkan (sort)
+        raw_tps = [tp1_price, tp2_price, tp3_price, tp4_price]
+        # Pastikan arah TP konsisten (semua > entry untuk LONG, semua < untuk SHORT)
+        valid_tps = []
+        for p in raw_tps:
+            if p > 0:
+                if (pos_side == "LONG" and p > entry_price) or (pos_side == "SHORT" and p < entry_price):
+                    valid_tps.append(p)
+            
+        tp_list = sorted(list(set(valid_tps)), reverse=(pos_side == "SHORT"))
+        # Pad dengan 0 sampai 4
+        while len(tp_list) < 4: tp_list.append(0)
+        tp_prices = tp_list
+        tp1_price, tp2_price, tp3_price, tp4_price = tp_prices
         logger.info(f"🎯 WAJIB 4 TP → TP1={tp1_price} TP2={tp2_price} TP3={tp3_price} TP4={tp4_price} SL={sl_price}")
 
     if brain_enabled:
