@@ -355,19 +355,32 @@ def calculate_position_size(balance: float, entry_price: float, sl_price: float,
     
     # 2. Leverage Guard: Pastikan margin awal (qty * entry / lev) tidak melebihi saldo tersedia
     # Kita beri buffer: max 70% dari balance (dulu 80%) untuk satu trade tunggal agar akun aman
-    max_qty_by_margin = (balance * 0.7 * leverage) / entry_price
-    if qty > max_qty_by_margin:
-        logger.warning(f"⚠️ RISK OVERSIZE: Qty {qty:.4f} butuh margin terlalu besar. Scaled down to {max_qty_by_margin:.4f}")
-        qty = max_qty_by_margin
+    # DULUPARAMS: (balance * 0.7 * leverage) / entry_price
+    
+    # PRIORITAS CLAUDE.md: WAJIB 4 TP.
+    # Jika qty saat ini (setelah risk-based) < min_qty_tp * 4, tingkatkan.
+    desired_qty = qty # Simpan qty hasil perhitungan risk
+    min_qty_for_4tp = cfg.get("min_qty", 0.001) * 4
+    if desired_qty < min_qty_for_4tp:
+        logger.warning(f"⚠️ Qty {desired_qty:.4f} terlalu kecil untuk 4 TP (min={cfg.get('min_qty', 0.001)}). Ditingkatkan ke {min_qty_for_4tp:.4f}")
+        desired_qty = min_qty_for_4tp
+
+    # Sekarang cek apakah desired_qty (untuk 4 TP) masih melanggar margin guard
+    # Jika ya, naikkan buffer margin untuk mengakomodasi 4 TP
+    max_qty_by_margin_tight = (balance * 0.7 * leverage) / entry_price
+    if desired_qty > max_qty_by_margin_tight:
+        logger.warning(f"⚠️ {symbol}: Qty {desired_qty:.4f} butuh margin lebih dari 70% saldo. Menaikkan budget margin ke 95% untuk penuhi 4 TP.")
+        max_qty_by_margin_loose = (balance * 0.95 * leverage) / entry_price
+        if desired_qty > max_qty_by_margin_loose:
+            logger.critical(f"❌ {symbol}: Bahkan dengan 95% saldo, qty {desired_qty:.4f} masih terlalu besar. Akun tidak cukup margin untuk 4 TP. Mempertahankan qty={max_qty_by_margin_loose:.4f}")
+            qty = max_qty_by_margin_loose
+        else:
+            qty = desired_qty # Gunakan desired_qty (min_qty_for_4tp)
+    else:
+        qty = desired_qty # Gunakan desired_qty
 
     # 3. Apply precision & min_qty
     qty_prec = cfg.get("qty_precision", 2)
-    # Minimum qty per TP = min_qty (biar semua TP muat walau qty kecil)
-    min_qty_tp = cfg.get("min_qty", 0.001)
-    # Jika qty terlalu kecil untuk 4 TP (qty * 0.15 < min_qty_tp), naikkan ke min
-    if qty < min_qty_tp * 4:
-        logger.warning(f"⚠️ Qty {qty:.4f} terlalu kecil untuk 4 TP (min={min_qty_tp}). Ditingkatkan ke {min_qty_tp * 4:.4f}")
-        qty = min_qty_tp * 4
     qty = round(float(qty), qty_prec)
     qty = max(qty, cfg.get("min_qty", 0.001))
     
