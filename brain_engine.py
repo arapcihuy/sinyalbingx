@@ -167,10 +167,14 @@ def calculate_tp_sl(entry_price: float, side: str, atr: float, symbol: str, leve
         sl_price = entry_price - (effective_atr * sl_mult)
         tp1_price = entry_price + (effective_atr * tp_mult * 0.6)
         tp2_price = entry_price + (effective_atr * tp_mult)
+        tp3_price = entry_price + (effective_atr * tp_mult * 1.4)
+        tp4_price = entry_price + (effective_atr * tp_mult * 1.8)
     else:
         sl_price = entry_price + (effective_atr * sl_mult)
         tp1_price = entry_price - (effective_atr * tp_mult * 0.6)
         tp2_price = entry_price - (effective_atr * tp_mult)
+        tp3_price = entry_price - (effective_atr * tp_mult * 1.4)
+        tp4_price = entry_price - (effective_atr * tp_mult * 1.8)
 
     if leverage and leverage > 0:
         est_liq = estimate_liquidation_price(entry_price, leverage, side, mmr)
@@ -185,13 +189,17 @@ def calculate_tp_sl(entry_price: float, side: str, atr: float, symbol: str, leve
     # TP ikut jarak SL final → RR stabil
     risk_dist = abs(entry_price - sl_price)
     
-    # Target RR default (misal SL 1% → TP1 1.5%, TP2 3%)
+    # Target RR default (misal SL 1% → TP1 1.5%, TP2 3%, TP3 4.5%, TP4 6%)
     if side == "LONG":
         tp1_price = entry_price + (risk_dist * 1.5)
         tp2_price = entry_price + (risk_dist * 3.0)
+        tp3_price = entry_price + (risk_dist * 4.5)
+        tp4_price = entry_price + (risk_dist * 6.0)
     else:
         tp1_price = entry_price - (risk_dist * 1.5)
         tp2_price = entry_price - (risk_dist * 3.0)
+        tp3_price = entry_price - (risk_dist * 4.5)
+        tp4_price = entry_price - (risk_dist * 6.0)
     
     # LIMIT TP: Jangan biarkan TP melampaui 5% profit per trade untuk altcoins
     # Biar nggak 'kejauhan' di BingX
@@ -199,9 +207,13 @@ def calculate_tp_sl(entry_price: float, side: str, atr: float, symbol: str, leve
     if side == "LONG":
         tp1_price = min(tp1_price, entry_price * (1 + max_tp_pct * 0.5))
         tp2_price = min(tp2_price, entry_price * (1 + max_tp_pct))
+        tp3_price = min(tp3_price, entry_price * (1 + max_tp_pct * 1.5))
+        tp4_price = min(tp4_price, entry_price * (1 + max_tp_pct * 2.0))
     else:
         tp1_price = max(tp1_price, entry_price * (1 - max_tp_pct * 0.5))
         tp2_price = max(tp2_price, entry_price * (1 - max_tp_pct))
+        tp3_price = max(tp3_price, entry_price * (1 - max_tp_pct * 1.5))
+        tp4_price = max(tp4_price, entry_price * (1 - max_tp_pct * 2.0))
     
     price_prec = cfg["price_precision"]
     
@@ -209,6 +221,8 @@ def calculate_tp_sl(entry_price: float, side: str, atr: float, symbol: str, leve
         "sl": round(sl_price, price_prec),
         "tp1": round(tp1_price, price_prec),
         "tp2": round(tp2_price, price_prec),
+        "tp3": round(tp3_price, price_prec),
+        "tp4": round(tp4_price, price_prec),
         "atr_used": effective_atr,
     }
 
@@ -593,6 +607,8 @@ def get_full_trade_plan(balance: float, entry_price: float, side: str, symbol: s
         "sl": tp_sl["sl"],
         "tp1": tp_sl["tp1"],
         "tp2": tp_sl["tp2"],
+        "tp3": tp_sl.get("tp3", 0),
+        "tp4": tp_sl.get("tp4", 0),
         "atr": round(atr, 6),
         "trailing_config": {
             "activate_atr_mult": cfg["trail_activate_atr"],
@@ -604,6 +620,6 @@ def get_full_trade_plan(balance: float, entry_price: float, side: str, symbol: s
     }
     
     logger.info(f"🧠 BRAIN PLAN: {symbol} {side} | Lev: {leverage}x | Risk: {risk_percent}% | Qty: {qty}")
-    logger.info(f"   TP1: {tp_sl['tp1']} | TP2: {tp_sl['tp2']} | SL: {tp_sl['sl']} | ATR: {atr:.4f}")
+    logger.info(f"   TP1: {tp_sl['tp1']} | TP2: {tp_sl['tp2']} | TP3: {tp_sl.get('tp3',0)} | TP4: {tp_sl.get('tp4',0)} | SL: {tp_sl['sl']} | ATR: {atr:.4f}")
     
     return plan
