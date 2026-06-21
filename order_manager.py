@@ -297,6 +297,8 @@ def notify_live_close(symbol: str, trade_data: dict):
         # Beri jeda 2 detik agar bursa mencatat data income
         time.sleep(2)
         income_history = bx.get_income_history(symbol=symbol, days=1)
+        if income_history is None:
+            income_history = []
         
         now_ms = time.time() * 1000
         five_mins_ms = 5 * 60 * 1000
