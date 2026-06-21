@@ -74,3 +74,4 @@ Berikut adalah 3 ide utama yang siap dikerjakan oleh AI Anda berikutnya:
 1. **Dilarang keras memodifikasi atau menyentuh file apa pun di dalam folder `botreding/`**. Folder tersebut bersifat *Read-Only* untuk proyek ini.
 2. Seluruh file baru terkait kecerdasan buatan harus ditempatkan di dalam folder [ai_trading/](file:///Users/mac/sinyalbingx/ai_trading).
 3. Kode modifikasi harus selalu menyertakan *graceful fallback* (misalnya jika API Gemini atau 9Router offline, bot harus tetap dapat berjalan dengan menyetujui sinyal secara otomatis agar dana tidak tersangkut).
+4. TP/SL sumber utama harus dari sinyal TradingView; brain engine hanya dipakai untuk leverage, margin, sizing, dan safety/liq guard. Jangan overwrite TP/SL TV kecuali fallback saat TV tidak mengirim level.

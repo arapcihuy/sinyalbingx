@@ -307,10 +307,10 @@ def set_multi_tp_sl(
         tp_params = {
             "symbol": symbol,
             "side": side,
+            "positionSide": position_side,
             "type": "TAKE_PROFIT_MARKET",
-            "stopPrice": round(float(tp_price), 2),
+            "stopPrice": round(float(tp_price), 3),
             "quantity": round(float(tp_qty), 4),
-            "reduceOnly": "true",
             "priceProtect": "true"
         }
         try:
@@ -323,10 +323,10 @@ def set_multi_tp_sl(
     sl_params = {
         "symbol": symbol,
         "side": side,
+        "positionSide": position_side,
         "type": "STOP_MARKET",
-        "stopPrice": round(float(stop_price), 2),
+        "stopPrice": round(float(stop_price), 3),
         "quantity": round(float(total_qty), 4),
-        "reduceOnly": "true",
         "priceProtect": "true"
     }
     results["sl"] = _request("POST", "/openApi/swap/v2/trade/order", sl_params)
