@@ -366,6 +366,31 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             mode = state_manager.get_trading_mode()
             self.wfile.write(json.dumps(mode).encode())
+        elif path == "/api/signals":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            try:
+                import sqlite3
+                conn = sqlite3.connect("signals.db")
+                c = conn.cursor()
+                c.execute("SELECT * FROM tv_signals ORDER BY id DESC LIMIT 50")
+                rows = c.fetchall()
+                cols = [d[0] for d in c.description]
+                data = [dict(zip(cols, r)) for r in rows]
+                conn.close()
+                self.wfile.write(json.dumps(data, indent=2).encode())
+            except Exception as e:
+                self.wfile.write(json.dumps({"error": str(e)}).encode())
+        elif path == "/api/trades":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            try:
+                import order_manager
+                self.wfile.write(json.dumps(order_manager.active_trade_data, indent=2).encode())
+            except Exception as e:
+                self.wfile.write(json.dumps({"error": str(e)}).encode())
         else:
             self.send_response(404)
             self.end_headers()
