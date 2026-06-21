@@ -50,13 +50,13 @@ DEFAULT_CONFIG = {
     "price_precision": 2,
 }
 
-# Leverage tiers berdasarkan saldo
+# Leverage tiers berdasarkan saldo (leverage dinaikkan untuk saldo kecil agar margin cukup memasang 4 TP)
 LEVERAGE_TIERS = [
-    (0, 10, 5),     # <$10  → lev 5x
-    (10, 25, 10),   # $10-25 → lev 10x
-    (25, 50, 15),   # $25-50 → lev 15x
+    (0, 10, 20),     # <$10  → lev 20x
+    (10, 25, 20),   # $10-25 → lev 20x
+    (25, 50, 20),   # $25-50 → lev 20x
     (50, 100, 20),  # $50-100 → lev 20x
-    (100, 999999, 25),  # >$100 → lev 25x (cap aman)
+    (100, 999999, 25),  # >$100 → lev 25x
 ]
 
 # Risk per trade berdasarkan saldo
