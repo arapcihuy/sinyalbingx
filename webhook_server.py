@@ -220,7 +220,7 @@ def run_async_execution(data, pair, signal, price, sl, tp1, tp2, tp3, tp4, TG_TO
 
 import re
 
-_TRADEABLE_SYMBOLS_CACHE = {"BTC-USDT", "ETH-USDT"}
+_TRADEABLE_SYMBOLS_CACHE = {"BTC-USDT", "ETH-USDT", "BNB-USDT"}
 
 def is_symbol_tradeable(symbol: str) -> bool:
     """Cek apakah symbol valid dan aktif di BingX (dengan caching)."""
@@ -436,7 +436,12 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     signal = (data.get("signal") or data.get("action") or "").upper()
                     pair = data.get("symbol", "").upper().replace(".P", "")
-                    if "-USDT" not in pair: pair += "-USDT"
+                    # Normalisasi: "BNBUSDT" -> "BNB-USDT", "BNB" -> "BNB-USDT", "BNB-USDT" -> tetap
+                    if "-USDT" not in pair:
+                        if pair.endswith("USDT"):
+                            pair = pair[:-4] + "-USDT"
+                        else:
+                            pair += "-USDT"
                     price = float(data.get("price") or 0)
                     sl = float(data.get("sl") or 0)
                     tp1 = float(data.get("tp1") or 0)
