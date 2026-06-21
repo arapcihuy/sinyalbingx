@@ -500,20 +500,14 @@ def execute_signal(data: dict) -> dict:
     tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
 
     try:
-        tp_mode = settings.get("tp_mode", "conservative")
-        # Standarkan "tp1_only" dan "conservative" ke behavior TP1-only
-        is_tp1_only_mode = (tp_mode == "tp1_only" or tp_mode == "conservative")
-        if is_tp1_only_mode and tp1_price > 0:
-            logger.info(f"📌 Mode TP1 Only → Hanya menggunakan TP1: {tp1_price}")
-            tp2_price = 0.0
-            tp3_price = 0.0
-            tp4_price = 0.0
-            tp_prices = [tp1_price, 0.0, 0.0, 0.0]
-    except Exception as tp_err:
-        logger.error(f"Error applying tp_mode setting: {tp_err}")
+        tp_mode = settings.get("tp_mode", "multiple")
+    except Exception:
+        tp_mode = "multiple"
 
+    # ── WAJIB 4 TP: Kalau ada yang kurang, auto-generate dari risk_dist ──
     if sl_price == 0 and tp1_price == 0:
-        logger.info("📺 TV tidak kirim TP/SL, fallback ke brain engine")
+        # TV tidak kirim TP/SL sama sekali → brain full fallback
+        logger.info("📺 TV tidak kirim TP/SL, fallback ke brain engine (4 TP)")
         trade_plan = brain_engine.get_full_trade_plan(balance, entry_price, pos_side, symbol)
         sl_price = _round_price(float(trade_plan.get("sl", 0)), symbol)
         tp1_price = _round_price(float(trade_plan.get("tp1", 0)), symbol)
@@ -521,9 +515,8 @@ def execute_signal(data: dict) -> dict:
         tp3_price = _round_price(float(trade_plan.get("tp3", 0)), symbol)
         tp4_price = _round_price(float(trade_plan.get("tp4", 0)), symbol)
         tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
-    elif tp_mode == "multiple" and tp1_price > 0 and (tp2_price == 0 or tp3_price == 0 or tp4_price == 0):
-        # TV kirim tp1 tapi kurang tp2/3/4 → auto-generate dari brain berdasarkan risk_dist
-        logger.info("🎯 TV kurang TP level → auto-generate dari brain")
+    elif tp1_price > 0 and sl_price > 0:
+        # TV kirim tp1+sl → pastikan tp2/3/4 ada, kurang? auto-generate
         risk_dist = abs(entry_price - sl_price)
         if risk_dist > 0:
             if pos_side == "LONG":
@@ -535,7 +528,7 @@ def execute_signal(data: dict) -> dict:
                 if tp3_price == 0: tp3_price = _round_price(entry_price - (risk_dist * 4.5), symbol)
                 if tp4_price == 0: tp4_price = _round_price(entry_price - (risk_dist * 6.0), symbol)
         tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
-        logger.info(f"🎯 Auto-generated: TP1={tp1_price} TP2={tp2_price} TP3={tp3_price} TP4={tp4_price}")
+        logger.info(f"🎯 WAJIB 4 TP → TP1={tp1_price} TP2={tp2_price} TP3={tp3_price} TP4={tp4_price} SL={sl_price}")
 
     if brain_enabled:
         logger.info(f"🧠 BRAIN ENABLED → {symbol} pakai TV TP/SL + brain lev/margin")
