@@ -997,12 +997,31 @@ def sync_missing_tpsl():
             state_tp3 = float(trade_state.get("tp3", 0))
             state_tp4 = float(trade_state.get("tp4", 0))
             
-            # TP/SL: sinyal TV > state lama
-            sl_price = tv_sl or state_sl
-            tp1_price = tv_tp1 or state_tp1
-            tp2_price = tv_tp2 or state_tp2
-            tp3_price = tv_tp3 or state_tp3
-            tp4_price = tv_tp4 or state_tp4
+            # TP/SL: sinyal TV (mutlak) > exchange orders (no TV) > state lama
+            if tv_sl > 0 or tv_tp1 > 0:
+                # TV signal ada → gunakan TV (otoritas mutlak per CLAUDE.md)
+                sl_price = tv_sl or state_sl
+                tp1_price = tv_tp1 or state_tp1
+                tp2_price = tv_tp2 or state_tp2
+                tp3_price = tv_tp3 or state_tp3
+                tp4_price = tv_tp4 or state_tp4
+            else:
+                # Tidak ada TV signal → baca dari exchange orders (source of truth)
+                ex_sl = 0
+                ex_tps = []
+                for o in open_orders:
+                    if "STOP" in o.get("type", "") and "TAKE_PROFIT" not in o.get("type", ""):
+                        ex_sl = float(o.get("stopPrice", 0))
+                    elif "TAKE_PROFIT" in o.get("type", ""):
+                        ex_tps.append(float(o.get("stopPrice", 0)))
+                ex_tps.sort()
+                sl_price = ex_sl or state_sl
+                tp1_price = ex_tps[0] if len(ex_tps) >= 1 else state_tp1
+                tp2_price = ex_tps[1] if len(ex_tps) >= 2 else state_tp2
+                tp3_price = ex_tps[2] if len(ex_tps) >= 3 else state_tp3
+                tp4_price = ex_tps[3] if len(ex_tps) >= 4 else state_tp4
+                if ex_sl > 0 or ex_tps:
+                    logger.info(f"📥 {symbol}: TP/SL dibaca dari exchange orders (no TV signal)")
             tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
             
             # Jika semua TP/SL masih 0, fallback ke brain_engine
