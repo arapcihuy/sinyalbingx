@@ -367,12 +367,12 @@ def calculate_smart_multi_tp_qty(balance: float, entry_price: float, sl_price: f
     if not valid_tps:
         return {"qtys": [total_qty], "total_qty": total_qty, "margin": (total_qty * entry_price) / leverage}
     
-    # Pembagian: TP1 (40%), TP2 (30%), TP3 (20%), TP4 (10%) jika semua ada
+    # Pembagian: TP1 (35%), TP2 (30%), TP3 (20%), TP4 (15%) jika semua ada
     # Jika cuma 2 TP: TP1 (60%), TP2 (40%)
-    weights = [0.4, 0.3, 0.2, 0.1]
+    weights = [0.35, 0.30, 0.20, 0.15]
     if len(valid_tps) == 1: weights = [1.0]
     elif len(valid_tps) == 2: weights = [0.6, 0.4]
-    elif len(valid_tps) == 3: weights = [0.5, 0.3, 0.2]
+    elif len(valid_tps) == 3: weights = [0.50, 0.30, 0.20]
     
     final_qtys = [0.0] * 4
     tp_idx = 0

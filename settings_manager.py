@@ -10,7 +10,7 @@ def load_settings():
     """Load settings from JSON file."""
     default_settings = {
         "auto_entry": os.getenv("AUTO_ENTRY", "false").lower() == "true",
-        "tp_mode": "tp1_only",  # Default aman buat scalping / small account
+        "tp_mode": "multiple",  # Wajib 4 TP untuk semua mode
         "paper_mode": os.getenv("PAPER_MODE", "true").lower() == "true",
         "min_rr_ratio": 1.5,  # Minimal Risk:Reward ratio
         "max_slots": 0,  # 0 = tanpa batas posisi bersamaan

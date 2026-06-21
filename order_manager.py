@@ -889,7 +889,7 @@ def sync_missing_tpsl():
                 
                 # Pasang Take Profit yang belum ada
                 tp_count = 0
-                weights = [0.4, 0.3, 0.2, 0.1] # Standar distribusi qty
+                weights = [0.35, 0.30, 0.20, 0.15]  # Distribusi qty: TP1=35%, TP2=30%, TP3=20%, TP4=15%
                 for i, tp_val in enumerate(tp_prices):
                     if tp_val > 0:
                         # Cek apakah harga TP ini sudah ada di open orders
@@ -1098,6 +1098,7 @@ def check_and_update_trailing_sl():
                             f"📈 *Entry:* `{avg_price}`\n"
                             f"🛡️ *SL Otomatis:* `{plan['sl']}`\n"
                             f"🎯 *TP1:* `{plan['tp1']}` | *TP2:* `{plan['tp2']}`\n"
+                            f"🎯 *TP3:* `{plan['tp3']}` | *TP4:* `{plan['tp4']}`\n"
                             f"📝 *Status:* Berhasil diadopsi & diproteksi.\n"
                             f"━━━━━━━━━━━━━━━━━━━━━"
                         )
@@ -1158,7 +1159,8 @@ def check_and_update_trailing_sl():
                         f"🪙 *Pair:* `{symbol}`\n"
                         f"📈 *Entry Baru:* `{avg_price}` (Slippage/Susul)\n"
                         f"🛡️ *SL Baru:* `{trade['sl']}`\n"
-                        f"🎯 *TP1 Baru:* `{trade.get('tp1', 0)}` | *TP2 Baru:* `{trade.get('tp2', 0)}`\n"
+                        f"🎯 *TP1:* `{trade.get('tp1', 0)}` | *TP2:* `{trade.get('tp2', 0)}`\n"
+                        f"🎯 *TP3:* `{trade.get('tp3', 0)}` | *TP4:* `{trade.get('tp4', 0)}`\n"
                         f"━━━━━━━━━━━━━━━━━━━━━"
                     )
                     import requests as r
