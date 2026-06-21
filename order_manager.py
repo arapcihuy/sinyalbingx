@@ -6,6 +6,7 @@ import time
 import threading
 import requests
 import tempfile
+import sqlite3
 from dotenv import load_dotenv
 import bingx_client as bx
 
@@ -81,11 +82,78 @@ def load_latest_signals():
                 latest_signals = json.load(f)
         except:
             latest_signals = {}
+            
+    db_path = "signals.db"
+    try:
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS tv_signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts REAL,
+                symbol TEXT,
+                action TEXT,
+                price REAL,
+                sl REAL,
+                tp1 REAL,
+                tp2 REAL,
+                tp3 REAL,
+                tp4 REAL
+            )
+        ''')
+        c.execute("SELECT symbol, action, price, sl, tp1, tp2, tp3, tp4 FROM tv_signals ORDER BY ts ASC")
+        rows = c.fetchall()
+        for r in rows:
+            sym = r[0]
+            latest_signals[sym] = {
+                "symbol": sym,
+                "action": r[1],
+                "price": r[2],
+                "sl": r[3],
+                "tp1": r[4],
+                "tp2": r[5],
+                "tp3": r[6],
+                "tp4": r[7]
+            }
+        conn.close()
+    except Exception as e:
+        logger.error(f"Gagal load latest_signals dari DB: {e}")
     return latest_signals
 
 def save_latest_signals():
     with state_lock:
         _atomic_write_json(LATEST_SIGNALS_FILE, latest_signals)
+        db_path = "signals.db"
+        try:
+            conn = sqlite3.connect(db_path)
+            c = conn.cursor()
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS tv_signals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts REAL,
+                    symbol TEXT,
+                    action TEXT,
+                    price REAL,
+                    sl REAL,
+                    tp1 REAL,
+                    tp2 REAL,
+                    tp3 REAL,
+                    tp4 REAL
+                )
+            ''')
+            for sym, data in latest_signals.items():
+                c.execute("SELECT id FROM tv_signals WHERE symbol=? AND action=? AND price=? AND sl=? AND tp1=?", 
+                          (sym, data.get("action"), data.get("price"), data.get("sl"), data.get("tp1")))
+                if not c.fetchone():
+                    c.execute('''
+                        INSERT INTO tv_signals (ts, symbol, action, price, sl, tp1, tp2, tp3, tp4)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (time.time(), sym, data.get("action"), data.get("price"), data.get("sl"), 
+                          data.get("tp1"), data.get("tp2"), data.get("tp3"), data.get("tp4")))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Gagal save latest_signals ke DB: {e}")
 
 def save_active_trades():
     with state_lock:
