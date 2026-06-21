@@ -247,7 +247,7 @@ def check_paper_exit():
                 # Kirim Notif Telegram Close
                 try:
                     TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7809584261")
+                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6068641908")
                     url_notif = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
                     chat_id = TG_CHAT_ID
                     emoji = "🎯" if exit_trigger == "TP" else "🛑"
@@ -273,7 +273,7 @@ def notify_tp_hit(symbol: str, tp_level: int, tp_price: float, trade_data: dict)
     """Kirim notifikasi ke Telegram bahwa level TP sudah tercapai (order TP terisi di bursa)."""
     try:
         TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-        TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7809584261")
+        TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6068641908")
         entry = trade_data.get("entry_price", 0)
         side = trade_data.get("side", "LONG")
         pct = ((tp_price - entry) / entry * 100) if entry > 0 else 0
@@ -339,7 +339,7 @@ def notify_live_close(symbol: str, trade_data: dict):
         pnl_sign = "+" if realized_pnl >= 0 else ""
         
         TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-        TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7809584261")
+        TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6068641908")
         
         msg_text = (
             f"{emoji} *SINYAL SELESAI (CLOSE) - LIVE*\n"
@@ -777,7 +777,7 @@ def audit_position_reconciliation():
                 if _RECONCILIATION_MISMATCH_COUNT[sym] == 3: # 3x berturut-turut (~45 detik)
                     # Kirim notifikasi peringatan ke Telegram
                     TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7809584261")
+                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6068641908")
                     msg = (
                         f"🚨 *ALARM REKONSILIASI POSISI*\n"
                         f"━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1060,6 +1060,31 @@ def check_and_update_trailing_sl():
                         # Buat rencana TP/SL otomatis berbasis ATR
                         plan = brain_engine.get_full_trade_plan(balance, avg_price, pos_side, symbol)
                         
+                        # 4 TP weights konsisten (35/30/20/15)
+                        weights = [0.35, 0.30, 0.20, 0.15]
+                        tp_prices = [plan["tp1"], plan["tp2"], plan["tp3"], plan["tp4"]]
+                        
+                        # Langsung pasang TP & SL ke bursa (Sinkronisasi Instan)
+                        if not paper_mode:
+                            try:
+                                # 1. Pasang SL
+                                bx._request("POST", "/openApi/swap/v2/trade/order", {
+                                    "symbol": symbol, "side": "BUY" if pos_side == "SHORT" else "SELL",
+                                    "positionSide": pos_side, "type": "STOP_MARKET",
+                                    "stopPrice": plan["sl"], "quantity": qty
+                                })
+                                # 2. Pasang 4 TP
+                                for i, tp_price in enumerate(tp_prices):
+                                    tp_qty = round(qty * weights[i], 4)
+                                    if tp_price > 0 and tp_qty > 0:
+                                        bx._request("POST", "/openApi/swap/v2/trade/order", {
+                                            "symbol": symbol, "side": "BUY" if pos_side == "SHORT" else "SELL",
+                                            "positionSide": pos_side, "type": "TAKE_PROFIT_MARKET",
+                                            "stopPrice": tp_price, "quantity": tp_qty
+                                        })
+                            except Exception as order_err:
+                                logger.error(f"⚠️ Gagal pasang TP/SL adopt {symbol}: {order_err}")
+                        
                         active_trade_data[symbol] = {
                             "symbol": symbol,
                             "side": pos_side,
@@ -1069,11 +1094,7 @@ def check_and_update_trailing_sl():
                             "tp2": plan["tp2"],
                             "tp3": plan["tp3"],
                             "tp4": plan["tp4"],
-                            "qtys": brain_engine.calculate_smart_multi_tp_qty(balance, avg_price, plan["sl"], [plan["tp1"], plan["tp2"], plan["tp3"], plan["tp4"]], plan["leverage"], plan["risk_percent"], symbol)["qtys"],
                             "qty": qty,
-                            "leverage": plan["leverage"],
-                            "risk_pct": plan["risk_percent"],
-                            "atr": plan["atr"],
                             "trailing": {
                                 "activate_atr_mult": 1.0,
                                 "offset_atr_mult": 0.5,
@@ -1082,6 +1103,7 @@ def check_and_update_trailing_sl():
                                 "lowest_price": avg_price if pos_side == "SHORT" else 0,
                             },
                             "status": "OPEN",
+                            "tp_notified": {},
                             "open_time": time.strftime("%Y-%m-%d %H:%M:%S"),
                             "adopted": True
                         }
@@ -1089,7 +1111,7 @@ def check_and_update_trailing_sl():
                         
                         # Kirim Telegram Notif Auto-Adopt
                         TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-                        TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7809584261")
+                        TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6068641908")
                         mode_label = "PAPER" if paper_mode else "LIVE"
                         msg_adopt = (
                             f"📥 *POSISI MANUAL DIADOPSI ({mode_label})*\n"
@@ -1151,7 +1173,7 @@ def check_and_update_trailing_sl():
 
                     # Kirim Telegram Notif Auto-Calibration
                     TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7809584261")
+                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6068641908")
                     mode_label = "PAPER" if paper_mode else "LIVE"
                     msg_calib = (
                         f"🔄 *KALIBRASI LEVEL TP/SL SELESAI ({mode_label})*\n"
@@ -1255,7 +1277,7 @@ def check_and_update_trailing_sl():
                 # 4. Kirim notifikasi Telegram tentang trailing SL
                 try:
                     TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7809584261")
+                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6068641908")
                     mode_label = "PAPER" if paper_mode else "LIVE"
                     msg = (
                         f"🔄 *TRAILING STOP LOSS AKTIF ({mode_label})*\n"
