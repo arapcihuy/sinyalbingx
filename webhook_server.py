@@ -17,6 +17,28 @@ TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 import threading
+import queue
+
+# Create a queue for signal processing
+signal_queue = queue.Queue()
+
+def signal_worker():
+    """Worker thread untuk memproses sinyal secara berurutan."""
+    while True:
+        task = signal_queue.get()
+        if task is None:
+            break
+        # Unpack and run logic
+        try:
+            run_async_execution(*task)
+        except Exception as e:
+            log.error(f"Error in worker thread: {e}")
+        finally:
+            signal_queue.task_done()
+
+# Start worker thread
+worker_thread = threading.Thread(target=signal_worker, daemon=True)
+worker_thread.start()
 
 def run_async_execution(data, pair, signal, price, sl, tp1, tp2, tp3, tp4, TG_TOKEN, TG_CHAT_ID):
     import time
@@ -72,20 +94,15 @@ def run_async_execution(data, pair, signal, price, sl, tp1, tp2, tp3, tp4, TG_TO
             log.warning(f"⚠️ Gagal mencatat log validasi AI ke database: {db_err}")
 
         if approved:
-            # Overwrite parameter asli dengan saran dinamis dari AI jika tersedia
-            final_sl = suggested_params.get("suggested_sl") or sl
-            final_tp1 = suggested_params.get("suggested_tp1") or tp1
-            final_tp2 = suggested_params.get("suggested_tp2") or tp2
+            # TV tetap sumber TP/SL. AI hanya boleh bantu leverage bila ada.
+            final_sl = sl
+            final_tp1 = tp1
+            final_tp2 = tp2
             final_leverage = suggested_params.get("suggested_leverage")
-            
-            if any([
-                suggested_params.get("suggested_sl"),
-                suggested_params.get("suggested_tp1"),
-                suggested_params.get("suggested_tp2"),
-                suggested_params.get("suggested_leverage")
-            ]):
-                log.info(f"🧠 AI PARAMETER OVERWRITE: SL={final_sl} (TV: {sl}) | TP1={final_tp1} (TV: {tp1}) | TP2={final_tp2} (TV: {tp2}) | Leverage={final_leverage}")
 
+            if final_leverage:
+                log.info(f"🧠 AI LEVERAGE ONLY: Leverage={final_leverage} | TV tetap source TP/SL")
+            
             result = order_manager.execute_signal({
                 "symbol": pair, "action": signal, "price": price,
                 "sl": final_sl, "tp1": final_tp1, "tp2": final_tp2, "tp3": tp3, "tp4": tp4,
@@ -1035,13 +1052,24 @@ if bot:
 
 def start_telegram_bot_polling():
     if bot:
+        allowed_ids = []
+        if TG_CHAT_ID:
+            allowed_ids.append(str(TG_CHAT_ID))
+        admin_id = os.getenv("TELEGRAM_ADMIN_ID")
+        if admin_id:
+            allowed_ids.append(str(admin_id))
+
         def polling_thread():
-            log.info("📡 Memulai polling Telegram bot di background thread...")
+            log.info(f"📡 Memulai polling Telegram bot di background thread... allowed_ids={allowed_ids}")
             while True:
                 try:
                     bot.infinity_polling(timeout=30, long_polling_timeout=10)
                 except Exception as ex:
-                    log.error(f"⚠️ Error polling Telegram: {ex}")
+                    err_text = str(ex)
+                    if "409" in err_text or "terminated by other getUpdates request" in err_text:
+                        log.error("⚠️ Error polling Telegram: 409 Conflict / double polling detected. Pastikan hanya SATU instance bot yang menjalankan getUpdates.")
+                    else:
+                        log.error(f"⚠️ Error polling Telegram: {ex}")
                     time.sleep(10)
         t = threading.Thread(target=polling_thread, daemon=True)
         t.start()

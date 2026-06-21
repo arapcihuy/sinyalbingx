@@ -16,6 +16,8 @@ def load_settings():
         "max_slots": 0,  # 0 = tanpa batas posisi bersamaan
         "brain_enabled": True,  # 🧠 Brain engine aktif
         "trailing_enabled": True,  # Trailing SL aktif
+        "liquidation_buffer_pct": 0.10,  # buffer aman dari liq
+        "liquidation_mmr_fallback": 0.005,  # fallback maintenance margin rate
     }
     
     if not os.path.exists(SETTINGS_FILE):

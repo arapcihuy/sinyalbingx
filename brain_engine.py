@@ -71,7 +71,7 @@ RISK_TIERS = [
 _DYNAMIC_SYMBOL_CACHE = {}
 
 def get_symbol_config(symbol: str) -> dict:
-    """Ambil konfigurasi symbol (BTC/ETH) atau fetch secara dinamis dari BingX."""
+    """Ambil konfigurasi symbol atau fetch secara dinamis dari BingX."""
     if symbol in SYMBOL_CONFIG:
         return SYMBOL_CONFIG[symbol]
         
@@ -93,14 +93,29 @@ def get_symbol_config(symbol: str) -> dict:
                 "min_qty": float(data.get("tradeMinQuantity", 0.001)),
                 "qty_precision": int(data.get("quantityPrecision", 2)),
                 "price_precision": int(data.get("pricePrecision", 2)),
+                "mmr": _extract_contract_mmr(data),
             }
             _DYNAMIC_SYMBOL_CACHE[symbol] = cfg
-            logger.info(f"✨ DYNAMIC CONFIG LOADED FOR {symbol}: min_qty={cfg['min_qty']}, qty_prec={cfg['qty_precision']}, price_prec={cfg['price_precision']}")
+            logger.info(f"✨ DYNAMIC CONFIG LOADED FOR {symbol}: min_qty={cfg['min_qty']}, qty_prec={cfg['qty_precision']}, price_prec={cfg['price_precision']}, mmr={cfg['mmr']}")
             return cfg
     except Exception as e:
         logger.error(f"⚠️ Gagal load dynamic config untuk {symbol}, menggunakan DEFAULT_CONFIG: {e}")
         
-    return DEFAULT_CONFIG
+    return {**DEFAULT_CONFIG, "mmr": 0.005}
+
+
+def _extract_contract_mmr(data: dict) -> float:
+    """Ambil maintenance margin rate dari metadata contract kalau tersedia."""
+    for key in ("maintMarginRate", "maintenanceMarginRate", "maintainMarginRate", "mmr"):
+        val = data.get(key)
+        if val is not None:
+            try:
+                mmr = float(val)
+                if 0 < mmr < 1:
+                    return mmr
+            except Exception:
+                pass
+    return 0.005
 
 
 def calculate_atr(candles: list, period: int = 14) -> float:
@@ -132,23 +147,17 @@ def calculate_atr(candles: list, period: int = 14) -> float:
     return atr
 
 
-def calculate_tp_sl(entry_price: float, side: str, atr: float, symbol: str) -> dict:
+def calculate_tp_sl(entry_price: float, side: str, atr: float, symbol: str, leverage: int = 0) -> dict:
     """
     Hitung TP dan SL berdasarkan ATR.
-    
-    Args:
-        entry_price: Harga masuk
-        side: "LONG" atau "SHORT"
-        atr: ATR value
-        symbol: Symbol trading
-    
-    Returns:
-        Dict dengan tp1, tp2, sl prices
+    Clamp SL terhadap buffer likuidasi supaya otak bot tidak bikin SL ngawur.
     """
     cfg = get_symbol_config(symbol)
     
     tp_mult = cfg["tp_atr_multiplier"]
     sl_mult = cfg["sl_atr_multiplier"]
+    mmr = float(cfg.get("mmr", 0.005))
+    buffer_pct = 0.10
     
     # Minimal ATR = 0.5% dari entry (fallback kalau ATR terlalu kecil)
     min_atr = entry_price * 0.005
@@ -156,14 +165,44 @@ def calculate_tp_sl(entry_price: float, side: str, atr: float, symbol: str) -> d
     
     if side == "LONG":
         sl_price = entry_price - (effective_atr * sl_mult)
-        tp1_price = entry_price + (effective_atr * tp_mult * 0.6)  # TP1: 60% target
-        tp2_price = entry_price + (effective_atr * tp_mult)        # TP2: 100% target
+        tp1_price = entry_price + (effective_atr * tp_mult * 0.6)
+        tp2_price = entry_price + (effective_atr * tp_mult)
     else:
         sl_price = entry_price + (effective_atr * sl_mult)
         tp1_price = entry_price - (effective_atr * tp_mult * 0.6)
         tp2_price = entry_price - (effective_atr * tp_mult)
+
+    if leverage and leverage > 0:
+        est_liq = estimate_liquidation_price(entry_price, leverage, side, mmr)
+        if est_liq > 0:
+            if side == "LONG":
+                min_safe_sl = est_liq * (1.0 + buffer_pct)
+                sl_price = max(sl_price, min_safe_sl)
+            else:
+                max_safe_sl = est_liq * (1.0 - buffer_pct)
+                sl_price = min(sl_price, max_safe_sl)
+
+    # TP ikut jarak SL final → RR stabil
+    risk_dist = abs(entry_price - sl_price)
     
-    # Round sesuai presisi symbol
+    # Target RR default (misal SL 1% → TP1 1.5%, TP2 3%)
+    if side == "LONG":
+        tp1_price = entry_price + (risk_dist * 1.5)
+        tp2_price = entry_price + (risk_dist * 3.0)
+    else:
+        tp1_price = entry_price - (risk_dist * 1.5)
+        tp2_price = entry_price - (risk_dist * 3.0)
+    
+    # LIMIT TP: Jangan biarkan TP melampaui 5% profit per trade untuk altcoins
+    # Biar nggak 'kejauhan' di BingX
+    max_tp_pct = 0.05
+    if side == "LONG":
+        tp1_price = min(tp1_price, entry_price * (1 + max_tp_pct * 0.5))
+        tp2_price = min(tp2_price, entry_price * (1 + max_tp_pct))
+    else:
+        tp1_price = max(tp1_price, entry_price * (1 - max_tp_pct * 0.5))
+        tp2_price = max(tp2_price, entry_price * (1 - max_tp_pct))
+    
     price_prec = cfg["price_precision"]
     
     return {
@@ -194,6 +233,19 @@ def get_dynamic_leverage(balance: float) -> int:
     return 10
 
 
+def estimate_liquidation_price(entry_price: float, leverage: int, side: str, mmr: float = 0.005) -> float:
+    """Estimasi liquid price kasar untuk isolated futures."""
+    if entry_price <= 0 or leverage <= 0:
+        return 0.0
+
+    if side == "LONG":
+        liq = entry_price * (1.0 - 1.0 / leverage + mmr)
+        return max(0.0, liq)
+    else:
+        liq = entry_price * (1.0 + 1.0 / leverage - mmr)
+        return max(0.0, liq)
+
+
 def get_safe_leverage(balance: float, entry_price: float, sl_price: float, side: str, symbol: str) -> int:
     """
     Menghitung leverage aman agar Stop Loss terpicu sebelum Liquidation Price.
@@ -204,29 +256,27 @@ def get_safe_leverage(balance: float, entry_price: float, sl_price: float, side:
     if sl_price <= 0 or entry_price <= 0 or entry_price == sl_price:
         return base_leverage
 
-    mmr = 0.005  # Maintenance Margin Rate default BingX (0.5%)
+    cfg = get_symbol_config(symbol)
+    mmr = float(cfg.get("mmr", 0.005))
 
     try:
         if side == "LONG":
             if sl_price >= entry_price:
                 return base_leverage
-            ratio = sl_price / entry_price
-            denominator = 1.0 - ratio * (1.0 - mmr)
-            if denominator <= 0:
-                return base_leverage
-            l_max = 1.0 / denominator
+            denominator = 1.0 + mmr - (sl_price / entry_price)
         else:  # SHORT
             if sl_price <= entry_price:
                 return base_leverage
-            ratio = sl_price / entry_price
-            denominator = ratio * (1.0 + mmr) - 1.0
-            if denominator <= 0:
-                return base_leverage
-            l_max = 1.0 / denominator
+            denominator = (sl_price / entry_price) + mmr - 1.0
 
-        safe_leverage = int(math.floor(l_max * 0.9))
+        if denominator <= 0:
+            return base_leverage
+        l_max = 1.0 / denominator
+
+        # Hitung leverage aman dengan buffer 15% (dulu 10%)
+        safe_leverage = int(math.floor(l_max * 0.85))
         final_leverage = max(1, min(base_leverage, safe_leverage))
-        logger.info(f"🛡️ AUDIT LEVERAGE: Base {base_leverage}x | L_max {l_max:.1f}x | Safe {safe_leverage}x | Final {final_leverage}x")
+        logger.info(f"🛡️ AUDIT LEVERAGE: {symbol} | Base {base_leverage}x | L_max {l_max:.1f}x | Safe {safe_leverage}x | Final {final_leverage}x")
         return final_leverage
     except Exception as e:
         logger.error(f"Gagal menghitung safe leverage: {e}")
@@ -273,8 +323,8 @@ def calculate_position_size(balance: float, entry_price: float, sl_price: float,
         qty = risk_amount / price_diff
     
     # 2. Leverage Guard: Pastikan margin awal (qty * entry / lev) tidak melebihi saldo tersedia
-    # Kita beri buffer: max 80% dari balance untuk satu trade tunggal agar akun tidak over-leveraged
-    max_qty_by_margin = (balance * 0.8 * leverage) / entry_price
+    # Kita beri buffer: max 70% dari balance (dulu 80%) untuk satu trade tunggal agar akun aman
+    max_qty_by_margin = (balance * 0.7 * leverage) / entry_price
     if qty > max_qty_by_margin:
         logger.warning(f"⚠️ RISK OVERSIZE: Qty {qty:.4f} butuh margin terlalu besar. Scaled down to {max_qty_by_margin:.4f}")
         qty = max_qty_by_margin
@@ -331,24 +381,36 @@ def calculate_smart_multi_tp_qty(balance: float, entry_price: float, sl_price: f
     actual_total = round(sum(final_qtys), qty_prec)
     
     # --- DYNAMIC TP LEVEL CONSOLIDATION FOR SMALL BALANCE ---
-    # Jika margin yang dibutuhkan setelah menerapkan min_qty melebihi 95% dari saldo tersedia,
+    # Jika margin yang dibutuhkan setelah menerapkan min_qty melebihi 85% dari saldo tersedia,
     # kurangi level TP satu per satu dari yang terjauh demi menghindari error "Insufficient margin".
     while True:
         current_total_qty = sum(final_qtys)
         if current_total_qty == 0:
             break
         current_required_margin = (current_total_qty * entry_price) / leverage if leverage > 0 else 0
-        if current_required_margin > (balance * 0.95) and current_required_margin > 0:
+        if current_required_margin > (balance * 0.85) and current_required_margin > 0:
             active_indices = [idx for idx, price in enumerate(tp_prices) if price > 0 and final_qtys[idx] > 0]
             if len(active_indices) > 1:
                 idx_to_disable = active_indices[-1]
-                logger.info(f"⚠️ DYNAMIC CONSOLIDATION: Margin ${current_required_margin:.2f} melebihi 95% saldo tersedia (${balance:.2f}). Menonaktifkan TP{idx_to_disable+1} ({tp_prices[idx_to_disable]}) untuk mengurangi beban margin.")
+                logger.info(f"⚠️ DYNAMIC CONSOLIDATION: Margin ${current_required_margin:.2f} melebihi 85% saldo tersedia (${balance:.2f}). Menonaktifkan TP{idx_to_disable+1} ({tp_prices[idx_to_disable]}) untuk mengurangi beban margin.")
                 final_qtys[idx_to_disable] = 0.0
                 continue
             else:
                 break
         else:
             break
+            
+    # [HARD LIMITER] TP/SL Clamping
+    # Membatasi TP/SL agar tidak terlalu jauh jika script TV mengirim data ngaco
+    # TP max 5%, SL max 3%
+    for i in range(len(tp_prices)):
+        if tp_prices[i] > 0:
+            dist = abs(tp_prices[i] - entry_price)
+            if dist > (entry_price * 0.05):
+                tp_prices[i] = entry_price + (0.05 * entry_price) if tp_prices[i] > entry_price else entry_price - (0.05 * entry_price)
+    
+    # Apply limit if sl is provided
+    # (assuming sl is passed somewhere or handle it in order_manager)
             
     return {
         "qtys": final_qtys,
@@ -495,7 +557,16 @@ def get_full_trade_plan(balance: float, entry_price: float, side: str, symbol: s
     if candles:
         atr = calculate_atr(candles, cfg["atr_period"])
     
-    # Fallback ATR = 1% dari entry
+    # Fallback ATR via live data
+    if atr == 0:
+        try:
+            import bingx_client as bx
+            live_candles = bx.get_candles(symbol, "1h", limit=30)
+            if live_candles:
+                atr = calculate_atr(live_candles, cfg.get("atr_period", 14))
+        except Exception:
+            pass
+
     if atr == 0:
         atr = entry_price * 0.01
     
@@ -506,7 +577,7 @@ def get_full_trade_plan(balance: float, entry_price: float, side: str, symbol: s
     risk_percent = get_dynamic_risk_percent(balance)
     
     # 4. TP/SL pintar
-    tp_sl = calculate_tp_sl(entry_price, side, atr, symbol)
+    tp_sl = calculate_tp_sl(entry_price, side, atr, symbol, leverage)
     
     # 5. Position size
     qty = calculate_position_size(balance, entry_price, tp_sl["sl"], risk_percent, symbol)

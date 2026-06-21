@@ -109,6 +109,50 @@ def load_active_trades():
 load_latest_signals()
 load_active_trades()
 
+# ── Startup: sync active_trades dari Exchange ──
+def sync_from_exchange_on_startup():
+    """Saat startup LIVE mode, sync active_trades.json dengan posisi real BingX."""
+    global active_trade_data, state_lock
+    import state_manager
+    import logging as _log
+    _logger = _log.getLogger(__name__)
+    
+    mode = state_manager.get_trading_mode()
+    if mode["paper_mode"] or mode["use_demo"]:
+        _logger.info("⏭️ Paper/Demo mode — skip exchange sync.")
+        return
+    
+    try:
+        positions = bx.get_open_positions()
+        with state_lock:
+            synced = {}
+            for p in positions:
+                sym = p["symbol"]
+                amt = float(p["positionAmt"])
+                if amt == 0: continue
+                side = "LONG" if amt > 0 else "SHORT"
+                synced[sym] = {
+                    "symbol": sym,
+                    "side": side,
+                    "entry_price": float(p.get("avgPrice", 0)),
+                    "qty": abs(amt),
+                    "leverage": int(p.get("leverage", 10)),
+                    "status": "OPEN_SYNCED"
+                }
+            
+            # Compare: jika berbeda, update
+            if synced != {k: v for k, v in active_trade_data.items() if v.get("status") != "CLOSED"}:
+                active_trade_data = synced
+                with open(ACTIVE_TRADES_FILE, "w") as f:
+                    json.dump(active_trade_data, f, indent=4)
+                _logger.info(f"🔄 Startup sync: updated active_trades.json ({len(synced)} positions from exchange)")
+            else:
+                _logger.info("✅ Startup sync: active_trades.json already in-sync.")
+    except Exception as e:
+        _logger.warning(f"⚠️ Startup sync failed (non-fatal): {e}")
+
+sync_from_exchange_on_startup()
+
 def get_symbol_precision(symbol):
     """Ambil presisi quantity & price langsung dari BingX atau cache."""
     global _SYMBOL_PRECISION_CACHE
@@ -312,6 +356,11 @@ def execute_signal(data: dict) -> dict:
     action = data.get("action", "").upper()
     symbol = data.get("symbol", "BTC-USDT")
 
+    # SIMPAN SINYAL TERAKHIR KE MEMORY/FILE (di-load oleh tombol "Susul" / re_entry)
+    global latest_signals
+    latest_signals[symbol] = data
+    save_latest_signals()
+
     # Check paper exits
     check_paper_exit()
 
@@ -319,6 +368,19 @@ def execute_signal(data: dict) -> dict:
         return _close_position(symbol)
 
     # ── CHECK EXISTING POSITION & REVERSAL ──
+    # FORCE SYNC: Selalu update dari posisi asli di BingX sebelum cek sinyal
+    if not get_paper_mode():
+        try:
+            live_pos = bx.get_open_positions(symbol)
+            # Update state file dari kenyataan di bursa
+            if not live_pos:
+                with state_lock:
+                    if symbol in active_trade_data:
+                        del active_trade_data[symbol]
+                save_active_trades()
+        except:
+            pass
+    
     target_pos_side = "LONG" if action in ["BUY", "LONG"] else "SHORT"
     opposite_pos_side = "SHORT" if target_pos_side == "LONG" else "LONG"
     
@@ -359,17 +421,16 @@ def execute_signal(data: dict) -> dict:
         logger.error(f"Error checking slot management: {slot_err}")
     
     # ── MARGIN SAFETY GUARD ──
-    # Jangan buka trade baru jika saldo yang tersisa terlalu mepet
+    # Jangan blokir total, biarkan brain_engine yang melakukan downscaling qty
     try:
         if not get_paper_mode():
             balance_data = bx._request('GET', '/openApi/swap/v2/user/balance')
             if balance_data.get("code") == 0:
                 available = float(balance_data["data"]["balance"]["availableMargin"])
                 equity = float(balance_data["data"]["balance"]["equity"])
-                # Jika margin tersedia kurang dari 20% dari total equity, jangan entry
-                if available < (equity * 0.2):
-                    reason = f"Available margin {available:.4f} < 20% equity {equity:.4f}. Entry dibatalkan untuk proteksi modal."
-                    logger.warning(f"⚠️ Margin Mepet! {reason}")
+                if available < (equity * 0.05): # Turunkan threshold ke 5% untuk akun kecil
+                    reason = f"Margin kritis ({available:.2f}). Entry dibatalkan."
+                    logger.warning(f"⚠️ {reason}")
                     return {"status": "low_margin", "symbol": symbol, "reason": reason}
     except:
         pass # Lanjut jika gagal cek balance (pakai pengaman saldo tetap)
@@ -430,8 +491,29 @@ def execute_signal(data: dict) -> dict:
     tv_tp3_price = _round_price(float(data.get("tp3", 0)), symbol)
     tv_tp4_price = _round_price(float(data.get("tp4", 0)), symbol)
 
-    if brain_enabled:
-        logger.info(f"🧠 BRAIN ENABLED → {symbol} pakai trade plan bot sebagai sumber utama TP/SL/lev/risk")
+    # TV selalu sumber TP/SL
+    sl_price = tv_sl_price
+    tp1_price = tv_tp1_price
+    tp2_price = tv_tp2_price
+    tp3_price = tv_tp3_price
+    tp4_price = tv_tp4_price
+    tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
+
+    try:
+        tp_mode = settings.get("tp_mode", "conservative")
+        # Standarkan "tp1_only" dan "conservative" ke behavior TP1-only
+        is_tp1_only_mode = (tp_mode == "tp1_only" or tp_mode == "conservative")
+        if is_tp1_only_mode and tp1_price > 0:
+            logger.info(f"📌 Mode TP1 Only → Hanya menggunakan TP1: {tp1_price}")
+            tp2_price = 0.0
+            tp3_price = 0.0
+            tp4_price = 0.0
+            tp_prices = [tp1_price, 0.0, 0.0, 0.0]
+    except Exception as tp_err:
+        logger.error(f"Error applying tp_mode setting: {tp_err}")
+
+    if sl_price == 0 and tp1_price == 0:
+        logger.info("📺 TV tidak kirim TP/SL, fallback ke brain engine")
         trade_plan = brain_engine.get_full_trade_plan(balance, entry_price, pos_side, symbol)
         sl_price = _round_price(float(trade_plan.get("sl", 0)), symbol)
         tp1_price = _round_price(float(trade_plan.get("tp1", 0)), symbol)
@@ -439,54 +521,35 @@ def execute_signal(data: dict) -> dict:
         tp3_price = _round_price(float(trade_plan.get("tp3", 0)), symbol)
         tp4_price = _round_price(float(trade_plan.get("tp4", 0)), symbol)
         tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
-        leverage = int(trade_plan.get("leverage", leverage))
-        risk_pct = float(trade_plan.get("risk_percent", risk_pct))
-    else:
-        logger.info(f"📺 BRAIN DISABLED → {symbol} pakai TP/SL dari TV")
-        sl_price = tv_sl_price
-        tp1_price = tv_tp1_price
-        tp2_price = tv_tp2_price
-        tp3_price = tv_tp3_price
-        tp4_price = tv_tp4_price
-        tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
-
-        try:
-            tp_mode = settings.get("tp_mode", "conservative")
-            if tp_mode == "tp1_only" and tp1_price > 0:
-                logger.info(f"📌 Mode TP1 Only → Hanya menggunakan TP1: {tp1_price}")
-                tp2_price = 0.0
-                tp3_price = 0.0
-                tp4_price = 0.0
-                tp_prices = [tp1_price, 0.0, 0.0, 0.0]
-        except Exception as tp_err:
-            logger.error(f"Error applying tp_mode setting: {tp_err}")
-
-        if sl_price == 0 and tp1_price == 0:
-            logger.info("📺 TV tidak kirim TP/SL, fallback ke brain engine")
-            trade_plan = brain_engine.get_full_trade_plan(balance, entry_price, pos_side, symbol)
-            sl_price = _round_price(float(trade_plan.get("sl", 0)), symbol)
-            tp1_price = _round_price(float(trade_plan.get("tp1", 0)), symbol)
-            tp2_price = _round_price(float(trade_plan.get("tp2", 0)), symbol)
-            tp3_price = _round_price(float(trade_plan.get("tp3", 0)), symbol)
-            tp4_price = _round_price(float(trade_plan.get("tp4", 0)), symbol)
-            tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
-
-        safe_leverage = brain_engine.get_safe_leverage(balance, entry_price, sl_price, pos_side, symbol)
-        suggested_lev = data.get("leverage")
-        if suggested_lev:
-            try:
-                leverage = min(int(suggested_lev), safe_leverage)
-                logger.info(f"🧠 AI Suggested Leverage: {suggested_lev}x | Safe Cap: {safe_leverage}x | Final: {leverage}x")
-            except Exception as lev_err:
-                logger.warning(f"⚠️ Gagal memparse saran leverage dari AI ({suggested_lev}): {lev_err}. Menggunakan safe leverage.")
-                leverage = safe_leverage
-        else:
-            leverage = safe_leverage
 
     if brain_enabled:
-        safe_leverage = brain_engine.get_safe_leverage(balance, entry_price, sl_price, pos_side, symbol)
-        leverage = min(int(leverage), safe_leverage) if safe_leverage > 0 else int(leverage)
+        logger.info(f"🧠 BRAIN ENABLED → {symbol} pakai TV TP/SL + brain lev/margin")
+        # Brain penuh hitung leverage — TV leverage diabaikan
+        leverage = brain_engine.get_safe_leverage(balance, entry_price, sl_price, pos_side, symbol)
+        risk_pct = float(brain_engine.get_dynamic_risk_percent(balance))
+        logger.info(f"🧠 BRAIN LEV: {leverage}x | Risk: {risk_pct}%")
+    else:
+        logger.info(f"📺 BRAIN DISABLED → {symbol} pakai TP/SL dari TV")
+
+
+    cfg = brain_engine.get_symbol_config(symbol)
+    mmr = float(cfg.get("mmr", 0.005))
+    est_liq = brain_engine.estimate_liquidation_price(entry_price, leverage, pos_side, mmr)
     
+    if est_liq > 0:
+        buffer_pct = settings.get("liquidation_buffer_pct", 0.10)
+        if pos_side == "LONG":
+            min_safe_sl = est_liq * (1.0 + buffer_pct)
+            if sl_price <= min_safe_sl:
+                logger.warning(f"🛡️ AUTO-ADJUST SL: {symbol} SL {sl_price} terlalu dekat liq {est_liq}. Adjusted to {min_safe_sl:.4f}")
+                sl_price = _round_price(min_safe_sl, symbol)
+        else:
+            max_safe_sl = est_liq * (1.0 - buffer_pct)
+            if sl_price >= max_safe_sl:
+                logger.warning(f"🛡️ AUTO-ADJUST SL: {symbol} SL {sl_price} terlalu dekat liq {est_liq}. Adjusted to {max_safe_sl:.4f}")
+                sl_price = _round_price(max_safe_sl, symbol)
+        logger.info(f"🛡️ LIQ CHECK: {symbol} {pos_side} | Entry={entry_price:.4f} SL={sl_price:.4f} EstLiq={est_liq:.4f} Lev={leverage}x")
+
     # Hitung kuantitas cerdas multi-TP dengan pengaman 50%
     calc_result = brain_engine.calculate_smart_multi_tp_qty(balance, entry_price, sl_price, tp_prices, leverage, risk_pct, symbol)
     qtys = calc_result["qtys"]

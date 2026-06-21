@@ -1,10 +1,11 @@
+import os
 import logging
 
 logger = logging.getLogger(__name__)
 
-# State Global Terkunci secara default saat startup
-_PAPER_MODE = True
-_USE_DEMO = True
+# State Global — baca dari env saat startup
+_PAPER_MODE = os.getenv("PAPER_MODE", "true").lower() == "true"
+_USE_DEMO = os.getenv("USE_DEMO", "true").lower() == "true"
 _SYSTEM_STATUS = "INITIALIZING"
 
 def get_trading_mode():
