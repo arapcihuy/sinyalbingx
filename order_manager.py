@@ -1301,7 +1301,7 @@ def check_and_update_trailing_sl():
                 
             # 1. Ambil data bursa dulu (DI LUAR LOCK agar tidak freeze)
             try:
-                positions = bx.get_open_positions(symbol)
+                pos_data_res = bx.get_open_positions(symbol)
                 balance = bx.get_balance()
             except Exception as e:
                 logger.error(f"⚠️ Gagal fetch data bursa untuk {symbol}: {e}")
