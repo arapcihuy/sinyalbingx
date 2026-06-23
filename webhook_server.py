@@ -666,6 +666,7 @@ if TG_TOKEN:
 
         try:
             bot.set_my_commands([
+                telebot.types.BotCommand("start", "Memulai interaksi dan cek izin akses bot"),
                 telebot.types.BotCommand("status", "Cek status bot & detail posisi aktif (LIVE/PAPER)"),
                 telebot.types.BotCommand("balance", "Cek saldo equity & margin bebas"),
                 telebot.types.BotCommand("pnl", "Laporan floating & realized PnL berkala"),
@@ -693,6 +694,29 @@ if bot:
             # Selalu balas untuk debugging user
             bot.reply_to(message, f"⚠️ *Akses Ditolak:* Anda tidak memiliki izin.\n\n👤 *ID Telegram Anda:* `{message.chat.id}`\n🔑 *Solusi:* Daftarkan ID ini di dashboard Railway sebagai `TELEGRAM_ADMIN_ID`.", parse_mode="Markdown")
         return authorized
+
+    @bot.message_handler(commands=['start'])
+    def handle_start(message):
+        welcome_msg = (
+            f"👋 *Halo! Selamat datang di TradingBot BingX!*\n\n"
+            f"👤 *ID Telegram Anda:* `{message.chat.id}`\n"
+            f"⚙️ *Status Izin:* "
+        )
+        if is_authorized(message):
+            welcome_msg += "✅ *Diizinkan (Authorized)*\n\n"
+            welcome_msg += (
+                "Perintah yang tersedia:\n"
+                "🔹 /status - Cek status bot & posisi aktif\n"
+                "🔹 /balance - Cek saldo akun\n"
+                "🔹 /pnl - Cek laporan profit/loss\n"
+                "🔹 /settings - Cek konfigurasi parameter bot\n"
+                "🔹 /aistats - Cek performa validasi AI filter"
+            )
+        else:
+            welcome_msg += "❌ *Akses Ditolak*\n\n"
+            welcome_msg += "🔑 *Solusi:* Hubungi Admin atau daftarkan ID Anda di environment variable `TELEGRAM_CHAT_ID` atau `TELEGRAM_ADMIN_ID` di platform hosting Anda (seperti Railway) agar bot dapat memproses perintah Anda."
+        
+        bot.reply_to(message, welcome_msg, parse_mode="Markdown")
 
     @bot.message_handler(commands=['status'])
     def handle_status(message):
