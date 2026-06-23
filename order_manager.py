@@ -358,7 +358,7 @@ def check_paper_exit():
                 # Kirim Notif Telegram Close
                 try:
                     TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6068641908")
+                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", None)
                     url_notif = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
                     chat_id = TG_CHAT_ID
                     emoji = "🎯" if exit_trigger == "TP" else "🛑"
@@ -384,7 +384,7 @@ def notify_tp_hit(symbol: str, tp_level: int, tp_price: float, trade_data: dict)
     """Kirim notifikasi ke Telegram bahwa level TP sudah tercapai (order TP terisi di bursa)."""
     try:
         TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-        TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6068641908")
+        TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", None)
         entry = trade_data.get("entry_price", 0)
         side = trade_data.get("side", "LONG")
         pct = ((tp_price - entry) / entry * 100) if entry > 0 else 0
@@ -452,7 +452,7 @@ def notify_live_close(symbol: str, trade_data: dict):
         pnl_sign = "+" if realized_pnl >= 0 else ""
         
         TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-        TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6068641908")
+        TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", None)
         
         msg_text = (
             f"{emoji} *SINYAL SELESAI (CLOSE) - LIVE*\n"
@@ -758,34 +758,6 @@ def execute_signal(data: dict) -> dict:
     logger.info(f"🧠 BRAIN: {symbol} {pos_side} | Lev: {leverage}x | Qty: {qty} | Margin: {calc_result['margin']:.2f} USDT")
     logger.info(f"📺 TV TP/SL: SL={sl_price} TP1={tp1_price} TP2={tp2_price} TP3={tp3_price} TP4={tp4_price}")
     
-    # Simpan trade data (untuk trailing)
-    with state_lock:
-        active_trade_data[symbol] = {
-            "symbol": symbol,
-            "side": pos_side,
-            "entry_price": entry_price,
-            "sl": sl_price,
-            "tp1": tp1_price,
-            "tp2": tp2_price,
-            "tp3": tp3_price,
-            "tp4": tp4_price,
-            "qtys": qtys,
-            "qty": qty,
-            "leverage": leverage,
-            "risk_pct": risk_pct,
-            "atr": atr,
-            "trailing": {
-                "activate_atr_mult": 1.0,
-                "offset_atr_mult": 0.5,
-                "active": False,
-                "highest_price": entry_price if pos_side == "LONG" else 0,
-                "lowest_price": entry_price if pos_side == "SHORT" else 0,
-            },
-            "status": "OPEN",
-            "open_time": time.strftime("%Y-%m-%d %H:%M:%S"),
-        }
-    save_active_trades()
- 
     if paper_mode:
         trade = {
             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -798,6 +770,35 @@ def execute_signal(data: dict) -> dict:
             "status": "OPEN_PAPER"
         }
         save_paper_trade(trade)
+        
+        # Simpan trade data ke active_trade_data hanya untuk paper
+        with state_lock:
+            active_trade_data[symbol] = {
+                "symbol": symbol,
+                "side": pos_side,
+                "entry_price": entry_price,
+                "sl": sl_price,
+                "tp1": tp1_price,
+                "tp2": tp2_price,
+                "tp3": tp3_price,
+                "tp4": tp4_price,
+                "qtys": qtys,
+                "qty": qty,
+                "leverage": leverage,
+                "risk_pct": risk_pct,
+                "atr": atr,
+                "trailing": {
+                    "activate_atr_mult": 1.0,
+                    "offset_atr_mult": 0.5,
+                    "active": False,
+                    "highest_price": entry_price,
+                    "lowest_price": entry_price
+                },
+                "status": "OPEN",
+                "open_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        save_active_trades()
+        
         logger.info(f"📝 PAPER TRADE OPENED: {symbol} {pos_side} @ {entry_price}")
         return {"status": "success_paper", "symbol": symbol, "qty": qty}
  
@@ -806,6 +807,34 @@ def execute_signal(data: dict) -> dict:
     order_res = bx.place_order(symbol, order_side, pos_side, qty, "MARKET")
  
     if order_res.get("code") == 0:
+        # Simpan trade data ke active_trade_data HANYA ketika eksekusi bursa nyata sukses
+        with state_lock:
+            active_trade_data[symbol] = {
+                "symbol": symbol,
+                "side": pos_side,
+                "entry_price": entry_price,
+                "sl": sl_price,
+                "tp1": tp1_price,
+                "tp2": tp2_price,
+                "tp3": tp3_price,
+                "tp4": tp4_price,
+                "qtys": qtys,
+                "qty": qty,
+                "leverage": leverage,
+                "risk_pct": risk_pct,
+                "atr": atr,
+                "trailing": {
+                    "activate_atr_mult": 1.0,
+                    "offset_atr_mult": 0.5,
+                    "active": False,
+                    "highest_price": entry_price if pos_side == "LONG" else 0,
+                    "lowest_price": entry_price if pos_side == "SHORT" else 0,
+                },
+                "status": "OPEN",
+                "open_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        save_active_trades()
+
         # 1. Pasang STOP LOSS Tunggal
         sl_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": symbol, "side": sl_side, "positionSide": pos_side,
@@ -932,7 +961,7 @@ def audit_position_reconciliation():
                 if _RECONCILIATION_MISMATCH_COUNT[sym] == 3: # 3x berturut-turut (~45 detik)
                     # Kirim notifikasi peringatan ke Telegram
                     TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6068641908")
+                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", None)
                     msg = (
                         f"🚨 *ALARM REKONSILIASI POSISI*\n"
                         f"━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1366,7 +1395,7 @@ def check_and_update_trailing_sl():
                         
                         # Kirim Telegram Notif Auto-Adopt
                         TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-                        TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6068641908")
+                        TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", None)
                         mode_label = "PAPER" if paper_mode else "LIVE"
                         msg_adopt = (
                             f"📥 *POSISI MANUAL DIADOPSI ({mode_label})*\n"
@@ -1428,7 +1457,7 @@ def check_and_update_trailing_sl():
 
                     # Kirim Telegram Notif Auto-Calibration
                     TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6068641908")
+                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", None)
                     mode_label = "PAPER" if paper_mode else "LIVE"
                     msg_calib = (
                         f"🔄 *KALIBRASI LEVEL TP/SL SELESAI ({mode_label})*\n"
@@ -1541,7 +1570,7 @@ def check_and_update_trailing_sl():
                 # 4. Kirim notifikasi Telegram tentang trailing SL
                 try:
                     TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6068641908")
+                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", None)
                     mode_label = "PAPER" if paper_mode else "LIVE"
                     msg = (
                         f"🔄 *TRAILING STOP LOSS AKTIF ({mode_label})*\n"
