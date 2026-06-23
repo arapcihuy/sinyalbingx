@@ -634,6 +634,33 @@ def execute_signal(data: dict) -> dict:
     tp4_price = tv_tp4_price
     tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
 
+    # ── MIN SL GUARD: Safety agar SL tidak terlalu dekat ke entry ──
+    # TV SL mutlak, tapi jika terlalu deket (< min_pct) → widen ke min_pct
+    # Ini safety guard, bukan override TP/SL TV
+    if sl_price > 0 and entry_price > 0:
+        sl_pct = abs(entry_price - sl_price) / entry_price
+        # Min SL % per symbol category
+        _min_sl_map = {
+            "BTC-USDT": 0.02,   # BTC min 2%
+            "ETH-USDT": 0.03,   # ETH min 3%
+        }
+        _min_sl_pct = _min_sl_map.get(symbol, 0.025)  # default 2.5%
+        if sl_pct < _min_sl_pct:
+            old_sl = sl_price
+            if pos_side == "LONG":
+                sl_price = _round_price(entry_price * (1.0 - _min_sl_pct), symbol)
+            else:
+                sl_price = _round_price(entry_price * (1.0 + _min_sl_pct), symbol)
+            logger.warning(f"🛡️ MIN SL GUARD: {symbol} SL {old_sl} terlalu dekat ({sl_pct*100:.2f}% < {_min_sl_pct*100:.0f}%) → widen ke {sl_price}")
+            # Recalc tp_prices dari risk_dist baru agar R:R tetap sehat
+            risk_dist = abs(entry_price - sl_price)
+            if tp1_price > 0:
+                # TV kirim TP →.keep, tapi auto-gen sisanya yg 0
+                if tp2_price == 0: tp2_price = _round_price(entry_price + (risk_dist * 3.0) * (1 if pos_side == "LONG" else -1), symbol)
+                if tp3_price == 0: tp3_price = _round_price(entry_price + (risk_dist * 4.5) * (1 if pos_side == "LONG" else -1), symbol)
+                if tp4_price == 0: tp4_price = _round_price(entry_price + (risk_dist * 6.0) * (1 if pos_side == "LONG" else -1), symbol)
+            tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
+
     try:
         tp_mode = settings.get("tp_mode", "multiple")
     except Exception:
@@ -819,8 +846,11 @@ def execute_signal(data: dict) -> dict:
                 if p > 0: msg_entry += f"🎯 *TP{i+1}:* `{p}`\n"
             msg_entry += f"━━━━━━━━━━━━━━━━━━━━━"
             import requests as req
-            req.post(f"https://api.telegram.org/bot{os.getenv('TELEGRAM_BOT_TOKEN')}/sendMessage",
+            res = req.post(f"https://api.telegram.org/bot{os.getenv('TELEGRAM_BOT_TOKEN')}/sendMessage",
                      json={"chat_id": os.getenv("TELEGRAM_CHAT_ID"), "text": msg_entry, "parse_mode": "Markdown"}, timeout=5)
+            if res.status_code != 200:
+                logger.error(f"Telegram API Error (Status {res.status_code}): {res.text}")
+            res.raise_for_status()
         except Exception as e:
             logger.error(f"Gagal kirim notif telegram entry: {e}")
 
@@ -1451,6 +1481,14 @@ def check_and_update_trailing_sl():
                 # Simpan update peak price ke state lokal
                 active_trade_data[symbol] = trade
             save_active_trades()
+
+            # ── DESYNC PROTECTION FOR TEST/HISTORICAL SIGNALS ──
+            # Jika harga live menyimpang > 3% dari entry price sejak awal, 
+            # jangan lakukan trailing SL karena milestone TP ter-trigger palsu.
+            init_slippage = abs(current_price - entry_price) / entry_price
+            if init_slippage > 0.03 and not trade["trailing"].get("active", False):
+                logger.warning(f"⚠️ desync protection: harga live ({current_price}) selisih {init_slippage*100:.2f}% dari entry ({entry_price}). Trailing SL diabaikan.")
+                continue
             
             import brain_engine
             # Gunakan peak_price sebagai basis perhitungan milestone, bukan current_price
@@ -1472,17 +1510,18 @@ def check_and_update_trailing_sl():
                 else:
                     # 1. Batalkan semua SL lama di bursa (STOP_MARKET)
                     try:
+                        # Logika otomatis untuk batalkan semua order TP lama sebelum pasang yg baru
                         orders_res = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
-                        if orders_res.get("code") != 0:
-                            raise Exception(f"API Error get open orders: {orders_res}")
-                            
-                        open_orders = orders_res.get("data", [])
-                        if isinstance(open_orders, dict):
-                            open_orders = open_orders.get("orders", [])
+                        open_orders = orders_res.get("data", {}).get("orders", []) if isinstance(orders_res.get("data"), dict) else []
                         
-                        for order in open_orders:
-                            if order.get("type") == "STOP_MARKET":
-                                bx.cancel_order(symbol, order.get("orderId"))
+                        for o in open_orders:
+                            if "TAKE_PROFIT" in o.get("type", ""):
+                                bx._request("DELETE", "/openApi/swap/v2/trade/order", {"symbol": symbol, "orderId": o["orderId"]})
+                                logger.info(f"🗑️ Batal TP lama: {o['orderId']}")
+                        
+                        has_sl = any("STOP" in o.get("type", "") for o in open_orders)
+                        has_tp = False # Force pasang ulang setelah hapus semua TP lama
+
                     except Exception as ce:
                         logger.error(f"Gagal cancel SL lama, batalkan update SL baru demi keamanan: {ce}")
                         continue  # SKIP placing new SL if we couldn't cancel old ones!
