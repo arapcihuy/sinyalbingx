@@ -452,12 +452,16 @@ def calculate_smart_multi_tp_qty(balance: float, entry_price: float, sl_price: f
             
     # [HARD LIMITER] TP/SL Clamping
     # Membatasi TP/SL agar tidak terlalu jauh jika script TV mengirim data ngaco
-    # TP max 5%, SL max 3%
+    # TP max: TP1=2.5%, TP2=3.5%, TP3=5%, TP4=8% — progressive agar tidak numpuk
+    _tp_caps = [0.025, 0.035, 0.05, 0.08]
     for i in range(len(tp_prices)):
+        if i >= len(_tp_caps):
+            break
         if tp_prices[i] > 0:
             dist = abs(tp_prices[i] - entry_price)
-            if dist > (entry_price * 0.05):
-                tp_prices[i] = entry_price + (0.05 * entry_price) if tp_prices[i] > entry_price else entry_price - (0.05 * entry_price)
+            cap = entry_price * _tp_caps[i]
+            if dist > cap:
+                tp_prices[i] = entry_price + cap if tp_prices[i] > entry_price else entry_price - cap
     
     # Apply limit if sl is provided
     # (assuming sl is passed somewhere or handle it in order_manager)
