@@ -239,6 +239,13 @@ def execute_signal(data: dict) -> dict:
     bx.set_leverage(symbol, leverage, pos_side)
     bx.set_margin_type(symbol, margin_mode)
 
+    # ── CANCEL ALL EXISTING ORDERS sebelum pasang SL/TP baru ──
+    try:
+        bx.cancel_all_orders(symbol)
+        logger.info(f"🧹 Order lama di-{symbol} dibuang sebelum entry baru.")
+    except Exception as cancel_err:
+        logger.warning(f"⚠️ Gagal cancel orders {symbol}: {cancel_err}")
+
     # ── Buka posisi MARKET ──
     order_res = bx.place_order(symbol, order_side, pos_side, total_quantity, "MARKET")
     if order_res.get("code") != 0:

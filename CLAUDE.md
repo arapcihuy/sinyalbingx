@@ -3,6 +3,7 @@
 ## Otoritas Mutlak Sinyal TV (TP/SL)
 1. **Wajib TP/SL dari TV**: TP1-4 dan SL yang dikirim oleh TradingView (TV) bersifat mutlak dan tidak boleh diubah secara otomatis oleh logic internal bot (dilarang menggunakan `AUTO-ADJUST SL`).
 2. **Kecualian & Fallback**: Logic otak bot (`brain_engine`) hanya boleh memodifikasi TP/SL jika sinyal TV tidak mengirim data TP/SL sama sekali.
+3. **Min SL Guard**: Jika SL dari TV terlalu dekat dengan entry (< 2% BTC, < 3% ETH, < 2.5% lainnya), bot wajib melebarkan SL ke minimum tersebut agar posisi tidak mudah ter-liquidate. TP dari TV tetap dipakai apa adanya.
 3. **Database Persist**: Semua sinyal TV yang masuk wajib dicatat di SQLite (`signals.db`) agar data aman dari redeploy Railway (filesystem ephemeral).
 
 ## Otak Bot (Leverage & Margin)
