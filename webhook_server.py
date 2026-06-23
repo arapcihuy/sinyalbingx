@@ -49,32 +49,15 @@ def run_async_execution(data, pair, signal, price, sl, tp1, tp2, tp3, tp4, TG_TO
 
         # ── RUN AI SIGNAL FILTER ──
         approved = True
-        ai_reason = ""
+        ai_reason = "AI filter bypassed (no ai_trading dependency)"
         suggested_params = {}
-        try:
-            from ai_trading.gemini_filter import validate_signal
-            log.info(f"🧠 Memulai filter AI untuk {pair} {signal}...")
-            res = validate_signal(
-                pair=pair,
-                action=signal,
-                price=float(price or 0),
-                sl=float(sl or 0),
-                tp1=float(tp1 or 0),
-                tp2=float(tp2 or 0)
-            )
-            if isinstance(res, tuple) and len(res) == 3:
-                approved, ai_reason, suggested_params = res
-            else:
-                approved, ai_reason = res
-                suggested_params = {}
-        except Exception as filter_err:
-            log.warning(f"⚠️ Gagal memanggil AI filter: {filter_err}. Melanjutkan eksekusi tanpa filter.")
+        # NOTE: ai_trading removed — filter always approves. TP/SL from TV is authoritative.
 
         # ── INISIALISASI DATABASE LOGGER ──
         db_logger = None
         row_id = -1
         try:
-            from ai_trading import db_logger
+            import db_logger
             row_id = db_logger.log_validation(
                 pair=pair,
                 action=signal,
@@ -211,8 +194,11 @@ def run_async_execution(data, pair, signal, price, sl, tp1, tp2, tp3, tp4, TG_TO
             msg_lines.append(f"━━━━━━━━━━━━━━━━━━━━━")
             
             msg = "\n".join(msg_lines)
-            r.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+            res = r.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
                   json={"chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=5)
+            if res.status_code != 200:
+                log.error(f"Telegram API Error (Status {res.status_code}): {res.text}")
+            res.raise_for_status()
         except Exception as tg_err:
             log.error(f"Gagal kirim Telegram: {tg_err}")
     except Exception as e:
@@ -280,6 +266,8 @@ def clean_number(num_str):
     except ValueError:
         return 0.0
 
+import re
+
 def parse_plain_text_alert(text):
     # Proteksi: Abaikan pesan default order fill dari TradingView Strategy, kecuali jika merupakan sinyal Tradentix
     if (re.search(r"order\s+(buy|sell|long|short)\s+@", text, re.IGNORECASE) or "terisi pada" in text.lower()) and "tradentix" not in text.lower():
@@ -293,21 +281,14 @@ def parse_plain_text_alert(text):
     if secret_match:
         data["secret"] = secret_match.group(1).strip()
     
-    # 1. Parse Action
-    action_match = re.search(r"(?:order|zone|side)?\s*(buy|sell|long|short)\s*(?:entry|zone|order|side)?", text, re.IGNORECASE)
+    # 1. Parse Action (Buy Entry / Sell Entry)
     if re.search(r"✅\s*Buy|Buy Entry Zone|\b(buy|long)\b", text, re.IGNORECASE):
         data["action"] = "BUY"
     elif re.search(r"❎\s*Sell|Sell Entry Zone|\b(sell|short)\b", text, re.IGNORECASE):
         data["action"] = "SELL"
-    elif action_match:
-        act = action_match.group(1).upper()
-        if act in ["LONG", "BUY"]:
-            data["action"] = "BUY"
-        elif act in ["SHORT", "SELL"]:
-            data["action"] = "SELL"
 
-    # 2. Parse Symbol
-    symbol_match = re.search(r"#\s*([A-Z0-9]+)", text)
+    # 2. Parse Symbol (e.g., BINANCE:ETHUSDT atau #ETHUSDT)
+    symbol_match = re.search(r"(?:BINANCE:|BINGX:|#)\s*([A-Z0-9]+)", text, re.IGNORECASE)
     if not symbol_match:
         symbol_match = re.search(r"Coin\s*:\s*([A-Z0-9]+)", text, re.IGNORECASE)
     if not symbol_match:
@@ -322,23 +303,32 @@ def parse_plain_text_alert(text):
         data["symbol"] = symbol
 
     # 3. Parse Entry Price
-    price_match = re.search(r"(?:entry zone|entry|harga|@)\s*:?\s*([0-9.,]+)", text, re.IGNORECASE)
+    price_match = re.search(r"(?:Buy Entry|Sell Entry|entry zone|entry|harga|@)\s*:?\s*([0-9.,]+)", text, re.IGNORECASE)
     if not price_match:
         price_match = re.search(r"@\s*([0-9.,]+)", text)
         
     if price_match:
         data["price"] = clean_number(price_match.group(1))
 
-    # 4. Parse Stop Loss
+    # 4. Parse Stop Loss (Stop-Loss: 3400.0)
     sl_match = re.search(r"(?:stop-loss|stop target|sl)\s*:?\s*([0-9.,]+)", text, re.IGNORECASE)
     if sl_match:
         data["sl"] = clean_number(sl_match.group(1))
 
-    # 5. Parse Take Profits
-    for i in range(1, 5):
-        tp_match = re.search(rf"(?:target {i}|take profit {i}|tp{i})\s*:?\s*([0-9.,]+)", text, re.IGNORECASE)
-        if tp_match:
-            data[f"tp{i}"] = clean_number(tp_match.group(1))
+    # 5. Parse Take Profits (Targets: 3550.0, 3600.0, 3650.0, 3700.0)
+    targets_match = re.search(r"(?:Targets|TPs|TP)\s*:?\s*([0-9.,\s]+)", text, re.IGNORECASE)
+    if targets_match:
+        raw_targets = targets_match.group(1)
+        # Pisahkan dengan koma atau spasi
+        tps = [t.strip() for t in re.split(r'[, ]+', raw_targets) if t.strip()]
+        for i, tp_val in enumerate(tps[:4]):
+            data[f"tp{i+1}"] = clean_number(tp_val)
+    else:
+        # Fallback ke format lama TP1: 123
+        for i in range(1, 5):
+            tp_match = re.search(rf"(?:target {i}|take profit {i}|tp{i})\s*:?\s*([0-9.,]+)", text, re.IGNORECASE)
+            if tp_match:
+                data[f"tp{i}"] = clean_number(tp_match.group(1))
 
     if "action" in data and "symbol" in data:
         data["price"] = data.get("price", 0.0)
@@ -404,6 +394,21 @@ class Handler(BaseHTTPRequestHandler):
             
         query_params = {k: v[0] for k, v in parse_qs(parsed_url.query).items()}
 
+        # ── TELEGRAM WEBHOOK HANDLER ──
+        if path == "/bot":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(length)
+                update = json.loads(body.decode('utf-8'))
+                log.info(f"Incoming Telegram Update: {json.dumps(update)}")
+                if bot:
+                    bot.process_new_updates([tg_types.Update.de_json(update)])
+                self._respond(200, {"ok": True})
+            except Exception as e:
+                log.error(f"Telegram webhook error: {e}")
+                self._respond(200, {"ok": True})
+            return
+
         try:
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length)
@@ -430,7 +435,7 @@ class Handler(BaseHTTPRequestHandler):
 
             log.info(f"POST {path}: {json.dumps(data)[:200]}")
 
-            if path == "/tradingview":
+            if path in ("/tradingview", "/webhook/tradingview", "/webhook"):
                 # 1. Validasi Keamanan WEBHOOK_SECRET (JSON atau query params)
                 import secrets
                 incoming_secret = data.get("secret") or query_params.get("secret") or ""
@@ -651,6 +656,14 @@ if TG_TOKEN:
     try:
         bot = telebot.TeleBot(TG_TOKEN)
         log.info("🤖 pyTelegramBotAPI initialized successfully.")
+        
+        webhook_url_env = os.getenv("WEBHOOK_URL")
+        if webhook_url_env:
+            bot.set_webhook(url=f"{webhook_url_env}/bot")
+            log.info(f"📡 Telegram webhook set to: {webhook_url_env}/bot")
+        else:
+            log.warning("⚠️ WEBHOOK_URL tidak dikonfigurasi. Webhook Telegram tidak akan diset.")
+
         try:
             bot.set_my_commands([
                 telebot.types.BotCommand("status", "Cek status bot & detail posisi aktif (LIVE/PAPER)"),
@@ -1037,7 +1050,7 @@ if bot:
         if not is_authorized(message):
             return
         try:
-            from ai_trading import db_logger
+            import db_logger
             stats = db_logger.get_summary_stats()
             recent_logs = db_logger.get_recent_logs(limit=5)
             
@@ -1120,7 +1133,7 @@ if __name__ == "__main__":
     threading.Thread(target=run_autonomous_self_test_loop, daemon=True).start()
     
     # Jalankan Telegram bot polling secara asinkron di latar belakang
-    start_telegram_bot_polling()
+# start_telegram_bot_polling()
     
     port = int(raw_port or 8080)
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
