@@ -483,47 +483,53 @@ def calculate_milestone_trailing_sl(current_price: float, side: str, entry_price
     cfg = get_symbol_config(symbol)
     price_prec = cfg.get("price_precision", 2)
     
+    # Buffer kecil 0.05% dari entry agar SL tidak persis di entry price
+    # (hindari instant-fill karena spread/slippage)
+    sl_entry_buffer = round(entry_price * 0.0005, price_prec)
+
     if side == "LONG":
         # LONG: Harga naik
         if tp3 > 0 and current_price >= tp3:
-            new_sl = tp2
+            new_sl = round(tp2, price_prec)
             reason = "TP3 tercapai -> SL digeser ke TP2"
         elif tp2 > 0 and current_price >= tp2:
-            new_sl = tp1
+            new_sl = round(tp1, price_prec)
             reason = "TP2 tercapai -> SL digeser ke TP1"
         elif tp1 > 0 and current_price >= tp1:
-            new_sl = entry_price
-            reason = "TP1 tercapai -> SL digeser ke Entry"
+            # SL ke entry - buffer kecil agar tidak sama persis dengan entry
+            new_sl = round(entry_price - sl_entry_buffer, price_prec)
+            reason = f"TP1 tercapai -> SL digeser ke Entry-buffer ({new_sl})"
         else:
             return {"should_update": False, "new_sl": current_sl, "reason": "belum menyentuh milestone"}
-            
+
         if new_sl > current_sl:
             return {
                 "should_update": True,
-                "new_sl": round(new_sl, price_prec),
+                "new_sl": new_sl,
                 "reason": reason
             }
     else:
         # SHORT: Harga turun
         if tp3 > 0 and current_price <= tp3:
-            new_sl = tp2
+            new_sl = round(tp2, price_prec)
             reason = "TP3 tercapai -> SL digeser ke TP2"
         elif tp2 > 0 and current_price <= tp2:
-            new_sl = tp1
+            new_sl = round(tp1, price_prec)
             reason = "TP2 tercapai -> SL digeser ke TP1"
         elif tp1 > 0 and current_price <= tp1:
-            new_sl = entry_price
-            reason = "TP1 tercapai -> SL digeser ke Entry"
+            # SL ke entry + buffer kecil agar tidak sama persis dengan entry
+            new_sl = round(entry_price + sl_entry_buffer, price_prec)
+            reason = f"TP1 tercapai -> SL digeser ke Entry+buffer ({new_sl})"
         else:
             return {"should_update": False, "new_sl": current_sl, "reason": "belum menyentuh milestone"}
-            
+
         if current_sl == 0 or new_sl < current_sl:
             return {
                 "should_update": True,
-                "new_sl": round(new_sl, price_prec),
+                "new_sl": new_sl,
                 "reason": reason
             }
-            
+
     return {"should_update": False, "new_sl": current_sl, "reason": "tidak ada perubahan SL"}
 
 
