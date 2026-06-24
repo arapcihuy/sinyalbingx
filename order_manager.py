@@ -1113,15 +1113,36 @@ def sync_missing_tpsl():
                 tp4_price = ex_tps[3] if len(ex_tps) >= 4 else state_tp4
                 if ex_sl > 0 or ex_tps:
                     logger.info(f"📥 {symbol}: TP/SL dibaca dari exchange orders (no TV signal)")
+                # Guard SL: hindari SL = entry atau nol, gunakan minimum SL percent
+                if sl_price <= 0 or abs(sl_price - entry) < 1e-8:
+                    sl_price = _round_price(entry * (1.0 - _min_sl_pct), symbol)
+                    logger.warning(f"🛡️ Adjusted SL for {symbol}: set to guard price {sl_price} (min pct {_min_sl_pct*100:.2f}%)")
+                # Guard TP: hindari TP = entry
+                for idx, tp_val in enumerate([tp1_price, tp2_price, tp3_price, tp4_price], start=1):
+                    if tp_val > 0 and abs(tp_val - entry) < 1e-8:
+                        logger.warning(f"⚠️ TP{idx} for {symbol} equal to entry price; clearing.")
+                        if idx == 1:
+                            tp1_price = 0
+                        elif idx == 2:
+                            tp2_price = 0
+                        elif idx == 3:
+                            tp3_price = 0
+                        else:
+                            tp4_price = 0
             tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
             
             # Jika semua TP/SL masih 0, fallback ke brain_engine
             if sl_price == 0 and tp1_price == 0:
                 import brain_engine
                 logger.warning(f"⚠️ {symbol} tidak punya TP/SL dari sinyal TV maupun state. Fallback ke brain_engine.")
-                plan = brain_engine.get_full_trade_plan(10000.0, entry, side, symbol) 
+                plan = brain_engine.get_full_trade_plan(10000.0, entry, side, symbol)
                 sl_price = plan["sl"]
                 tp_prices = [plan["tp1"], plan["tp2"], plan.get("tp3", 0), plan.get("tp4", 0)]
+                # Validate SL: avoid SL == entry or zero; apply minimum SL guard
+                if sl_price <= 0 or abs(sl_price - entry) < 1e-8:
+                    # Calculate a safe SL using the configured minimum SL percentage
+                    sl_price = _round_price(entry * (1.0 - _min_sl_pct), symbol)
+                    logger.warning(f"🛡️ Adjusted SL for {symbol}: original SL was {plan['sl']}, set to guard price {sl_price} (min pct {_min_sl_pct*100:.2f}%)")
 
             sl_side = "SELL" if side == "LONG" else "BUY"
             
@@ -1578,51 +1599,86 @@ def check_and_update_trailing_sl():
                             pt["sl"] = new_sl
                     update_paper_trades(trades)
                 else:
-                    # 1. Batalkan semua SL lama & TP lama di bursa (STOP_MARKET + TAKE_PROFIT)
+                    # 1. Cancel SL lama dulu (hati-hati: TP jangan di-cancel, nanti pasang ulang)
                     try:
-                        # Logika otomatis untuk batalkan SEMUA order lama sebelum pasang yg baru
                         orders_res = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
-                        open_orders = orders_res.get("data", {}).get("orders", []) if isinstance(orders_res.get("data"), dict) else []
-                        
-                        for o in open_orders:
-                            otype = o.get("type", "")
-                            if "TAKE_PROFIT" in otype or "STOP" in otype:
-                                bx._request("DELETE", "/openApi/swap/v2/trade/order", {"symbol": symbol, "orderId": o["orderId"]})
-                                logger.info(f"🗑️ Batal order lama: {o['orderId']} ({otype})")
-                        
-                        has_sl = False  # SL lama sudah dibatalkan di atas
-                        has_tp = False  # TP lama sudah dibatalkan di atas
+                        raw = orders_res.get("data", {})
+                        if isinstance(raw, dict):
+                            open_orders = raw.get("orders", [])
+                        else:
+                            open_orders = raw if isinstance(raw, list) else []
+
+                        # Pisahkan SL dan TP — hanya cancel SL lama
+                        sl_orders = [o for o in open_orders if "STOP" in o.get("type", "") and "TAKE_PROFIT" not in o.get("type", "")]
+                        tp_orders = [o for o in open_orders if "TAKE_PROFIT" in o.get("type", "")]
+
+                        for o in sl_orders:
+                            bx._request("DELETE", "/openApi/swap/v2/trade/order", {"symbol": symbol, "orderId": o["orderId"]})
+                            logger.info(f"🗑️ Batal SL lama: {o['orderId']} ({o.get('type')}) stopPrice={o.get('stopPrice')}")
 
                     except Exception as ce:
-                        logger.error(f"Gagal cancel SL lama, batalkan update SL baru demi keamanan: {ce}")
-                        continue  # SKIP placing new SL if we couldn't cancel old ones!
-                        
-                    # 2. Pasang SL baru di bursa
-                    bx._request("POST", "/openApi/swap/v2/trade/order", {
-                        "symbol": symbol, "side": sl_side, "positionSide": pos_side,
-                        "type": "STOP_MARKET", "stopPrice": new_sl, "quantity": qty
-                    })
+                        logger.error(f"Gagal cancel SL lama {symbol}: {ce}. Tetap pasang SL baru.")
+                        tp_orders = []
 
-                    # 2b. Re-TP: pasang ulang semua TP yang masih aktif (karena semua order sudah di-cancel)
-                    tp_prices_re = [trade.get("tp1", 0), trade.get("tp2", 0), trade.get("tp3", 0), trade.get("tp4", 0)]
-                    tp_qtys_re = trade.get("qtys", [0, 0, 0, 0])
-                    from brain_engine import get_symbol_config as _gsc
-                    _cfg_re = _gsc(symbol)
-                    _min_qty_re = _cfg_re.get("min_qty", 0.001)
-                    for _i, _tp_val in enumerate(tp_prices_re):
-                        _tp_qty = tp_qtys_re[_i] if _i < len(tp_qtys_re) else 0
-                        if _tp_val > 0 and _tp_qty > 0:
-                            try:
-                                _tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
-                                    "symbol": symbol, "side": sl_side, "positionSide": pos_side,
-                                    "type": "TAKE_PROFIT_MARKET", "stopPrice": _tp_val, "quantity": _tp_qty
-                                })
-                                if _tp_res.get("code", 0) != 0:
-                                    logger.warning(f"⚠️ Re-TP{_i+1} gagal: {_tp_res.get('msg')}")
+                    # 2. Pasang SL baru — guard: jangan pasang SL di entry price
+                    import brain_engine as _be_trail
+                    cfg = _be_trail.get_symbol_config(symbol)
+                    prec = cfg.get("price_precision", 2)
+                    _entry_guard = round(trade.get("entry_price", 0) * 0.0005, prec)
+                    if pos_side == "LONG" and new_sl >= trade.get("entry_price", new_sl):
+                        new_sl = round(trade.get("entry_price", new_sl) - _entry_guard, prec)
+                        logger.warning(f"🛡️ SL trail guard: adjusted to {new_sl} (was at/above entry)")
+                    elif pos_side == "SHORT" and new_sl <= trade.get("entry_price", new_sl):
+                        new_sl = round(trade.get("entry_price", new_sl) + _entry_guard, prec)
+                        logger.warning(f"🛡️ SL trail guard: adjusted to {new_sl} (was at/below entry)")
+
+                    if abs(new_sl - current_sl) > (10 ** -prec):
+                        sl_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
+                            "symbol": symbol, "side": sl_side, "positionSide": pos_side,
+                            "type": "STOP_MARKET", "stopPrice": new_sl, "quantity": qty
+                        })
+                        if sl_res.get("code", -1) == 0:
+                            logger.info(f"✅ SL Berhasil digeser: {current_sl} -> {new_sl}")
+                        else:
+                            logger.error(f"❌ Gagal pasang SL baru {symbol}: {sl_res.get('msg')}")
+                    else:
+                        logger.info(f"ℹ️ SL tidak berubah signifikan, skip update: {new_sl}")
+
+                    # 3. Pastikan TP masih terpasang (cek dari exchange, bukan dari state)
+                    # Jika ada TP yang hilang, pasang ulang berdasarkan data exchange saat ini
+                    try:
+                        if len(tp_orders) == 0:
+                            # TP hilang semua — hitung ulang qty dari posisi sekarang
+                            tp_prices_re = [trade.get("tp1", 0), trade.get("tp2", 0), trade.get("tp3", 0), trade.get("tp4", 0)]
+                            tp_qtys_from_state = trade.get("qtys", [])
+                            weights = [0.35, 0.30, 0.20, 0.15]
+                            _gsc = _be_trail.get_symbol_config
+                            _min_qty_re = _gsc(symbol).get("min_qty", 0.001)
+                            current_tp_qty_placed = 0
+                            for _i, _tp_val in enumerate(tp_prices_re):
+                                if _tp_val <= 0:
+                                    continue
+                                # Gunakan qtys dari state jika ada, fallback ke weight
+                                if _i < len(tp_qtys_from_state) and tp_qtys_from_state[_i] > 0:
+                                    _tp_qty = tp_qtys_from_state[_i]
                                 else:
-                                    logger.info(f"🎯 Re-TP{_i+1} terpasang di {_tp_val} (qty: {_tp_qty})")
-                            except Exception as _tp_err:
-                                logger.error(f"❌ Re-TP{_i+1} error: {_tp_err}")
+                                    _remaining = qty - current_tp_qty_placed
+                                    _tp_qty = max(_min_qty_re, min(round(qty * weights[_i], 4), _remaining))
+                                if _tp_qty > 0:
+                                    _tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
+                                        "symbol": symbol, "side": sl_side, "positionSide": pos_side,
+                                        "type": "TAKE_PROFIT_MARKET", "stopPrice": _tp_val, "quantity": _tp_qty
+                                    })
+                                    if _tp_res.get("code", -1) == 0:
+                                        current_tp_qty_placed += _tp_qty
+                                        logger.info(f"🎯 Re-TP{_i+1} terpasang di {_tp_val} (qty: {_tp_qty})")
+                                    else:
+                                        logger.warning(f"⚠️ Re-TP{_i+1} gagal: {_tp_res.get('msg')}")
+                        else:
+                            logger.info(f"✔️ TP masih ada di exchange untuk {symbol} ({len(tp_orders)} order), tidak perlu re-TP")
+                    except Exception as _tp_err:
+                        logger.error(f"❌ Re-TP error untuk {symbol}: {_tp_err}")
+
 
                 # 3. Update state lokal
                 with state_lock:
