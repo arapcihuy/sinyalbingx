@@ -1639,6 +1639,30 @@ def check_and_update_trailing_sl():
                         })
                         if sl_res.get("code", -1) == 0:
                             logger.info(f"✅ SL Berhasil digeser: {current_sl} -> {new_sl}")
+                            # Update state lokal
+                            with state_lock:
+                                trade["sl"] = new_sl
+                                active_trade_data[symbol] = trade
+                            save_active_trades()
+
+                            # Kirim notifikasi Telegram HANYA saat SL benar2 berubah
+                            try:
+                                TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+                                TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", None)
+                                mode_label = "PAPER" if paper_mode else "LIVE"
+                                msg = (
+                                    f"🔄 *TRAILING STOP LOSS AKTIF ({mode_label})*\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"🪙 *Pair:* `{symbol}`\n"
+                                    f"🛡️ *SL Baru:* `{new_sl}`\n"
+                                    f"📝 *Alasan:* {result['reason']}\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━"
+                                )
+                                import requests as r
+                                r.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                                      json={"chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=5)
+                            except Exception as tg_err:
+                                logger.error(f"Gagal kirim notif trailing SL: {tg_err}")
                         else:
                             logger.error(f"❌ Gagal pasang SL baru {symbol}: {sl_res.get('msg')}")
                     else:
@@ -1680,29 +1704,6 @@ def check_and_update_trailing_sl():
                         logger.error(f"❌ Re-TP error untuk {symbol}: {_tp_err}")
 
 
-                # 3. Update state lokal
-                with state_lock:
-                    trade["sl"] = new_sl
-                    active_trade_data[symbol] = trade
-                save_active_trades()
-                
-                # 4. Kirim notifikasi Telegram tentang trailing SL
-                try:
-                    TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", None)
-                    mode_label = "PAPER" if paper_mode else "LIVE"
-                    msg = (
-                        f"🔄 *TRAILING STOP LOSS AKTIF ({mode_label})*\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🪙 *Pair:* `{symbol}`\n"
-                        f"🛡️ *SL Baru:* `{new_sl}`\n"
-                        f"📝 *Alasan:* {result['reason']}\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━"
-                    )
-                    import requests as r
-                    r.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                          json={"chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=5)
-                except Exception as tg_err:
                     logger.error(f"Gagal notif trailing SL ke Telegram: {tg_err}")
                     
                 logger.info(f"🔄 TRAILING SL {symbol} ({mode_label}): {current_sl} → {new_sl} | {result['reason']}")
