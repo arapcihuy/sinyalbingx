@@ -430,41 +430,9 @@ def calculate_smart_multi_tp_qty(balance: float, entry_price: float, sl_price: f
     # 3. Recalculate total qty after rounding
     actual_total = round(sum(final_qtys), qty_prec)
     
-    # --- DYNAMIC TP LEVEL CONSOLIDATION FOR SMALL BALANCE ---
-    # Jika margin yang dibutuhkan setelah menerapkan min_qty melebihi 85% dari saldo tersedia,
-    # kurangi level TP satu per satu dari yang terjauh demi menghindari error "Insufficient margin".
-    while True:
-        current_total_qty = sum(final_qtys)
-        if current_total_qty == 0:
-            break
-        current_required_margin = (current_total_qty * entry_price) / leverage if leverage > 0 else 0
-        if current_required_margin > (balance * 0.85) and current_required_margin > 0:
-            active_indices = [idx for idx, price in enumerate(tp_prices) if price > 0 and final_qtys[idx] > 0]
-            if len(active_indices) > 1:
-                idx_to_disable = active_indices[-1]
-                logger.info(f"⚠️ DYNAMIC CONSOLIDATION: Margin ${current_required_margin:.2f} melebihi 85% saldo tersedia (${balance:.2f}). Menonaktifkan TP{idx_to_disable+1} ({tp_prices[idx_to_disable]}) untuk mengurangi beban margin.")
-                final_qtys[idx_to_disable] = 0.0
-                continue
-            else:
-                break
-        else:
-            break
+    # [REMOVED] Dynamic TP Consolidation — TP/SL fully from TV, bot tidak modify
             
-    # [HARD LIMITER] TP/SL Clamping
-    # Membatasi TP/SL agar tidak terlalu jauh jika script TV mengirim data ngaco
-    # TP max: TP1=2.5%, TP2=3.5%, TP3=5%, TP4=8% — progressive agar tidak numpuk
-    _tp_caps = [0.025, 0.035, 0.05, 0.08]
-    for i in range(len(tp_prices)):
-        if i >= len(_tp_caps):
-            break
-        if tp_prices[i] > 0:
-            dist = abs(tp_prices[i] - entry_price)
-            cap = entry_price * _tp_caps[i]
-            if dist > cap:
-                tp_prices[i] = entry_price + cap if tp_prices[i] > entry_price else entry_price - cap
-    
-    # Apply limit if sl is provided
-    # (assuming sl is passed somewhere or handle it in order_manager)
+    # [REMOVED] Hard Limiter — TP/SL fully from TV, bot tidak clamp
             
     return {
         "qtys": final_qtys,
