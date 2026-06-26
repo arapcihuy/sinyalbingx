@@ -444,7 +444,7 @@ def calculate_smart_multi_tp_qty(balance: float, entry_price: float, sl_price: f
 def calculate_milestone_trailing_sl(current_price: float, side: str, entry_price: float, current_sl: float, tp1: float, tp2: float, tp3: float, symbol: str) -> dict:
     """
     Menghitung SL baru berdasarkan level milestone TP yang berhasil disentuh.
-    TP1 terlewati -> SL ke Entry
+    TP1 terlewati -> SL TIDAK berubah (biarkan di SL awal)
     TP2 terlewati -> SL ke TP1
     TP3 terlewati -> SL ke TP2
     """
@@ -463,10 +463,6 @@ def calculate_milestone_trailing_sl(current_price: float, side: str, entry_price
         elif tp2 > 0 and current_price >= tp2:
             new_sl = round(tp1, price_prec)
             reason = "TP2 tercapai -> SL digeser ke TP1"
-        elif tp1 > 0 and current_price >= tp1:
-            # SL ke entry - buffer kecil agar tidak sama persis dengan entry
-            new_sl = round(entry_price - sl_entry_buffer, price_prec)
-            reason = f"TP1 tercapai -> SL digeser ke Entry-buffer ({new_sl})"
         else:
             return {"should_update": False, "new_sl": current_sl, "reason": "belum menyentuh milestone"}
 
@@ -484,10 +480,6 @@ def calculate_milestone_trailing_sl(current_price: float, side: str, entry_price
         elif tp2 > 0 and current_price <= tp2:
             new_sl = round(tp1, price_prec)
             reason = "TP2 tercapai -> SL digeser ke TP1"
-        elif tp1 > 0 and current_price <= tp1:
-            # SL ke entry + buffer kecil agar tidak sama persis dengan entry
-            new_sl = round(entry_price + sl_entry_buffer, price_prec)
-            reason = f"TP1 tercapai -> SL digeser ke Entry+buffer ({new_sl})"
         else:
             return {"should_update": False, "new_sl": current_sl, "reason": "belum menyentuh milestone"}
 
