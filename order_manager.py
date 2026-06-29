@@ -867,11 +867,10 @@ def execute_signal(data: dict) -> dict:
             }
         save_active_trades()
 
-        # 1. Pasang STOP LOSS Tunggal — reduce_only agar cuma close sisa posisi
+        # 1. Pasang STOP LOSS Tunggal — positionSide sudah handle reduksi di hedge mode
         sl_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": symbol, "side": sl_side, "positionSide": pos_side,
             "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": qty,
-            "reduceOnly": True
         })
 
         if sl_res.get("code") != 0:
@@ -1150,12 +1149,15 @@ def sync_missing_tpsl():
             # Pasang Stop Loss jika belum ada
             if not has_sl and sl_price > 0:
                 logger.info(f"⚠️ {symbol} tidak punya SL. Memasang SL {sl_price}...")
-                bx._request("POST", "/openApi/swap/v2/trade/order", {
+                sl_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
                     "symbol": symbol, "side": sl_side, "positionSide": side,
                     "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": amt,
-                    "reduceOnly": True
                 })
-                results.append(f"✅ {symbol}: SL dipasang ({sl_price})")
+                if sl_res.get("code") != 0:
+                    logger.error(f"🛑 Gagal pasang SL {symbol}: code={sl_res.get('code')} msg={sl_res.get('msg')}")
+                    results.append(f"❌ {symbol}: Gagal pasang SL ({sl_res.get('msg')})")
+                else:
+                    results.append(f"✅ {symbol}: SL dipasang ({sl_price})")
             elif sl_price <= 0:
                 results.append(f"✔️ {symbol}: Tidak ada harga SL di state.")
             else:
@@ -1244,7 +1246,6 @@ def apply_manual_tpsl(symbol, tp_price, sl_price):
         bx._request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": symbol, "side": sl_side, "positionSide": pos_side,
             "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": qty,
-            "reduceOnly": True
         })
         bx._request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": symbol, "side": sl_side, "positionSide": pos_side,
@@ -1416,7 +1417,6 @@ def check_and_update_trailing_sl():
                                         "symbol": symbol, "side": "BUY" if pos_side == "SHORT" else "SELL",
                                         "positionSide": pos_side, "type": "STOP_MARKET",
                                         "stopPrice": sl_val, "quantity": qty,
-                                        "reduceOnly": True
                                     })
                                     logger.info(f"✅ Adopt SL dipasang {symbol} @ {sl_val}")
                                 
@@ -1643,7 +1643,6 @@ def check_and_update_trailing_sl():
                         sl_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
                             "symbol": symbol, "side": sl_side, "positionSide": pos_side,
                             "type": "STOP_MARKET", "stopPrice": new_sl, "quantity": qty,
-                            "reduceOnly": True
                         })
                         if sl_res.get("code", -1) == 0:
                             logger.info(f"✅ SL Berhasil digeser: {current_sl} -> {new_sl}")
