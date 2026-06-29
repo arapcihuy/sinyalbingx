@@ -1146,6 +1146,19 @@ def sync_missing_tpsl():
 
             sl_side = "SELL" if side == "LONG" else "BUY"
             
+            # Validasi SL: LONG → SL harus di bawah harga; SHORT → SL harus di atas harga
+            if sl_price > 0 and not has_sl:
+                try:
+                    curr_price = bx.get_current_price(symbol)
+                except:
+                    curr_price = entry
+                sl_invalid = (side == "LONG" and sl_price >= curr_price) or \
+                             (side == "SHORT" and sl_price <= curr_price)
+                if sl_invalid:
+                    logger.warning(f"⚠️ {symbol} SL {sl_price} invalid (harga skrg {curr_price}). Skip pasang SL.")
+                    results.append(f"⚠️ {symbol}: SL {sl_price} di {('atas' if side=='LONG' else 'bawah')} harga {curr_price}, skip.")
+                    sl_price = 0  # prevent placement below
+            
             # Pasang Stop Loss jika belum ada
             if not has_sl and sl_price > 0:
                 logger.info(f"⚠️ {symbol} tidak punya SL. Memasang SL {sl_price}...")
