@@ -867,10 +867,11 @@ def execute_signal(data: dict) -> dict:
             }
         save_active_trades()
 
-        # 1. Pasang STOP LOSS Tunggal
+        # 1. Pasang STOP LOSS Tunggal — reduce_only agar cuma close sisa posisi
         sl_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": symbol, "side": sl_side, "positionSide": pos_side,
-            "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": qty
+            "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": qty,
+            "reduceOnly": True
         })
 
         if sl_res.get("code") != 0:
@@ -1151,7 +1152,8 @@ def sync_missing_tpsl():
                 logger.info(f"⚠️ {symbol} tidak punya SL. Memasang SL {sl_price}...")
                 bx._request("POST", "/openApi/swap/v2/trade/order", {
                     "symbol": symbol, "side": sl_side, "positionSide": side,
-                    "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": amt
+                    "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": amt,
+                    "reduceOnly": True
                 })
                 results.append(f"✅ {symbol}: SL dipasang ({sl_price})")
             elif sl_price <= 0:
@@ -1241,7 +1243,8 @@ def apply_manual_tpsl(symbol, tp_price, sl_price):
         sl_side = "SELL" if pos_side == "LONG" else "BUY"
         bx._request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": symbol, "side": sl_side, "positionSide": pos_side,
-            "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": qty
+            "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": qty,
+            "reduceOnly": True
         })
         bx._request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": symbol, "side": sl_side, "positionSide": pos_side,
@@ -1412,7 +1415,8 @@ def check_and_update_trailing_sl():
                                     bx._request("POST", "/openApi/swap/v2/trade/order", {
                                         "symbol": symbol, "side": "BUY" if pos_side == "SHORT" else "SELL",
                                         "positionSide": pos_side, "type": "STOP_MARKET",
-                                        "stopPrice": sl_val, "quantity": qty
+                                        "stopPrice": sl_val, "quantity": qty,
+                                        "reduceOnly": True
                                     })
                                     logger.info(f"✅ Adopt SL dipasang {symbol} @ {sl_val}")
                                 
@@ -1620,22 +1624,26 @@ def check_and_update_trailing_sl():
                         logger.error(f"Gagal cancel SL lama {symbol}: {ce}. Tetap pasang SL baru.")
                         tp_orders = []
 
-                    # 2. Pasang SL baru — guard: jangan pasang SL di entry price
+                    # 2. Pasang SL baru — guard: SL trailing BOLEH di atas entry (lock profit)
+                    # Guard HANYA cegah SL == entry (instant fill due to spread)
                     import brain_engine as _be_trail
                     cfg = _be_trail.get_symbol_config(symbol)
                     prec = cfg.get("price_precision", 2)
                     _entry_guard = round(trade.get("entry_price", 0) * 0.0005, prec)
-                    if pos_side == "LONG" and new_sl >= trade.get("entry_price", new_sl):
-                        new_sl = round(trade.get("entry_price", new_sl) - _entry_guard, prec)
-                        logger.warning(f"🛡️ SL trail guard: adjusted to {new_sl} (was at/above entry)")
-                    elif pos_side == "SHORT" and new_sl <= trade.get("entry_price", new_sl):
-                        new_sl = round(trade.get("entry_price", new_sl) + _entry_guard, prec)
-                        logger.warning(f"🛡️ SL trail guard: adjusted to {new_sl} (was at/below entry)")
+                    _entry_price = trade.get("entry_price", 0)
+                    if pos_side == "LONG" and abs(new_sl - _entry_price) < _entry_guard:
+                        # SL terlalu dekat entry (< 0.05%) — geser sedikit ke bawah agar tidak instant fill
+                        new_sl = round(_entry_price - _entry_guard, prec)
+                        logger.warning(f"🛡️ SL trail guard: adjusted to {new_sl} (was too close to entry)")
+                    elif pos_side == "SHORT" and abs(new_sl - _entry_price) < _entry_guard:
+                        new_sl = round(_entry_price + _entry_guard, prec)
+                        logger.warning(f"🛡️ SL trail guard: adjusted to {new_sl} (was too close to entry)")
 
                     if abs(new_sl - current_sl) > (10 ** -prec):
                         sl_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
                             "symbol": symbol, "side": sl_side, "positionSide": pos_side,
-                            "type": "STOP_MARKET", "stopPrice": new_sl, "quantity": qty
+                            "type": "STOP_MARKET", "stopPrice": new_sl, "quantity": qty,
+                            "reduceOnly": True
                         })
                         if sl_res.get("code", -1) == 0:
                             logger.info(f"✅ SL Berhasil digeser: {current_sl} -> {new_sl}")
