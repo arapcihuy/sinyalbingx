@@ -192,13 +192,13 @@ def calculate_tp_sl(entry_price: float, side: str, atr: float, symbol: str, leve
             if side == "LONG":
                 min_safe_sl = est_liq * (1.0 + buffer_pct)
                 sl_price = max(sl_price, min_safe_sl)
-                # SL untuk LONG wajib di BAWAH entry (tidak boleh di atas)
-                sl_price = min(sl_price, entry_price * (1.0 - 0.001))
+                # SL untuk LONG wajib di BAWAH entry (minimum 1% dari entry)
+                sl_price = min(sl_price, entry_price * (1.0 - 0.01))
             else:
                 max_safe_sl = est_liq * (1.0 - buffer_pct)
                 sl_price = min(sl_price, max_safe_sl)
-                # SL untuk SHORT wajib di ATAS entry (tidak boleh di bawah)
-                sl_price = max(sl_price, entry_price * (1.0 + 0.001))
+                # SL untuk SHORT wajib di ATAS entry (minimum 1% dari entry)
+                sl_price = max(sl_price, entry_price * (1.0 + 0.01))
 
     # TP ikut jarak SL final → RR stabil
     risk_dist = abs(entry_price - sl_price)
