@@ -1276,7 +1276,7 @@ def check_tp_hits():
             return  # Paper mode: tidak ada order real
         
         for symbol, trade in list(active_trade_data.items()):
-            if trade.get("status") != "OPEN":
+            if trade.get("status") not in ("OPEN", "OPEN_SYNCED"):
                 continue
             
             tp_levels = {
