@@ -973,7 +973,7 @@ def audit_position_reconciliation():
         
         # Ambil posisi di log lokal
         local_trades = load_active_trades()
-        local_symbols = [sym for sym, data in local_trades.items() if data.get("status") == "OPEN"]
+        local_symbols = [sym for sym, data in local_trades.items() if data.get("status") in ("OPEN", "OPEN_SYNCED")]
         
         # Cari ketidakcocokan (mismatch)
         all_symbols = set(real_symbols + local_symbols)
