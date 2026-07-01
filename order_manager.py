@@ -634,39 +634,8 @@ def execute_signal(data: dict) -> dict:
     tp4_price = tv_tp4_price
     tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
 
-    # ── MIN SL GUARD: Safety agar SL tidak terlalu dekat ke entry ──
-    # TV SL mutlak, tapi jika terlalu deket (< min_pct) → widen ke min_pct
-    # Ini safety guard, bukan override TP/SL TV
-    if sl_price > 0 and entry_price > 0:
-        sl_pct = abs(entry_price - sl_price) / entry_price
-        # Min SL % per symbol category
-        _min_sl_map = {
-            "BTC-USDT": 0.02,   # BTC min 2%
-            "ETH-USDT": 0.03,   # ETH min 3%
-        }
-        _min_sl_pct = _min_sl_map.get(symbol, 0.025)  # default 2.5%
-        if sl_pct < _min_sl_pct:
-            old_sl = sl_price
-            if pos_side == "LONG":
-                sl_price = _round_price(entry_price * (1.0 - _min_sl_pct), symbol)
-            else:
-                sl_price = _round_price(entry_price * (1.0 + _min_sl_pct), symbol)
-            logger.warning(f"🛡️ MIN SL GUARD: {symbol} SL {old_sl} terlalu dekat ({sl_pct*100:.2f}% < {_min_sl_pct*100:.0f}%) → widen ke {sl_price}")
-            # Recalc tp_prices dari risk_dist baru agar R:R tetap sehat
-            risk_dist = abs(entry_price - sl_price)
-            if tp1_price > 0:
-                # TV kirim TP →.keep, tapi auto-gen sisanya yg 0
-                if tp2_price == 0: tp2_price = _round_price(entry_price + (risk_dist * 3.0) * (1 if pos_side == "LONG" else -1), symbol)
-                if tp3_price == 0: tp3_price = _round_price(entry_price + (risk_dist * 4.5) * (1 if pos_side == "LONG" else -1), symbol)
-                if tp4_price == 0: tp4_price = _round_price(entry_price + (risk_dist * 6.0) * (1 if pos_side == "LONG" else -1), symbol)
-            tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
-
-    try:
-        tp_mode = settings.get("tp_mode", "multiple")
-    except Exception:
-        tp_mode = "multiple"
-
-    # ── WAJIB 4 TP: Kalau ada yang kurang, auto-generate dari risk_dist ──
+    # ── TV TP/SL MUTLAK: Tidak ada MIN SL GUARD, tidak ada auto-generate TP ──
+    # TP/SL 100% dari TV. Brain engine HANYA untuk leverage + qty.
     if sl_price == 0 and tp1_price == 0:
         # TV tidak kirim TP/SL sama sekali → brain full fallback
         logger.info("📺 TV tidak kirim TP/SL, fallback ke brain engine (4 TP)")
@@ -677,34 +646,13 @@ def execute_signal(data: dict) -> dict:
         tp3_price = _round_price(float(trade_plan.get("tp3", 0)), symbol)
         tp4_price = _round_price(float(trade_plan.get("tp4", 0)), symbol)
         tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
-    elif tp1_price > 0 and sl_price > 0:
-        # TV kirim tp1+sl -> auto-generate sisanya tanpa duplikasi
-        risk_dist = abs(entry_price - sl_price)
-        if risk_dist > 0:
-            if pos_side == "LONG":
-                if tp2_price == 0: tp2_price = _round_price(entry_price + (risk_dist * 3.0), symbol)
-                if tp3_price == 0: tp3_price = _round_price(entry_price + (risk_dist * 4.5), symbol)
-                if tp4_price == 0: tp4_price = _round_price(entry_price + (risk_dist * 6.0), symbol)
-            else:
-                if tp2_price == 0: tp2_price = _round_price(entry_price - (risk_dist * 3.0), symbol)
-                if tp3_price == 0: tp3_price = _round_price(entry_price - (risk_dist * 4.5), symbol)
-                if tp4_price == 0: tp4_price = _round_price(entry_price - (risk_dist * 6.0), symbol)
-            
-        # CEK DUPLIKASI: filter tp_prices unik (set) & urutkan (sort)
-        raw_tps = [tp1_price, tp2_price, tp3_price, tp4_price]
-        # Pastikan arah TP konsisten (semua > entry untuk LONG, semua < untuk SHORT)
-        valid_tps = []
-        for p in raw_tps:
-            if p > 0:
-                if (pos_side == "LONG" and p > entry_price) or (pos_side == "SHORT" and p < entry_price):
-                    valid_tps.append(p)
-            
-        tp_list = sorted(list(set(valid_tps)), reverse=(pos_side == "SHORT"))
-        # Pad dengan 0 sampai 4
-        while len(tp_list) < 4: tp_list.append(0)
-        tp_prices = tp_list
-        tp1_price, tp2_price, tp3_price, tp4_price = tp_prices
-        logger.info(f"🎯 WAJIB 4 TP → TP1={tp1_price} TP2={tp2_price} TP3={tp3_price} TP4={tp4_price} SL={sl_price}")
+
+    try:
+        tp_mode = settings.get("tp_mode", "multiple")
+    except Exception:
+        tp_mode = "multiple"
+
+    logger.info(f"🎯 TV MUTLAK → TP1={tp1_price} TP2={tp2_price} TP3={tp3_price} TP4={tp4_price} SL={sl_price}")
 
     if brain_enabled:
         logger.info(f"🧠 BRAIN ENABLED → {symbol} pakai TV TP/SL + brain lev/margin")
@@ -715,22 +663,36 @@ def execute_signal(data: dict) -> dict:
     else:
         logger.info(f"📺 BRAIN DISABLED → {symbol} pakai TP/SL dari TV")
 
-
+    # ── LIQUIDATION GUARD: Turunkan leverage kalau SL ngelewatin liquid ──
     cfg = brain_engine.get_symbol_config(symbol)
     mmr = float(cfg.get("mmr", 0.005))
-    est_liq = brain_engine.estimate_liquidation_price(entry_price, leverage, pos_side, mmr)
-    
-    if est_liq > 0:
-        buffer_pct = settings.get("liquidation_buffer_pct", 0.10)
+    buffer_pct = settings.get("liquidation_buffer_pct", 0.10)
+    max_lev_attempts = 10
+
+    for attempt in range(max_lev_attempts):
+        est_liq = brain_engine.estimate_liquidation_price(entry_price, leverage, pos_side, mmr)
+        if est_liq <= 0:
+            break
+
         if pos_side == "LONG":
             min_safe_sl = est_liq * (1.0 + buffer_pct)
-            if sl_price <= min_safe_sl:
-                logger.warning(f"🛡️ RISK WARNING: {symbol} SL {sl_price} terlalu dekat dengan liq {est_liq} (Min aman: {min_safe_sl:.4f})")
+            if sl_price > min_safe_sl:
+                break  # AMAN
+            # SL ngelewatin liquid → turunkan leverage
+            old_lev = leverage
+            leverage = max(1, leverage - 2)
+            logger.warning(f"🛡️ LIQ GUARD: {symbol} SL {sl_price} ngelewatin liq {est_liq} → turun leverage {old_lev}x → {leverage}x")
         else:
             max_safe_sl = est_liq * (1.0 - buffer_pct)
-            if sl_price >= max_safe_sl:
-                logger.warning(f"🛡️ RISK WARNING: {symbol} SL {sl_price} terlalu dekat dengan liq {est_liq} (Max aman: {max_safe_sl:.4f})")
-        logger.info(f"🛡️ LIQ CHECK: {symbol} {pos_side} | Entry={entry_price:.4f} SL={sl_price:.4f} EstLiq={est_liq:.4f} Lev={leverage}x")
+            if sl_price < max_safe_sl:
+                break  # AMAN
+            old_lev = leverage
+            leverage = max(1, leverage - 2)
+            logger.warning(f"🛡️ LIQ GUARD: {symbol} SL {sl_price} ngelewatin liq {est_liq} → turun leverage {old_lev}x → {leverage}x")
+
+    # Final log
+    est_liq_final = brain_engine.estimate_liquidation_price(entry_price, leverage, pos_side, mmr)
+    logger.info(f"🛡️ LIQ CHECK: {symbol} {pos_side} | Entry={entry_price:.4f} SL={sl_price:.4f} Liq={est_liq_final:.4f} Lev={leverage}x")
 
     # Hitung kuantitas cerdas multi-TP dengan pengaman 50%
     calc_result = brain_engine.calculate_smart_multi_tp_qty(balance, entry_price, sl_price, tp_prices, leverage, risk_pct, symbol)
