@@ -1,0 +1,4 @@
+  File "<string>", line 5
+    script = '''#!/usr/bin/env python3
+             ^
+SyntaxError: unterminated triple-quoted string literal (detected at line 29)

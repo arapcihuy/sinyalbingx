@@ -533,7 +533,7 @@ def start_background_monitor():
                 order_manager.monitor_and_sync_positions()
             except Exception as e:
                 log.error(f"Error di background monitor loop: {e}")
-            time.sleep(15) # Jalankan setiap 15 detik
+            time.sleep(30) # ponytail: was 15s, bumped to 30s to avoid 100410 rate limit
             
     t = threading.Thread(target=monitor_loop, daemon=True)
     t.start()
@@ -613,8 +613,14 @@ def run_autonomous_self_test_loop():
                         bingx_ok = True
                         log.info(f"✅ SELF-TEST: Koneksi & API Key BingX SUKSES. Harga BTC: {price} | Saldo: {balance} USDT")
                     except Exception as bal_err:
-                        api_err_msg = f"Validasi Saldo Gagal ({str(bal_err)})"
-                        log.error(f"❌ SELF-TEST: Koneksi API OK tetapi validasi API Key / Saldo GAGAL: {bal_err}")
+                        err_str = str(bal_err)
+                        # Rate limit 100410 = temporary, jangan demote
+                        if "100410" in err_str:
+                            log.warning(f"⚠️ SELF-TEST: Rate limit BingX saat cek saldo. Dianggap OK (temporary).")
+                            bingx_ok = True
+                        else:
+                            api_err_msg = f"Validasi Saldo Gagal ({err_str})"
+                            log.error(f"❌ SELF-TEST: Koneksi API OK tetapi validasi API Key / Saldo GAGAL: {bal_err}")
                 else:
                     api_err_msg = "Harga BTC 0"
                     log.error("❌ SELF-TEST: Koneksi API BingX mengembalikan harga 0.")
