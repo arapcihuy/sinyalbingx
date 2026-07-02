@@ -335,11 +335,26 @@ def get_dynamic_risk_percent(balance: float) -> float:
     return 1.5
 
 
+def calculate_auto_leverage(balance: float, qty: float, entry_price: float, default_leverage: int) -> int:
+    """
+    Auto-bump leverage jika margin tidak cukup untuk qty yang diinginkan.
+    Return leverage baru (bisa lebih tinggi dari default).
+    ponytail: cap 50x. Naikkan jika BingX max leverage pair > 50.
+    """
+    margin_needed = (qty * entry_price) / default_leverage
+    if margin_needed > balance and balance > 0:
+        needed = int((qty * entry_price) / balance) + 1
+        needed = min(needed, 50)
+        if needed > default_leverage:
+            logger.info(f"🔄 Auto-bump leverage {default_leverage}x → {needed}x (margin ${margin_needed:.2f} > balance ${balance:.2f})")
+            return needed
+    return default_leverage
+
+
 def calculate_position_size(balance: float, entry_price: float, sl_price: float, risk_percent: float, symbol: str, leverage: int = 1) -> float:
     """
     Hitung ukuran posisi berdasarkan risk management.
     Formula: qty = (balance * risk%) / |entry - sl|
-    Ditambah pengaman leverage: qty * entry / leverage <= balance (Isolated Margin Guard)
     """
     cfg = get_symbol_config(symbol)
     price_diff = abs(entry_price - sl_price)
@@ -353,31 +368,14 @@ def calculate_position_size(balance: float, entry_price: float, sl_price: float,
     else:
         qty = risk_amount / price_diff
     
-    # 2. Leverage Guard: Pastikan margin awal (qty * entry / lev) tidak melebihi saldo tersedia
-    # Kita beri buffer: max 70% dari balance (dulu 80%) untuk satu trade tunggal agar akun aman
-    # DULUPARAMS: (balance * 0.7 * leverage) / entry_price
-    
-    # PRIORITAS CLAUDE.md: WAJIB 4 TP.
-    # Jika qty saat ini (setelah risk-based) < min_qty_tp * 4, tingkatkan.
-    desired_qty = qty # Simpan qty hasil perhitungan risk
+    # 2. Naikkan qty ke minimum 4 TP jika perlu
+    desired_qty = qty  # qty hasil perhitungan risk
     min_qty_for_4tp = cfg.get("min_qty", 0.001) * 4
     if desired_qty < min_qty_for_4tp:
-        logger.warning(f"⚠️ Qty {desired_qty:.4f} terlalu kecil untuk 4 TP (min={cfg.get('min_qty', 0.001)}). Ditingkatkan ke {min_qty_for_4tp:.4f}")
+        logger.warning(f"⚠️ Qty {desired_qty:.4f} < min 4TP ({min_qty_for_4tp}). Setting ke {min_qty_for_4tp}")
         desired_qty = min_qty_for_4tp
 
-    # Sekarang cek apakah desired_qty (untuk 4 TP) masih melanggar margin guard
-    # Jika ya, naikkan buffer margin untuk mengakomodasi 4 TP
-    max_qty_by_margin_tight = (balance * 0.7 * leverage) / entry_price
-    if desired_qty > max_qty_by_margin_tight:
-        logger.warning(f"⚠️ {symbol}: Qty {desired_qty:.4f} butuh margin lebih dari 70% saldo. Menaikkan budget margin ke 95% untuk penuhi 4 TP.")
-        max_qty_by_margin_loose = (balance * 0.95 * leverage) / entry_price
-        if desired_qty > max_qty_by_margin_loose:
-            logger.critical(f"❌ {symbol}: Bahkan dengan 95% saldo, qty {desired_qty:.4f} masih terlalu besar. Akun tidak cukup margin untuk 4 TP. Mempertahankan qty={max_qty_by_margin_loose:.4f}")
-            qty = max_qty_by_margin_loose
-        else:
-            qty = desired_qty # Gunakan desired_qty (min_qty_for_4tp)
-    else:
-        qty = desired_qty # Gunakan desired_qty
+    qty = desired_qty
 
     # 3. Apply precision & min_qty
     qty_prec = cfg.get("qty_precision", 2)

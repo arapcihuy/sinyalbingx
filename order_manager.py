@@ -555,20 +555,21 @@ def execute_signal(data: dict) -> dict:
     except Exception as slot_err:
         logger.error(f"Error checking slot management: {slot_err}")
     
-    # ── MARGIN SAFETY GUARD ──
-    # Jangan blokir total, biarkan brain_engine yang melakukan downscaling qty
-    try:
-        if not get_paper_mode():
-            balance_data = bx._request('GET', '/openApi/swap/v2/user/balance')
-            if balance_data.get("code") == 0:
-                available = float(balance_data["data"]["balance"]["availableMargin"])
-                equity = float(balance_data["data"]["balance"]["equity"])
-                if available < (equity * 0.05): # Turunkan threshold ke 5% untuk akun kecil
-                    reason = f"Margin kritis ({available:.2f}). Entry dibatalkan."
-                    logger.warning(f"⚠️ {reason}")
-                    return {"status": "low_margin", "symbol": symbol, "reason": reason}
-    except:
-        pass # Lanjut jika gagal cek balance (pakai pengaman saldo tetap)
+    # ── MARGIN SAFETY GUARD (DISABLED) ──
+    # ponytail: dulunya blokir jika available < 5% equity. User request: semua sinyal wajib masuk.
+    # Re-enable: uncomment block below jika mau batasi margin kritis.
+    # try:
+    #     if not get_paper_mode():
+    #         balance_data = bx._request('GET', '/openApi/swap/v2/user/balance')
+    #         if balance_data.get("code") == 0:
+    #             available = float(balance_data["data"]["balance"]["availableMargin"])
+    #             equity = float(balance_data["data"]["balance"]["equity"])
+    #             if available < (equity * 0.05):
+    #                 reason = f"Margin kritis ({available:.2f}). Entry dibatalkan."
+    #                 logger.warning(f"⚠️ {reason}")
+    #                 return {"status": "low_margin", "symbol": symbol, "reason": reason}
+    # except:
+    #     pass
 
     if not is_pair_eligible(symbol):
         reason = f"{symbol} diabaikan oleh scanner karena expectancy rendah / pair tidak eligible."
