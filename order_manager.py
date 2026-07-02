@@ -655,6 +655,15 @@ def execute_signal(data: dict) -> dict:
         tp3_price = _round_price(float(trade_plan.get("tp3", 0)), symbol)
         tp4_price = _round_price(float(trade_plan.get("tp4", 0)), symbol)
         tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
+    elif tp1_price == 0:
+        # TV kirim SL tapi tidak kirim TP → brain generate TP pakai SL TV
+        logger.info(f"📺 TV kirim SL={sl_price} tapi tanpa TP → brain generate 4 TP")
+        trade_plan = brain_engine.get_full_trade_plan(balance, entry_price, pos_side, symbol)
+        tp1_price = _round_price(float(trade_plan.get("tp1", 0)), symbol)
+        tp2_price = _round_price(float(trade_plan.get("tp2", 0)), symbol)
+        tp3_price = _round_price(float(trade_plan.get("tp3", 0)), symbol)
+        tp4_price = _round_price(float(trade_plan.get("tp4", 0)), symbol)
+        tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
 
     try:
         tp_mode = settings.get("tp_mode", "multiple")
