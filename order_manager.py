@@ -863,6 +863,8 @@ def execute_signal(data: dict) -> dict:
             except: pass
 
         # 2. Pasang Tiap Level TP yang Valid
+        time.sleep(1.5)  # BingX rate limit: max ~2 req/s untuk trigger orders
+
         for i, tp_price in enumerate(tp_prices):
             tp_qty = qtys[i]
             if tp_price > 0 and tp_qty > 0:

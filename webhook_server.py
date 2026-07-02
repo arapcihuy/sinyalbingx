@@ -315,18 +315,24 @@ def parse_plain_text_alert(text):
     if sl_match:
         data["sl"] = clean_number(sl_match.group(1))
 
-    # 5. Parse Take Profits (Targets: 3550.0, 3600.0, 3650.0, 3700.0)
+    # 5. Parse Take Profits — handle multiple formats
+    # Format A: Targets: 3550.0, 3600.0, 3650.0, 3700.0
     targets_match = re.search(r"(?:Targets|TPs|TP)\s*:?\s*([0-9.,\s]+)", text, re.IGNORECASE)
     if targets_match:
         raw_targets = targets_match.group(1)
-        # Pisahkan dengan koma atau spasi
         tps = [t.strip() for t in re.split(r'[, ]+', raw_targets) if t.strip()]
         for i, tp_val in enumerate(tps[:4]):
             data[f"tp{i+1}"] = clean_number(tp_val)
-    else:
-        # Fallback ke format lama TP1: 123
+    # Format B: Target 1 : 566 / Target 2 : 572 (per baris)
+    if not any(data.get(f"tp{i}") for i in range(1, 5)):
         for i in range(1, 5):
-            tp_match = re.search(rf"(?:target {i}|take profit {i}|tp{i})\s*:?\s*([0-9.,]+)", text, re.IGNORECASE)
+            tp_match = re.search(rf"(?:target\s*{i}|take\s*profit\s*{i}|tp{i})\s*:?\s*([0-9.,]+)", text, re.IGNORECASE)
+            if tp_match:
+                data[f"tp{i}"] = clean_number(tp_match.group(1))
+    # Format C: TP1: 123
+    if not any(data.get(f"tp{i}") for i in range(1, 5)):
+        for i in range(1, 5):
+            tp_match = re.search(rf"tp{i}\s*:?\s*([0-9.,]+)", text, re.IGNORECASE)
             if tp_match:
                 data[f"tp{i}"] = clean_number(tp_match.group(1))
 
