@@ -21,6 +21,14 @@ last_known_positions = {}
 _SYMBOL_PRECISION_CACHE = {}
 _LAST_KNOWN_BALANCE = None
 
+def _get_min_sl_pct(symbol):
+    """Minimum SL percent: 2% BTC, 3% ETH, 2.5% others (CLAUDE.md Min SL Guard)."""
+    if "BTC" in symbol:
+        return 0.02
+    elif "ETH" in symbol:
+        return 0.03
+    return 0.025
+
 PAPER_TRADES_FILE = "paper_trades.json"
 ACTIVE_TRADES_FILE = "active_trades.json"
 LATEST_SIGNALS_FILE = "latest_signals.json"
@@ -1078,8 +1086,9 @@ def sync_missing_tpsl():
                     logger.info(f"📥 {symbol}: TP/SL dibaca dari exchange orders (no TV signal)")
                 # Guard SL: hindari SL = entry atau nol, gunakan minimum SL percent
                 if sl_price <= 0 or abs(sl_price - entry) < 1e-8:
-                    sl_price = _round_price(entry * (1.0 - _min_sl_pct), symbol)
-                    logger.warning(f"🛡️ Adjusted SL for {symbol}: set to guard price {sl_price} (min pct {_min_sl_pct*100:.2f}%)")
+                    _min_sl = _get_min_sl_pct(symbol)
+                    sl_price = _round_price(entry * (1.0 - _min_sl), symbol)
+                    logger.warning(f"🛡️ Adjusted SL for {symbol}: set to guard price {sl_price} (min pct {_min_sl*100:.2f}%)")
                 # Guard TP: hindari TP = entry
                 for idx, tp_val in enumerate([tp1_price, tp2_price, tp3_price, tp4_price], start=1):
                     if tp_val > 0 and abs(tp_val - entry) < 1e-8:
@@ -1104,8 +1113,9 @@ def sync_missing_tpsl():
                 # Validate SL: avoid SL == entry or zero; apply minimum SL guard
                 if sl_price <= 0 or abs(sl_price - entry) < 1e-8:
                     # Calculate a safe SL using the configured minimum SL percentage
-                    sl_price = _round_price(entry * (1.0 - _min_sl_pct), symbol)
-                    logger.warning(f"🛡️ Adjusted SL for {symbol}: original SL was {plan['sl']}, set to guard price {sl_price} (min pct {_min_sl_pct*100:.2f}%)")
+                    _min_sl = _get_min_sl_pct(symbol)
+                    sl_price = _round_price(entry * (1.0 - _min_sl), symbol)
+                    logger.warning(f"🛡️ Adjusted SL for {symbol}: original SL was {plan['sl']}, set to guard price {sl_price} (min pct {_min_sl*100:.2f}%)")
 
             sl_side = "SELL" if side == "LONG" else "BUY"
             
@@ -1686,9 +1696,6 @@ def check_and_update_trailing_sl():
                     except Exception as _tp_err:
                         logger.error(f"❌ Re-TP error untuk {symbol}: {_tp_err}")
 
-
-                    logger.error(f"Gagal notif trailing SL ke Telegram: {tg_err}")
-                    
                 logger.info(f"🔄 TRAILING SL {symbol} ({mode_label}): {current_sl} → {new_sl} | {result['reason']}")
     except Exception as e:
         logger.error(f"Error check_and_update_trailing_sl: {e}")
