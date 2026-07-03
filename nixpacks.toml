@@ -1,5 +1,0 @@
-[phases.build]
-cmds = ["pip install -r requirements.txt"]
-
-[phases.start]
-cmd = "python webhook_server.py"
