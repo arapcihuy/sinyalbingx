@@ -262,8 +262,7 @@ def sync_from_exchange_on_startup():
             # Compare: jika berbeda, update
             if synced != {k: v for k, v in active_trade_data.items() if v.get("status") != "CLOSED"}:
                 active_trade_data = synced
-                with open(ACTIVE_TRADES_FILE, "w") as f:
-                    json.dump(active_trade_data, f, indent=4)
+                _atomic_write_json(ACTIVE_TRADES_FILE, active_trade_data)
                 _logger.info(f"🔄 Startup sync: updated active_trades.json ({len(synced)} positions from exchange)")
             else:
                 _logger.info("✅ Startup sync: active_trades.json already in-sync.")
@@ -845,7 +844,40 @@ def execute_signal(data: dict) -> dict:
                     tp_prices[i] = 0
                     qtys[i] = 0
 
-        # Simpan trade data ke active_trade_data HANYA ketika eksekusi bursa nyata sukses
+        # ── 1. Pasang STOP LOSS DULU (sebelum simpan state) ──
+        sl_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
+            "symbol": symbol, "side": sl_side, "positionSide": pos_side,
+            "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": qty,
+            "priceProtect": "true"
+        })
+
+        if sl_res.get("code") != 0:
+            logger.error(f"🛑 CRITICAL: Gagal pasang STOP LOSS untuk {symbol}: {sl_res.get('msg')}")
+            try:
+                r_msg = f"⚠️ *EMERGENCY: SL FAILED* ⚠️\nPair: `{symbol}`\nError: `{sl_res.get('msg')}`\n*POSISI TERBUKA TANPA PROTEKSI!*"
+                requests.post(f"https://api.telegram.org/bot{os.getenv('TELEGRAM_BOT_TOKEN')}/sendMessage",
+                              json={"chat_id": os.getenv('TELEGRAM_CHAT_ID'), "text": r_msg, "parse_mode": "Markdown"})
+            except: pass
+
+        # ── 2. Pasang Tiap Level TP ──
+        time.sleep(2)  # BingX rate limit
+
+        placed_tp = []
+        for i, tp_price in enumerate(tp_prices):
+            tp_qty = qtys[i]
+            if tp_price > 0 and tp_qty > 0:
+                tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
+                    "symbol": symbol, "side": sl_side, "positionSide": pos_side,
+                    "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price, "quantity": tp_qty,
+                    "priceProtect": "true"
+                })
+                if tp_res.get("code") == 0:
+                    placed_tp.append((tp_price, tp_qty))
+                else:
+                    logger.warning(f"🎯 Gagal pasang TP{i+1} untuk {symbol}: {tp_res.get('msg')}")
+                time.sleep(1)
+
+        # ── 3. Simpan state SETELAH orders berhasil dipasang ──
         with state_lock:
             active_trade_data[symbol] = {
                 "symbol": symbol,
@@ -869,40 +901,10 @@ def execute_signal(data: dict) -> dict:
                     "lowest_price": entry_price if pos_side == "SHORT" else 0,
                 },
                 "status": "OPEN",
+                "tp_notified": {},
                 "open_time": time.strftime("%Y-%m-%d %H:%M:%S"),
             }
         save_active_trades()
-
-        # 1. Pasang STOP LOSS Tunggal — positionSide sudah handle reduksi di hedge mode
-        sl_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
-            "symbol": symbol, "side": sl_side, "positionSide": pos_side,
-            "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": qty,
-            "priceProtect": "true"
-        })
-
-        if sl_res.get("code") != 0:
-            logger.error(f"🛑 CRITICAL: Gagal pasang STOP LOSS untuk {symbol}: {sl_res.get('msg')}")
-            # Notif Telegram Emergency
-            try:
-                r_msg = f"⚠️ *EMERGENCY: SL FAILED* ⚠️\nPair: `{symbol}`\nError: `{sl_res.get('msg')}`\n*POSISI TERBUKA TANPA PROTEKSI!*"
-                requests.post(f"https://api.telegram.org/bot{os.getenv('TELEGRAM_BOT_TOKEN')}/sendMessage",
-                              json={"chat_id": os.getenv("TELEGRAM_CHAT_ID"), "text": r_msg, "parse_mode": "Markdown"})
-            except: pass
-
-        # 2. Pasang Tiap Level TP yang Valid
-        time.sleep(2)  # BingX rate limit: hindari 100410
-
-        for i, tp_price in enumerate(tp_prices):
-            tp_qty = qtys[i]
-            if tp_price > 0 and tp_qty > 0:
-                tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
-                    "symbol": symbol, "side": sl_side, "positionSide": pos_side,
-                    "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price, "quantity": tp_qty,
-                    "priceProtect": "true"
-                })
-                if tp_res.get("code") != 0:
-                    logger.warning(f"🎯 Gagal pasang TP{i+1} untuk {symbol}: {tp_res.get('msg')}")
-                time.sleep(1)  # 1 detik antar TP order
         
         # Kirim Telegram Notif Entry Sukses
         try:
@@ -941,8 +943,7 @@ def _close_position(symbol: str) -> dict:
             if t["symbol"] == symbol and t["status"] == "OPEN_PAPER":
                 t["status"] = "CLOSED_PAPER"
                 t["close_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        with open(PAPER_TRADES_FILE, "w") as f:
-            json.dump(trades, f, indent=4)
+        _atomic_write_json(PAPER_TRADES_FILE, trades)
         return {"msg": f"Closed paper position {symbol}"}
 
     positions = bx.get_open_positions(symbol)
@@ -1178,7 +1179,8 @@ def sync_missing_tpsl():
                 sl_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
                     "symbol": symbol, "side": sl_side, "positionSide": side,
                     "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": amt,
-                })
+                        "priceProtect": "true"
+                    })
                 if sl_res.get("code") != 0:
                     logger.error(f"🛑 Gagal pasang SL {symbol}: code={sl_res.get('code')} msg={sl_res.get('msg')}")
                     results.append(f"❌ {symbol}: Gagal pasang SL ({sl_res.get('msg')})")
@@ -1243,7 +1245,8 @@ def sync_missing_tpsl():
                                 logger.info(f"⚠️ {symbol} missing TP{i+1}. Memasang TP {tp_val} (qty: {tp_qty})...")
                                 bx._request("POST", "/openApi/swap/v2/trade/order", {
                                     "symbol": symbol, "side": sl_side, "positionSide": side,
-                                    "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_val, "quantity": tp_qty
+                                    "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_val, "quantity": tp_qty,
+                                    "priceProtect": "true"
                                 })
                                 current_tp_qty += tp_qty
                                 tp_count += 1
@@ -1443,6 +1446,7 @@ def check_and_update_trailing_sl():
                                         "symbol": symbol, "side": "BUY" if pos_side == "SHORT" else "SELL",
                                         "positionSide": pos_side, "type": "STOP_MARKET",
                                         "stopPrice": sl_val, "quantity": qty,
+                                        "priceProtect": "true"
                                     })
                                     logger.info(f"✅ Adopt SL dipasang {symbol} @ {sl_val}")
                                 
@@ -1453,8 +1457,10 @@ def check_and_update_trailing_sl():
                                             bx._request("POST", "/openApi/swap/v2/trade/order", {
                                                 "symbol": symbol, "side": "BUY" if pos_side == "SHORT" else "SELL",
                                                 "positionSide": pos_side, "type": "TAKE_PROFIT_MARKET",
-                                                "stopPrice": tp_price, "quantity": tp_qty
-                                    })
+                                                "stopPrice": tp_price, "quantity": tp_qty,
+                                                "priceProtect": "true"
+                                            })
+                                            logger.info(f"✅ Adopt TP{i+1} dipasang {symbol} @ {tp_price} (qty: {tp_qty})")
                                     logger.info(f"✅ Adopt {len(tp_prices)} TP dipasang {symbol}")
                                 else:
                                     logger.info(f"ℹ️ Adopt skip — TP/SL sudah ada di bursa {symbol}")
