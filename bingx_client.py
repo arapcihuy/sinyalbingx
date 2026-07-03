@@ -318,6 +318,7 @@ def set_multi_tp_sl(
             results["tp"].append(res)
         except Exception as e:
             results["tp"].append({"error": str(e), "price": tp_price})
+        time.sleep(2)  # Rate limit: 2s gap antar order (CLAUDE.md)
 
     # ── Stop Loss (Tutup Semua Sisa Posisi) ──
     sl_params = {

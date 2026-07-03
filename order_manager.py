@@ -29,6 +29,62 @@ def _get_min_sl_pct(symbol):
         return 0.03
     return 0.025
 
+def _recalc_tp_sl_for_entry(tv_sl, tv_tps, signal_price, actual_entry, side, symbol):
+    """Recalculate TP/SL from TV signal relative to actual entry.
+    TV signals have absolute prices based on signal_price. When actual_entry
+    differs (market slippage), percentages must be preserved and reapplied.
+    Returns (sl, [tp1..tp4]) with direction validated for LONG/SHORT."""
+    if signal_price <= 0 or actual_entry <= 0:
+        return tv_sl, tv_tps
+    # If entry is very close to signal, use as-is
+    if abs(actual_entry - signal_price) / signal_price < 0.001:
+        return tv_sl, tv_tps
+    
+    result_sl = tv_sl
+    result_tps = list(tv_tps)
+    
+    # Recalc SL: convert to % from signal, apply to entry
+    if tv_sl > 0:
+        sl_pct = (tv_sl - signal_price) / signal_price
+        result_sl = _round_price(actual_entry * (1 + sl_pct), symbol)
+        # Validate direction
+        if side == "LONG" and result_sl >= actual_entry:
+            result_sl = _round_price(actual_entry * (1 - _get_min_sl_pct(symbol)), symbol)
+            logger.warning(f"⚠️ {symbol} TV SL recalc invalid (>{actual_entry} for LONG). Using min SL guard: {result_sl}")
+        elif side == "SHORT" and result_sl <= actual_entry:
+            result_sl = _round_price(actual_entry * (1 + _get_min_sl_pct(symbol)), symbol)
+            logger.warning(f"⚠️ {symbol} TV SL recalc invalid (<{actual_entry} for SHORT). Using min SL guard: {result_sl}")
+        # Min SL guard: ensure SL distance >= minimum
+        _min = _get_min_sl_pct(symbol)
+        if side == "LONG" and result_sl > 0:
+            sl_dist = (actual_entry - result_sl) / actual_entry
+            if sl_dist < _min:
+                result_sl = _round_price(actual_entry * (1 - _min), symbol)
+                logger.warning(f"⚠️ {symbol} SL too close ({sl_dist*100:.2f}% < {_min*100}%). Widened to {result_sl}")
+        elif side == "SHORT" and result_sl > 0:
+            sl_dist = (result_sl - actual_entry) / actual_entry
+            if sl_dist < _min:
+                result_sl = _round_price(actual_entry * (1 + _min), symbol)
+                logger.warning(f"⚠️ {symbol} SL too close ({sl_dist*100:.2f}% < {_min*100}%). Widened to {result_sl}")
+    
+    # Recalc TPs: same percentage approach
+    for i, tp in enumerate(tv_tps):
+        if tp > 0:
+            tp_pct = (tp - signal_price) / signal_price
+            new_tp = _round_price(actual_entry * (1 + tp_pct), symbol)
+            # Validate direction: LONG TPs above entry, SHORT TPs below
+            if side == "LONG" and new_tp <= actual_entry:
+                logger.warning(f"⚠️ {symbol} TV TP{i+1} recalc invalid (<{actual_entry} for LONG). Skipping.")
+                new_tp = 0
+            elif side == "SHORT" and new_tp >= actual_entry:
+                logger.warning(f"⚠️ {symbol} TV TP{i+1} recalc invalid (>{actual_entry} for SHORT). Skipping.")
+                new_tp = 0
+            result_tps[i] = new_tp
+    
+    if result_sl != tv_sl or any(r != t for r, t in zip(result_tps, tv_tps)):
+        logger.info(f"🔄 {symbol} TP/SL recalculated for entry {actual_entry} (was signal {signal_price})")
+    return result_sl, result_tps
+
 PAPER_TRADES_FILE = "paper_trades.json"
 ACTIVE_TRADES_FILE = "active_trades.json"
 LATEST_SIGNALS_FILE = "latest_signals.json"
@@ -212,11 +268,32 @@ def sync_from_exchange_on_startup():
                 last_signal = latest_signals.get(sym, {})
                 
                 # TP/SL: sinyal TV > state lama > exchange orders > 0
-                sl_val = float(last_signal.get("sl", 0)) or old_trade.get("sl", 0)
-                tp1_val = float(last_signal.get("tp1", 0)) or old_trade.get("tp1", 0)
-                tp2_val = float(last_signal.get("tp2", 0)) or old_trade.get("tp2", 0)
-                tp3_val = float(last_signal.get("tp3", 0)) or old_trade.get("tp3", 0)
-                tp4_val = float(last_signal.get("tp4", 0)) or old_trade.get("tp4", 0)
+                tv_sl_raw = float(last_signal.get("sl", 0))
+                tv_tp1_raw = float(last_signal.get("tp1", 0))
+                tv_signal_price = float(last_signal.get("price", 0)) or float(last_signal.get("entry_price", 0))
+                
+                if tv_sl_raw > 0 or tv_tp1_raw > 0:
+                    # TV signal ada → recalc relatif ke actual entry
+                    actual_entry = float(p.get("avgPrice", 0))
+                    tv_tps_raw = [
+                        float(last_signal.get("tp1", 0)),
+                        float(last_signal.get("tp2", 0)),
+                        float(last_signal.get("tp3", 0)),
+                        float(last_signal.get("tp4", 0)),
+                    ]
+                    sl_val, recalc_tps = _recalc_tp_sl_for_entry(
+                        tv_sl_raw, tv_tps_raw, tv_signal_price, actual_entry, side, sym
+                    )
+                    tp1_val = recalc_tps[0]
+                    tp2_val = recalc_tps[1]
+                    tp3_val = recalc_tps[2]
+                    tp4_val = recalc_tps[3]
+                else:
+                    sl_val = old_trade.get("sl", 0)
+                    tp1_val = old_trade.get("tp1", 0)
+                    tp2_val = old_trade.get("tp2", 0)
+                    tp3_val = old_trade.get("tp3", 0)
+                    tp4_val = old_trade.get("tp4", 0)
                 
                 # Jika TV & state kosong, baca ulang dari exchange orders
                 if not sl_val and not tp1_val:
@@ -875,7 +952,7 @@ def execute_signal(data: dict) -> dict:
                     placed_tp.append((tp_price, tp_qty))
                 else:
                     logger.warning(f"🎯 Gagal pasang TP{i+1} untuk {symbol}: {tp_res.get('msg')}")
-                time.sleep(1)
+                time.sleep(2)  # Rate limit: 2s gap (CLAUDE.md)
 
         # ── 3. Simpan state SETELAH orders berhasil dipasang ──
         with state_lock:
@@ -1102,12 +1179,16 @@ def sync_missing_tpsl():
             
             # TP/SL: sinyal TV (mutlak) > exchange orders (no TV) > state lama
             if tv_sl > 0 or tv_tp1 > 0:
-                # TV signal ada → gunakan TV (otoritas mutlak per CLAUDE.md)
-                sl_price = tv_sl or state_sl
-                tp1_price = tv_tp1 or state_tp1
-                tp2_price = tv_tp2 or state_tp2
-                tp3_price = tv_tp3 or state_tp3
-                tp4_price = tv_tp4 or state_tp4
+                # TV signal ada → recalc relatif ke actual entry
+                tv_signal_price = float(last_signal.get("price", 0)) or float(last_signal.get("entry_price", 0))
+                tv_tps_raw = [tv_tp1, tv_tp2, tv_tp3, tv_tp4]
+                sl_price, recalc_tps = _recalc_tp_sl_for_entry(
+                    tv_sl, tv_tps_raw, tv_signal_price, entry, side, symbol
+                )
+                tp1_price = recalc_tps[0] or state_tp1
+                tp2_price = recalc_tps[1] or state_tp2
+                tp3_price = recalc_tps[2] or state_tp3
+                tp4_price = recalc_tps[3] or state_tp4
             else:
                 # Tidak ada TV signal → baca dari exchange orders (source of truth)
                 ex_sl = 0
@@ -1415,10 +1496,14 @@ def check_and_update_trailing_sl():
                         tv_tp4 = float(last_signal.get("tp4", 0))
                         
                         if tv_sl > 0 and tv_tp1 > 0:
-                            # Gunakan TP/SL dari sinyal TV
-                            sl_val = tv_sl
-                            tp_prices = [tv_tp1, tv_tp2, tv_tp3, tv_tp4]
-                            logger.info(f"📺 Auto-adopt {symbol}: pakai TP/SL dari sinyal TV (SL={sl_val}, TP1={tv_tp1})")
+                            # Recalc TP/SL dari sinyal TV relatif ke actual entry
+                            tv_signal_price = float(last_signal.get("price", 0)) or float(last_signal.get("entry_price", 0))
+                            tv_tps_raw = [tv_tp1, tv_tp2, tv_tp3, tv_tp4]
+                            sl_val, recalc_tps = _recalc_tp_sl_for_entry(
+                                tv_sl, tv_tps_raw, tv_signal_price, avg_price, pos_side, symbol
+                            )
+                            tp_prices = recalc_tps
+                            logger.info(f"📺 Auto-adopt {symbol}: pakai TP/SL dari sinyal TV (SL={sl_val}, TP1={tp_prices[0]})")
                         else:
                             # Fallback ke brain_engine jika tidak ada sinyal TV
                             import brain_engine
@@ -1461,6 +1546,7 @@ def check_and_update_trailing_sl():
                                                 "priceProtect": "true"
                                             })
                                             logger.info(f"✅ Adopt TP{i+1} dipasang {symbol} @ {tp_price} (qty: {tp_qty})")
+                                            time.sleep(2)  # Rate limit: 2s gap (CLAUDE.md)
                                     logger.info(f"✅ Adopt {len(tp_prices)} TP dipasang {symbol}")
                                 else:
                                     logger.info(f"ℹ️ Adopt skip — TP/SL sudah ada di bursa {symbol}")
