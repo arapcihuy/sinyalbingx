@@ -29,6 +29,29 @@ def _get_min_sl_pct(symbol):
         return 0.03
     return 0.025
 
+def get_symbol_precision(symbol):
+    """Ambil presisi quantity & price langsung dari BingX atau cache."""
+    global _SYMBOL_PRECISION_CACHE
+    if symbol in _SYMBOL_PRECISION_CACHE:
+        return _SYMBOL_PRECISION_CACHE[symbol]
+    try:
+        import brain_engine
+        cfg = brain_engine.get_symbol_config(symbol)
+        precision = {
+            "qty": cfg["qty_precision"],
+            "price": cfg["price_precision"]
+        }
+        _SYMBOL_PRECISION_CACHE[symbol] = precision
+        return precision
+    except Exception as e:
+        logger.error(f"Gagal ambil precision untuk {symbol} via brain_engine: {e}")
+    return {"qty": 2, "price": 2}
+
+def _round_price(price, symbol):
+    """Round price based on symbol precision from API."""
+    prec = get_symbol_precision(symbol)
+    return round(float(price), prec["price"])
+
 def _recalc_tp_sl_for_entry(tv_sl, tv_tps, signal_price, actual_entry, side, symbol):
     """Recalculate TP/SL from TV signal relative to actual entry.
     TV signals have absolute prices based on signal_price. When actual_entry
@@ -348,35 +371,10 @@ def sync_from_exchange_on_startup():
 
 sync_from_exchange_on_startup()
 
-def get_symbol_precision(symbol):
-    """Ambil presisi quantity & price langsung dari BingX atau cache."""
-    global _SYMBOL_PRECISION_CACHE
-    if symbol in _SYMBOL_PRECISION_CACHE:
-        return _SYMBOL_PRECISION_CACHE[symbol]
-    
-    try:
-        import brain_engine
-        cfg = brain_engine.get_symbol_config(symbol)
-        precision = {
-            "qty": cfg["qty_precision"],
-            "price": cfg["price_precision"]
-        }
-        _SYMBOL_PRECISION_CACHE[symbol] = precision
-        return precision
-    except Exception as e:
-        logger.error(f"Gagal ambil precision untuk {symbol} via brain_engine: {e}")
-    
-    return {"qty": 2, "price": 2}
-
 def _round_qty(qty, symbol):
     """Round quantity based on symbol precision from API."""
     prec = get_symbol_precision(symbol)
     return round(float(qty), prec["qty"])
-
-def _round_price(price, symbol):
-    """Round price based on symbol precision from API."""
-    prec = get_symbol_precision(symbol)
-    return round(float(price), prec["price"])
 
 def get_dynamic_risk_settings(balance: float) -> dict:
     """Leverage & risk dinamis — delegasi ke brain_engine."""
