@@ -819,6 +819,32 @@ def execute_signal(data: dict) -> dict:
     order_res = bx.place_order(symbol, order_side, pos_side, qty, "MARKET")
 
     if order_res.get("code") == 0:
+        # ── Pakai actual fill price dari exchange, bukan TV price ──
+        actual_entry = float(order_res.get("data", {}).get("order", {}).get("avgPrice", 0)) or entry_price
+        if abs(actual_entry - entry_price) / max(entry_price, 1e-8) > 0.01:
+            logger.info(f"🔄 {symbol} fill price {actual_entry} berbeda dari TV price {entry_price} → pakai fill price")
+        entry_price = actual_entry
+
+        # ── DIRECTION VALIDATION: pastikan TP/SL arahnya benar vs actual fill ──
+        if pos_side == "LONG":
+            if sl_price >= entry_price:
+                logger.warning(f"🛡️ FIX: LONG SL {sl_price} >= entry {entry_price} → auto-adjust ke entry - 1%")
+                sl_price = round(entry_price * 0.99, 3)
+            for i in range(len(tp_prices)):
+                if tp_prices[i] > 0 and tp_prices[i] <= entry_price:
+                    logger.warning(f"🎯 FIX: LONG TP{i+1}={tp_prices[i]} <= entry {entry_price} → skip")
+                    tp_prices[i] = 0
+                    qtys[i] = 0
+        else:  # SHORT
+            if sl_price <= entry_price:
+                logger.warning(f"🛡️ FIX: SHORT SL {sl_price} <= entry {entry_price} → auto-adjust ke entry + 1%")
+                sl_price = round(entry_price * 1.01, 3)
+            for i in range(len(tp_prices)):
+                if tp_prices[i] > 0 and tp_prices[i] >= entry_price:
+                    logger.warning(f"🎯 FIX: SHORT TP{i+1}={tp_prices[i]} >= entry {entry_price} → skip")
+                    tp_prices[i] = 0
+                    qtys[i] = 0
+
         # Simpan trade data ke active_trade_data HANYA ketika eksekusi bursa nyata sukses
         with state_lock:
             active_trade_data[symbol] = {
@@ -851,6 +877,7 @@ def execute_signal(data: dict) -> dict:
         sl_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": symbol, "side": sl_side, "positionSide": pos_side,
             "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": qty,
+            "priceProtect": "true"
         })
 
         if sl_res.get("code") != 0:
@@ -863,17 +890,19 @@ def execute_signal(data: dict) -> dict:
             except: pass
 
         # 2. Pasang Tiap Level TP yang Valid
-        time.sleep(1.5)  # BingX rate limit: max ~2 req/s untuk trigger orders
+        time.sleep(2)  # BingX rate limit: hindari 100410
 
         for i, tp_price in enumerate(tp_prices):
             tp_qty = qtys[i]
             if tp_price > 0 and tp_qty > 0:
                 tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
                     "symbol": symbol, "side": sl_side, "positionSide": pos_side,
-                    "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price, "quantity": tp_qty
+                    "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price, "quantity": tp_qty,
+                    "priceProtect": "true"
                 })
                 if tp_res.get("code") != 0:
                     logger.warning(f"🎯 Gagal pasang TP{i+1} untuk {symbol}: {tp_res.get('msg')}")
+                time.sleep(1)  # 1 detik antar TP order
         
         # Kirim Telegram Notif Entry Sukses
         try:
