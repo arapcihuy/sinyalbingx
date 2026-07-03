@@ -13,6 +13,21 @@ import bingx_client as bx
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+# ── Notification cooldown: prevent spam from any symbol ──
+_notif_cooldown: dict[tuple[str, str], float] = {}  # {(symbol, type): last_ts}
+_NOTIF_COOLDOWN_SEC = 300  # 5 min min gap between same-type notifs per symbol
+_recently_closed: dict[str, float] = {}  # {symbol: timestamp} — prevent close→re-adopt loop
+_RECLOSE_GRACE_SEC = 600  # 10 min grace: don't re-adopt a symbol within 10 min of close notif
+
+def _should_notify(symbol: str, notif_type: str) -> bool:
+    """Return True if enough time passed since last notif of this type for this symbol."""
+    key = (symbol, notif_type)
+    last = _notif_cooldown.get(key, 0)
+    if time.time() - last < _NOTIF_COOLDOWN_SEC:
+        return False
+    _notif_cooldown[key] = time.time()
+    return True
+
 # Global State & Locks
 state_lock = threading.RLock()
 latest_signals = {}
@@ -1452,8 +1467,9 @@ def check_and_update_trailing_sl():
             for sym in list(active_trade_data.keys()):
                 if sym not in open_symbols:
                     try:
-                        if not paper_mode:
+                        if not paper_mode and _should_notify(sym, "live_close"):
                             notify_live_close(sym, active_trade_data[sym])
+                            _recently_closed[sym] = time.time()
                     except Exception as n_err:
                         logger.error(f"Error notifying live close for {sym}: {n_err}")
                     del active_trade_data[sym]
@@ -1488,6 +1504,11 @@ def check_and_update_trailing_sl():
             # 2. Proses state (DI DALAM LOCK)
             with state_lock:
                 if symbol not in active_trade_data:
+                    # Anti-loop: jangan re-adopt posisi yang baru saja di-close dalam 10 menit
+                    rc_ts = _recently_closed.get(symbol, 0)
+                    if time.time() - rc_ts < _RECLOSE_GRACE_SEC:
+                        logger.info(f"⏳ Skip auto-adopt {symbol}: baru saja di-close ({int(time.time() - rc_ts)}s lalu)")
+                        continue
                     try:
                         # Prioritas: sinyal TV terakhir > brain_engine fallback
                         last_signal = latest_signals.get(symbol, {})
@@ -1579,24 +1600,25 @@ def check_and_update_trailing_sl():
                         }
                         save_active_trades()
                         
-                        # Kirim Telegram Notif Auto-Adopt
-                        TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-                        TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", None)
-                        mode_label = "PAPER" if paper_mode else "LIVE"
-                        msg_adopt = (
-                            f"📥 *POSISI MANUAL DIADOPSI ({mode_label})*\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"🪙 *Pair:* `{symbol}` ({pos_side})\n"
-                            f"📈 *Entry:* `{avg_price}`\n"
-                            f"🛡️ *SL:* `{sl_val}`\n"
-                            f"🎯 *TP1:* `{tp_prices[0]}` | *TP2:* `{tp_prices[1]}`\n"
-                            f"🎯 *TP3:* `{tp_prices[2]}` | *TP4:* `{tp_prices[3]}`\n"
-                            f"📝 *Status:* Berhasil diadopsi & diproteksi.\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━"
-                        )
-                        import requests as r
-                        r.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                              json={"chat_id": TG_CHAT_ID, "text": msg_adopt, "parse_mode": "Markdown"}, timeout=5)
+                        # Kirim Telegram Notif Auto-Adopt (dengan cooldown anti-spam)
+                        if _should_notify(symbol, "adopt"):
+                            TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+                            TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", None)
+                            mode_label = "PAPER" if paper_mode else "LIVE"
+                            msg_adopt = (
+                                f"📥 *POSISI MANUAL DIADOPSI ({mode_label})*\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"🪙 *Pair:* `{symbol}` ({pos_side})\n"
+                                f"📈 *Entry:* `{avg_price}`\n"
+                                f"🛡️ *SL:* `{sl_val}`\n"
+                                f"🎯 *TP1:* `{tp_prices[0]}` | *TP2:* `{tp_prices[1]}`\n"
+                                f"🎯 *TP3:* `{tp_prices[2]}` | *TP4:* `{tp_prices[3]}`\n"
+                                f"📝 *Status:* Berhasil diadopsi & diproteksi.\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━"
+                            )
+                            import requests as r
+                            r.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                                  json={"chat_id": TG_CHAT_ID, "text": msg_adopt, "parse_mode": "Markdown"}, timeout=5)
                         logger.info(f"📥 AUTO-ADOPT: Posisi manual {symbol} {pos_side} diadopsi pada entry {avg_price}")
                     except Exception as adopt_err:
                         logger.error(f"Gagal auto-adopt posisi {symbol}: {adopt_err}")
@@ -1641,23 +1663,24 @@ def check_and_update_trailing_sl():
                         active_trade_data[symbol] = trade
                     save_active_trades()
 
-                    # Kirim Telegram Notif Auto-Calibration
-                    TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", None)
-                    mode_label = "PAPER" if paper_mode else "LIVE"
-                    msg_calib = (
-                        f"🔄 *KALIBRASI LEVEL TP/SL SELESAI ({mode_label})*\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🪙 *Pair:* `{symbol}`\n"
-                        f"📈 *Entry Baru:* `{avg_price}` (Slippage/Susul)\n"
-                        f"🛡️ *SL Baru:* `{trade['sl']}`\n"
-                        f"🎯 *TP1:* `{trade.get('tp1', 0)}` | *TP2:* `{trade.get('tp2', 0)}`\n"
-                        f"🎯 *TP3:* `{trade.get('tp3', 0)}` | *TP4:* `{trade.get('tp4', 0)}`\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━"
-                    )
-                    import requests as r
-                    r.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                          json={"chat_id": TG_CHAT_ID, "text": msg_calib, "parse_mode": "Markdown"}, timeout=5)
+                    # Kirim Telegram Notif Auto-Calibration (dengan cooldown)
+                    if _should_notify(symbol, "calibration"):
+                        TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+                        TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", None)
+                        mode_label = "PAPER" if paper_mode else "LIVE"
+                        msg_calib = (
+                            f"🔄 *KALIBRASI LEVEL TP/SL SELESAI ({mode_label})*\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"🪙 *Pair:* `{symbol}`\n"
+                            f"📈 *Entry Baru:* `{avg_price}` (Slippage/Susul)\n"
+                            f"🛡️ *SL Baru:* `{trade['sl']}`\n"
+                            f"🎯 *TP1:* `{trade.get('tp1', 0)}` | *TP2:* `{trade.get('tp2', 0)}`\n"
+                            f"🎯 *TP3:* `{trade.get('tp3', 0)}` | *TP4:* `{trade.get('tp4', 0)}`\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━"
+                        )
+                        import requests as r
+                        r.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                              json={"chat_id": TG_CHAT_ID, "text": msg_calib, "parse_mode": "Markdown"}, timeout=5)
                 except Exception as calib_err:
                     logger.error(f"Gagal melakukan kalibrasi {symbol}: {calib_err}")
             
@@ -1772,24 +1795,25 @@ def check_and_update_trailing_sl():
                                 active_trade_data[symbol] = trade
                             save_active_trades()
 
-                            # Kirim notifikasi Telegram HANYA saat SL benar2 berubah
-                            try:
-                                TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-                                TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", None)
-                                mode_label = "PAPER" if paper_mode else "LIVE"
-                                msg = (
-                                    f"🔄 *TRAILING STOP LOSS AKTIF ({mode_label})*\n"
-                                    f"━━━━━━━━━━━━━━━━━━━━━\n"
-                                    f"🪙 *Pair:* `{symbol}`\n"
-                                    f"🛡️ *SL Baru:* `{new_sl}`\n"
-                                    f"📝 *Alasan:* {result['reason']}\n"
-                                    f"━━━━━━━━━━━━━━━━━━━━━"
-                                )
-                                import requests as r
-                                r.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                                      json={"chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=5)
-                            except Exception as tg_err:
-                                logger.error(f"Gagal kirim notif trailing SL: {tg_err}")
+                            # Kirim notifikasi Telegram HANYA saat SL benar2 berubah + cooldown
+                            if _should_notify(symbol, "trailing_sl"):
+                                try:
+                                    TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+                                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", None)
+                                    mode_label = "PAPER" if paper_mode else "LIVE"
+                                    msg = (
+                                        f"🔄 *TRAILING STOP LOSS AKTIF ({mode_label})*\n"
+                                        f"━━━━━━━━━━━━━━━━━━━━━\n"
+                                        f"🪙 *Pair:* `{symbol}`\n"
+                                        f"🛡️ *SL Baru:* `{new_sl}`\n"
+                                        f"📝 *Alasan:* {result['reason']}\n"
+                                        f"━━━━━━━━━━━━━━━━━━━━━"
+                                    )
+                                    import requests as r
+                                    r.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                                          json={"chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=5)
+                                except Exception as tg_err:
+                                    logger.error(f"Gagal kirim notif trailing SL: {tg_err}")
                         else:
                             logger.error(f"❌ Gagal pasang SL baru {symbol}: {sl_res.get('msg')}")
                     else:
