@@ -1419,6 +1419,8 @@ def check_tp_hits():
     except Exception as e:
         logger.error(f"Error check_tp_hits: {e}")
 
+TRAILING_SKIP_SYMBOLS = {"BNB-USDT"}  # User request: skip trailing SL for BNB
+
 def check_and_update_trailing_sl():
     """
     Memantau harga real-time dan menggeser SL saat menyentuh milestone TP1/TP2/TP3.
@@ -1465,6 +1467,8 @@ def check_and_update_trailing_sl():
         
         for pos in positions:
             symbol = pos["symbol"]
+            if symbol in TRAILING_SKIP_SYMBOLS:
+                continue  # Skip trailing SL for this symbol
             pos_side = pos["positionSide"]
             qty = abs(float(pos["positionAmt"]))
             avg_price = float(pos["avgPrice"])
