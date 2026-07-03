@@ -1152,6 +1152,8 @@ def sync_missing_tpsl():
         results = []
         for pos in positions:
             symbol = pos["symbol"]
+            if symbol in TRAILING_SKIP_SYMBOLS:
+                continue  # Skip sync TP/SL for this symbol
             side = pos["positionSide"]
             amt = abs(float(pos["positionAmt"]))
             entry = float(pos["avgPrice"])
