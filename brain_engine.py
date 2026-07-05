@@ -25,6 +25,7 @@ SYMBOL_CONFIG = {
         "min_qty": 0.001,
         "qty_precision": 3,
         "price_precision": 2,
+        "min_margin": 5.0,          # BingX minimum margin per position
     },
     "ETH-USDT": {
         "atr_period": 14,
@@ -35,6 +36,7 @@ SYMBOL_CONFIG = {
         "min_qty": 0.01,
         "qty_precision": 2,
         "price_precision": 2,
+        "min_margin": 2.0,
     },
     "BNB-USDT": {
         "atr_period": 14,
@@ -45,6 +47,7 @@ SYMBOL_CONFIG = {
         "min_qty": 0.01,
         "qty_precision": 2,
         "price_precision": 2,
+        "min_margin": 1.0,
     },
 }
 
@@ -58,6 +61,7 @@ DEFAULT_CONFIG = {
     "min_qty": 0.001,
     "qty_precision": 3,
     "price_precision": 2,
+    "min_margin": 1.0,  # default min margin untuk symbol yg ga dikenal
 }
 
 # Leverage tiers berdasarkan saldo (leverage dinaikkan untuk saldo kecil agar margin cukup memasang 4 TP)
@@ -69,13 +73,15 @@ LEVERAGE_TIERS = [
     (100, 999999, 25),  # >$100 → lev 25x
 ]
 
-# Risk per trade berdasarkan saldo
-RISK_TIERS = [
-    (0, 20, 2.0),    # <$10 → risk 2%
-    (20, 50, 1.5),   # $10-25 → risk 1.5%
-    (50, 100, 1.0),  # $25-50 → risk 1%
-    (100, 999999, 1.0),  # >$50 → risk 1%
-]
+def _linear_risk_percent(balance: float) -> float:
+    """Risk% linear: 2.0% di $0, turun gradual ke 1.0% di $100, cap 1.0% di atasnya."""
+    if balance <= 20:
+        return 2.0
+    elif balance >= 100:
+        return 1.0
+    else:
+        # Linear dari 2.0% ($20) ke 1.0% ($100)
+        return 2.0 - (balance - 20) * 1.0 / 80
 
 
 _DYNAMIC_SYMBOL_CACHE = {}
@@ -329,10 +335,115 @@ def get_dynamic_risk_percent(balance: float) -> float:
     except:
         pass
         
-    for min_bal, max_bal, risk in RISK_TIERS:
-        if min_bal <= balance < max_bal:
-            return risk
-    return 1.5
+    return _linear_risk_percent(balance)
+
+
+def calculate_margin_for_position(balance: float, entry_price: float, sl_price: float, 
+                                   risk_percent: float, leverage: int, symbol: str) -> float:
+    """Hitung margin yang dibutuhkan untuk satu posisi."""
+    qty = calculate_position_size(balance, entry_price, sl_price, risk_percent, symbol, leverage)
+    return (qty * entry_price) / leverage if leverage > 0 else 0
+
+
+def get_leverage_for_min_margin(balance: float, entry_price: float, sl_price: float,
+                                 side: str, symbol: str, target_margin: float = None) -> int:
+    """
+    Hitung leverage MAXIMUM yang masih memenuhi min_margin untuk symbol ini.
+    Margin = risk_amount × entry / (sl_delta × lev)
+    Untuk margin ≥ min_margin: lev ≤ risk_amount × entry / (sl_delta × min_margin)
+    Juga mempertimbangkan liquidation safety (SL harus terpicu sebelum liq).
+    """
+    cfg = get_symbol_config(symbol)
+    min_margin = cfg.get("min_margin", 1.0)
+    mmr = float(cfg.get("mmr", 0.005))
+    
+    # Dapatkan base leverage dari safe_leverage
+    base_lev = get_safe_leverage(balance, entry_price, sl_price, side, symbol)
+    
+    # Hitung margin dengan base leverage
+    risk_pct = get_dynamic_risk_percent(balance)
+    margin = calculate_margin_for_position(balance, entry_price, sl_price, risk_pct, base_lev, symbol)
+    
+    # Jika margin sudah cukup, return base
+    if margin >= min_margin:
+        return base_lev
+    
+    # Margin kurang → perlu TURUNKAN leverage (lev lebih kecil = margin lebih besar)
+    # lev_max = risk_amount × entry / (sl_delta × min_margin)
+    
+    risk_amount = balance * (risk_pct / 100)
+    sl_delta = abs(entry_price - sl_price)
+    
+    if sl_delta <= 0 or risk_amount <= 0:
+        return base_lev
+    
+    lev_max = (risk_amount * entry_price) / (sl_delta * min_margin)
+    lev_max = int(math.floor(lev_max))
+    
+    # Gunakan lev_max (lebih kecil dari base_lev) jika memenuhi min_margin
+    if lev_max >= base_lev:
+        # Base leverage sudah cukup, tapi margin masih kurang → hitung ulang
+        # Artinya risk_amount terlalu kecil, return base_lev saja
+        return base_lev
+    
+    # Cek liquidation safety untuk lev yg lebih kecil
+    est_liq = estimate_liquidation_price(entry_price, lev_max, side, mmr)
+    if est_liq > 0:
+        buffer = 0.10  # 10% buffer dari liquidation
+        if side == "LONG":
+            min_safe_sl = est_liq * (1.0 + buffer)
+            if sl_price < min_safe_sl:
+                # Lev_max masih bikin SL dekat liq → cari lev lebih kecil
+                for test_lev in range(lev_max, 0, -1):
+                    test_liq = estimate_liquidation_price(entry_price, test_lev, side, mmr)
+                    if test_liq > 0:
+                        test_min_sl = test_liq * (1.0 + buffer)
+                        if sl_price >= test_min_sl:
+                            logger.info(f"🛡️ MIN MARGIN: {symbol} lev {test_lev}x (margin ≥ ${min_margin}, SL aman dari liq)")
+                            return test_lev
+                logger.warning(f"⚠️ {symbol} ga bisa penuhi min_margin ${min_margin} tanpa melanggar liquidation safety")
+                return base_lev
+        else:  # SHORT
+            max_safe_sl = est_liq * (1.0 - buffer)
+            if sl_price > max_safe_sl:
+                for test_lev in range(lev_max, 0, -1):
+                    test_liq = estimate_liquidation_price(entry_price, test_lev, side, mmr)
+                    if test_liq > 0:
+                        test_max_sl = test_liq * (1.0 - buffer)
+                        if sl_price <= test_max_sl:
+                            logger.info(f"🛡️ MIN MARGIN: {symbol} lev {test_lev}x (margin ≥ ${min_margin}, SL aman dari liq)")
+                            return test_lev
+                logger.warning(f"⚠️ {symbol} ga bisa penuhi min_margin ${min_margin} tanpa melanggar liquidation safety")
+                return base_lev
+    
+    logger.info(f"🔄 MIN MARGIN: {symbol} {base_lev}x → {lev_max}x (margin ${margin:.2f} → target ≥${min_margin})")
+    return lev_max
+
+
+def get_risk_for_positions(balance: float, open_positions: int, symbols: list = None) -> float:
+    """
+    Hitung risk% optimal:
+    - Linear scaling seiring balance (profit naik)
+    - Floor dari total min margin (semua coin wajib masuk)
+    """
+    if not symbols:
+        return get_dynamic_risk_percent(balance)
+    
+    total_min_margin = sum(get_symbol_config(s).get("min_margin", 1.0) for s in symbols)
+    
+    # Linear scaling: naik seiring balance
+    base_risk = 1.0 + (balance / 200)  # 1.5% di $100, 3.5% di $500
+    base_risk = min(base_risk, 5.0)
+    
+    # Min risk utk fit semua coin (20% buffer)
+    min_risk = (total_min_margin / balance) * 100 * 1.2
+    
+    # Gunakan yg LEBIH BESAR
+    risk_pct = max(min_risk, base_risk)
+    risk_pct = max(0.5, min(5.0, risk_pct))
+    
+    logger.info(f"🧠 ZERO-REJECT RISK: {len(symbols)} symbols, min_margin=${total_min_margin:.2f}, balance=${balance:.2f} → risk={risk_pct:.2f}%")
+    return risk_pct
 
 
 def calculate_auto_leverage(balance: float, qty: float, entry_price: float, default_leverage: int) -> int:
@@ -627,3 +738,72 @@ def get_full_trade_plan(balance: float, entry_price: float, side: str, symbol: s
     logger.info(f"   TP1: {tp_sl['tp1']} | TP2: {tp_sl['tp2']} | TP3: {tp_sl.get('tp3',0)} | TP4: {tp_sl.get('tp4',0)} | SL: {tp_sl['sl']} | ATR: {atr:.4f}")
     
     return plan
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Fix 2-5: Extended brain utilities
+# ─────────────────────────────────────────────────────────────────────
+
+def get_safe_leverage_with_max(balance: float, entry_price: float, sl_price: float, side: str, symbol: str) -> int:
+    """Wrap get_safe_leverage and cap at BingX max_leverage."""
+    try:
+        import bingx_client as bx
+        bx_max = bx.get_max_leverage(symbol)
+    except Exception as e:
+        logger.warning(f"⚠️ Gagal ambil max_leverage BingX: {e}, fallback 25x")
+        bx_max = 25
+
+    safe = get_safe_leverage(balance, entry_price, sl_price, side, symbol)
+    final = min(safe, bx_max) if bx_max > 0 else safe
+    logger.info(f"🛡️ SAFE_LEV_WITH_MAX: {symbol} | Safe {safe}x | BX_Max {bx_max}x | Final {final}x")
+    return final
+
+
+def calculate_slippage_adjusted_sl(entry_price: float, sl_price: float, side: str, slippage_pct: float) -> float:
+    """Adjust SL price to account for expected slippage.
+    LONG: positive slippage (higher entry) → SL moves lower (wider).
+    SHORT: positive slippage (lower entry) → SL moves higher (wider).
+    """
+    if side == "LONG":
+        # SL is below entry; widen by slippage_pct of entry
+        slippage_offset = entry_price * (slippage_pct / 100.0)
+        adjusted = sl_price - slippage_offset
+    else:
+        # SHORT: SL is above entry; widen by slippage_pct of entry
+        slippage_offset = entry_price * (slippage_pct / 100.0)
+        adjusted = sl_price + slippage_offset
+
+    logger.info(f"📉 SLIPPAGE ADJ: {side} | SL {sl_price} → {adjusted:.6f} (slip {slippage_pct}%)")
+    return adjusted
+
+
+def estimate_funding_cost(margin: float, funding_rate: float, hours_held: float) -> float:
+    """Estimate total funding cost in USDT.
+    BingX charges funding every 8h. funding_rate is per-interval (e.g. 0.0001 = 0.01%).
+    """
+    if margin <= 0 or funding_rate <= 0 or hours_held <= 0:
+        return 0.0
+
+    intervals = hours_held / 8.0
+    cost = margin * funding_rate * intervals
+    logger.info(f"💰 FUNDING COST: margin {margin} | rate {funding_rate} | {hours_held}h ({intervals:.1f}x) → {cost:.6f} USDT")
+    return cost
+
+
+def get_max_position_value(symbol: str, available_balance: float, leverage: int) -> float:
+    """Max notional value = min(balance * leverage, BingX max_notional).
+    BingX max notional derived from exchange max_leverage * balance.
+    """
+    notional_by_lev = available_balance * leverage
+
+    try:
+        import bingx_client as bx
+        bx_max_lev = bx.get_max_leverage(symbol)
+        bx_max_notional = available_balance * bx_max_lev if bx_max_lev > 0 else notional_by_lev
+    except Exception as e:
+        logger.warning(f"⚠️ Gagal ambil max_leverage BingX: {e}")
+        bx_max_notional = notional_by_lev
+
+    max_val = min(notional_by_lev, bx_max_notional)
+    logger.info(f"📊 MAX_POS_VALUE: {symbol} | Lev {leverage}x → {notional_by_lev:.2f} | BX cap → {bx_max_notional:.2f} | Final {max_val:.2f}")
+    return max_val

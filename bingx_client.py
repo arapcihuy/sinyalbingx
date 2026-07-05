@@ -370,3 +370,189 @@ def cancel_order(symbol: str, order_id: str) -> dict:
     return result
 
 
+# ─────────────────────────────────────────────
+#  CONTRACT INFO (cached 1 jam)
+# ─────────────────────────────────────────────
+
+_CONTRACT_INFO_CACHE: dict = {}  # {symbol: {"data": {...}, "ts": float}}
+_CONTRACT_CACHE_TTL = 3600  # 1 hour
+
+# BingX max leverage per coin (updated 2026-07-06). Used as fallback if API rate-limited.
+_MAX_LEVERAGE_DEFAULTS = {
+    "BTC-USDT": 150, "ETH-USDT": 100, "SOL-USDT": 100,
+    "XRP-USDT": 125, "BNB-USDT": 75, "ADA-USDT": 100,
+    "DOGE-USDT": 75, "AVAX-USDT": 75, "LINK-USDT": 75,
+    "DOT-USDT": 75, "MATIC-USDT": 75, "UNI-USDT": 75,
+}
+
+
+def get_contract_info(symbol: str) -> dict:
+    """
+    Ambil detail contract (min_qty, min_notional, max_leverage, dll).
+    Hasil di-cache selama 1 jam.
+    """
+    import logging as _log
+    _logger = _log.getLogger(__name__)
+
+    now = time.time()
+    cached = _CONTRACT_INFO_CACHE.get(symbol)
+    if cached and (now - cached["ts"]) < _CONTRACT_CACHE_TTL:
+        return cached["data"]
+
+    try:
+        # /quote/contracts returns a LIST, filter by symbol
+        result = _request("GET", "/openApi/swap/v2/quote/contracts", {"symbol": symbol})
+        if result.get("code") != 0:
+            _logger.error(f"⚠️ Gagal ambil contract info {symbol}: {result}")
+            return {}
+
+        data_raw = result.get("data", [])
+        # API returns list — find our symbol
+        raw = {}
+        if isinstance(data_raw, list):
+            for item in data_raw:
+                if item.get("symbol") == symbol:
+                    raw = item
+                    break
+            if not raw and data_raw:
+                raw = data_raw[0]  # fallback
+        elif isinstance(data_raw, dict):
+            raw = data_raw
+
+        info = {
+            "min_qty": float(raw.get("tradeMinQuantity", 0)),
+            "min_notional": float(raw.get("tradeMinUSDT", 0)),
+            "max_leverage": 0,  # will fill from /trade/leverage below
+            "price_precision": int(raw.get("pricePrecision", 1)),
+            "quantity_precision": int(raw.get("quantityPrecision", 3)),
+            "maint_margin_rate": float(raw.get("maintainMarginRate", 0)),
+        }
+
+        # Fetch max leverage from /trade/leverage (not in /quote/contracts)
+        # This endpoint is heavily rate-limited. Use hardcoded fallback if API fails.
+        info["max_leverage"] = _MAX_LEVERAGE_DEFAULTS.get(symbol, 25)
+        for _lev_attempt in range(2):
+            try:
+                time.sleep(1)
+                lev_res = _request("GET", "/openApi/swap/v2/trade/leverage", {"symbol": symbol, "side": "LONG"})
+                if lev_res.get("code") == 0:
+                    lev_data = lev_res.get("data", {})
+                    api_max = int(lev_data.get("maxLongLeverage", 0))
+                    if api_max > 0:
+                        info["max_leverage"] = api_max
+                        _logger.info(f"📊 MAX_LEV {symbol}: {api_max}x (from API)")
+                    break
+                elif lev_res.get("code") == 100410:  # rate limit
+                    _logger.debug(f"⏳ Rate limited on leverage {symbol}, using default={info['max_leverage']}x")
+                    break
+            except Exception:
+                pass
+
+        _CONTRACT_INFO_CACHE[symbol] = {"data": info, "ts": now}
+        return info
+
+    except Exception as e:
+        _logger.error(f"❌ Error get_contract_info({symbol}): {e}")
+        return {}
+
+
+def get_max_leverage(symbol: str) -> int:
+    """Return max_leverage dari contract info."""
+    info = get_contract_info(symbol)
+    return info.get("max_leverage", 0)
+
+
+def get_min_notional(symbol: str) -> float:
+    """Return min_notional dari contract info."""
+    info = get_contract_info(symbol)
+    return info.get("min_notional", 0)
+
+
+# ─────────────────────────────────────────────
+#  FUNDING RATE
+# ─────────────────────────────────────────────
+
+def get_funding_rate(symbol: str) -> float:
+    """Ambil funding rate saat ini untuk symbol."""
+    import logging as _log
+    _logger = _log.getLogger(__name__)
+
+    try:
+        result = _request("GET", "/openApi/swap/v2/quote/premiumIndex", {"symbol": symbol})
+        if result.get("code") == 0:
+            data = result.get("data", {})
+            return float(data.get("lastFundingRate", 0))
+        _logger.warning(f"⚠️ Gagal ambil funding rate {symbol}: {result}")
+        return 0.0
+    except Exception as e:
+        _logger.error(f"❌ Error get_funding_rate({symbol}): {e}")
+        return 0.0
+
+
+# ─────────────────────────────────────────────
+#  ORDER BOOK
+# ─────────────────────────────────────────────
+
+def get_order_book(symbol: str, limit: int = 5) -> dict:
+    """Ambil order book. Return {bids: [[price, qty], ...], asks: [...]}."""
+    import logging as _log
+    _logger = _log.getLogger(__name__)
+
+    try:
+        result = _request("GET", "/openApi/swap/v2/quote/depth", {
+            "symbol": symbol,
+            "limit": limit,
+        })
+        if result.get("code") == 0:
+            data = result.get("data", {})
+            return {
+                "bids": data.get("bids", []),
+                "asks": data.get("asks", []),
+            }
+        _logger.warning(f"⚠️ Gagal ambil order book {symbol}: {result}")
+        return {"bids": [], "asks": []}
+    except Exception as e:
+        _logger.error(f"❌ Error get_order_book({symbol}): {e}")
+        return {"bids": [], "asks": []}
+
+
+def check_order_book_depth(symbol: str, side: str, qty: float) -> dict:
+    """
+    Analisis order book untuk estimasi slippage.
+    side: 'BUY' (ambil dari asks) atau 'SELL' (ambil dari bids).
+    Return: {estimated_slippage_pct, fillable_at_price, enough_liquidity}
+    """
+    book = get_order_book(symbol, limit=20)
+    levels = book["asks"] if side.upper() == "BUY" else book["bids"]
+
+    if not levels:
+        return {"estimated_slippage_pct": 0.0, "fillable_at_price": 0.0, "enough_liquidity": False}
+
+    # levels: [[price, qty], ...]
+    best_price = float(levels[0][0])
+    remaining = qty
+    worst_price = best_price
+
+    for price_str, qty_str in levels:
+        price = float(price_str)
+        level_qty = float(qty_str)
+        if remaining <= 0:
+            break
+        worst_price = price
+        remaining -= level_qty
+
+    # slippage dari best price
+    if best_price > 0:
+        slippage_pct = abs(worst_price - best_price) / best_price * 100
+    else:
+        slippage_pct = 0.0
+
+    enough = remaining <= 0
+
+    return {
+        "estimated_slippage_pct": round(slippage_pct, 4),
+        "fillable_at_price": worst_price,
+        "enough_liquidity": enough,
+    }
+
+

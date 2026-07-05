@@ -605,11 +605,17 @@ def execute_signal(data: dict) -> dict:
         try:
             live_pos = bx.get_open_positions(symbol)
             # Update state file dari kenyataan di bursa
-            if not live_pos:
-                with state_lock:
-                    if symbol in active_trade_data:
+            if not live_pos and symbol in active_trade_data:
+                # Hanya hapus jika posisi sudah ada > 10 detik (hindari race condition API delay)
+                created_at = active_trade_data[symbol].get("created_at", 0)
+                age = time.time() - created_at if created_at > 0 else 999
+                if age > 10:
+                    logger.info(f"🗑️ SYNC: {symbol} tidak ada di BingX ({age:.0f}s old) → hapus dari state")
+                    with state_lock:
                         del active_trade_data[symbol]
-                save_active_trades()
+                    save_active_trades()
+                else:
+                    logger.info(f"⏳ SYNC: {symbol} belum muncul di BingX ({age:.0f}s old) → biarkan")
         except:
             pass
     
@@ -761,17 +767,65 @@ def execute_signal(data: dict) -> dict:
 
     logger.info(f"🎯 TV MUTLAK → TP1={tp1_price} TP2={tp2_price} TP3={tp3_price} TP4={tp4_price} SL={sl_price}")
 
+    # ── Symbol config (needed by brain block + liquidation guard) ──
+    cfg = brain_engine.get_symbol_config(symbol)
+
+    # ── Hitung available balance SELALU (di luar brain block) ──
+    used_margin = 0
+    for sym, pos in active_trade_data.items():
+        if sym != symbol:  # jangan double count
+            m = pos.get("margin", 0)
+            if m > 0:
+                used_margin += m
+    available = balance - used_margin
+    if available < 0:
+        available = 0
+
     if brain_enabled:
         logger.info(f"🧠 BRAIN ENABLED → {symbol} pakai TV TP/SL + brain lev/margin")
-        # Brain penuh hitung leverage — TV leverage diabaikan
-        leverage = brain_engine.get_safe_leverage(balance, entry_price, sl_price, pos_side, symbol)
-        risk_pct = float(brain_engine.get_dynamic_risk_percent(balance))
-        logger.info(f"🧠 BRAIN LEV: {leverage}x | Risk: {risk_pct}%")
+        # Brain penuh hitung leverage — pertimbangkan min margin & posisi lain
+        
+        # Hitung jumlah posisi aktif + symbol ini
+        active_symbols = list(active_trade_data.keys()) if active_trade_data else []
+        if symbol not in active_symbols:
+            active_symbols.append(symbol)
+        open_count = len(active_symbols)
+        
+        # Risk% disesuaikan jumlah posisi & sisa margin
+        risk_pct = float(brain_engine.get_risk_for_positions(available, open_count, active_symbols))
+        
+        # Leverage disesuaikan utk target margin (2x risk_amount, min = min_margin)
+        risk_amount = available * risk_pct / 100
+        sl_delta = abs(entry_price - sl_price)
+        min_margin = cfg.get("min_margin", 1.0)
+        max_lev = cfg.get("max_lev", 50)
+        
+        # Target margin = 2x risk_amount (biar margin naik seiring balance)
+        target_margin = max(risk_amount * 2, min_margin)
+        
+        # lev = risk_amount × entry / (sl_delta × target_margin)
+        if sl_delta > 0 and target_margin > 0:
+            lev_for_target = int((risk_amount * entry_price) / (sl_delta * target_margin))
+            lev_for_target = max(1, min(lev_for_target, max_lev))
+        else:
+            lev_for_target = 20
+        
+        # Cek margin
+        qty = risk_amount / sl_delta if sl_delta > 0 else 0
+        margin = (qty * entry_price) / lev_for_target if lev_for_target > 0 else 0
+        
+        # Kalau margin < min_margin, turunin lev
+        if margin < min_margin:
+            leverage = brain_engine.get_leverage_for_min_margin(available, entry_price, sl_price, pos_side, symbol)
+        else:
+            leverage = lev_for_target
+        
+        logger.info(f"🧠 BRAIN LEV: {leverage}x | Risk: {risk_pct}% | Open: {open_count} | Available: ${available:.2f}")
     else:
         logger.info(f"📺 BRAIN DISABLED → {symbol} pakai TP/SL dari TV")
 
     # ── LIQUIDATION GUARD: Turunkan leverage kalau SL ngelewatin liquid ──
-    cfg = brain_engine.get_symbol_config(symbol)
+    # cfg already loaded above (before brain block)
     mmr = float(cfg.get("mmr", 0.005))
     buffer_pct = settings.get("liquidation_buffer_pct", 0.10)
     max_lev_attempts = 10
@@ -801,10 +855,27 @@ def execute_signal(data: dict) -> dict:
     est_liq_final = brain_engine.estimate_liquidation_price(entry_price, leverage, pos_side, mmr)
     logger.info(f"🛡️ LIQ CHECK: {symbol} {pos_side} | Entry={entry_price:.4f} SL={sl_price:.4f} Liq={est_liq_final:.4f} Lev={leverage}x")
 
-    # Hitung kuantitas cerdas multi-TP dengan pengaman 50%
-    calc_result = brain_engine.calculate_smart_multi_tp_qty(balance, entry_price, sl_price, tp_prices, leverage, risk_pct, symbol)
+    # Hitung kuantitas cerdas multi-TP — pakai available (bukan balance) supaya margin ga meledak
+    _qty_balance = available if brain_enabled else balance
+    calc_result = brain_engine.calculate_smart_multi_tp_qty(_qty_balance, entry_price, sl_price, tp_prices, leverage, risk_pct, symbol)
     qtys = calc_result["qtys"]
     qty = calc_result["total_qty"]
+
+    # ── MARGIN CAP: Max 40% available per posisi, biar sisa muat koin lain ──
+    if brain_enabled and available > 0:
+        max_margin_per_pos = available * 0.40
+        actual_margin = calc_result["margin"]
+        if actual_margin > max_margin_per_pos and actual_margin > 0:
+            # Turunkan lev proporsional sampai margin muat
+            ratio = max_margin_per_pos / actual_margin
+            new_lev = max(1, int(leverage / ratio))
+            if new_lev != leverage:
+                leverage = new_lev
+                # Recalculate qty dengan lev baru
+                calc_result = brain_engine.calculate_smart_multi_tp_qty(_qty_balance, entry_price, sl_price, tp_prices, leverage, risk_pct, symbol)
+                qtys = calc_result["qtys"]
+                qty = calc_result["total_qty"]
+                logger.info(f"🎯 MARGIN CAP: {symbol} lev {leverage}x | margin ${calc_result['margin']:.2f} ≤ ${max_margin_per_pos:.2f} (40% of ${available:.2f})")
 
     # ── POST-QTY DEDUP: brain_engine hard limiter bisa menyamakan harga TP → dedup lagi ──
     seen_prices = set()
@@ -833,6 +904,52 @@ def execute_signal(data: dict) -> dict:
         reason = f"Saldo tersedia ${balance:.2f} terlalu kecil untuk qty minimum {symbol}."
         logger.warning(f"🚫 {reason} Mengabaikan sinyal.")
         return {"status": "insufficient_balance", "symbol": symbol, "reason": reason}
+    
+    # ── MIN MARGIN CHECK: Pastikan margin memenuhi minimum BingX ──
+    actual_margin = (qty * entry_price) / leverage if leverage > 0 else 0
+    min_margin = cfg.get("min_margin", 1.0)
+    if actual_margin < min_margin and available > 0:
+        # Coba bump leverage sekali lagi
+        lev_bumped = brain_engine.get_leverage_for_min_margin(available, entry_price, sl_price, pos_side, symbol)
+        if lev_bumped > leverage:
+            leverage = lev_bumped
+            actual_margin = (qty * entry_price) / leverage
+            logger.info(f"🔄 MIN MARGIN BUMP: {symbol} lev {leverage}x → margin ${actual_margin:.2f} (min ${min_margin})")
+        
+        if actual_margin < min_margin:
+            # Zero rejection: tetap coba buka, BingX yg tentukan
+            logger.warning(f"⚠️ MIN MARGIN: {symbol} margin ${actual_margin:.2f} < min ${min_margin} — tetap coba, BingX yg reject kalau ga cukup")
+    
+    # ── NOTIONAL CHECK: Pastikan notional memenuhi minimum BingX ──
+    notional = qty * entry_price
+    try:
+        min_notional = bx.get_min_notional(symbol)
+        if min_notional > 0 and notional < min_notional:
+            # Bump qty untuk memenuhi min notional
+            min_qty_for_notional = math.ceil(min_notional / entry_price * 10**cfg.get("qty_precision", 3)) / 10**cfg.get("qty_precision", 3)
+            logger.info(f"📐 NOTIONAL BUMP: {symbol} notional ${notional:.2f} < min ${min_notional} → qty {qty} → {min_qty_for_notional}")
+            qty = min_qty_for_notional
+            notional = qty * entry_price
+            # Recalculate qtys proportionally
+            old_total = sum(qtys) or 1
+            for i in range(len(qtys)):
+                qtys[i] = round(qtys[i] / old_total * qty, cfg.get("qty_precision", 3))
+            remaining = qty - sum(qtys)
+            qtys[0] = round(qtys[0] + remaining, cfg.get("qty_precision", 3))  # absorb rounding to TP1
+        logger.info(f"📐 NOTIONAL: {symbol} qty={qty} × entry={entry_price} = ${notional:.2f} (min=${min_notional})")
+    except Exception as n_err:
+        logger.warning(f"⚠️ Gagal cek min_notional {symbol}: {n_err}")
+    
+    # ── MAX LEVERAGE CAP ──
+    try:
+        max_lev = bx.get_max_leverage(symbol)
+        if max_lev > 0 and leverage > max_lev:
+            logger.warning(f"📐 LEV CAP: {symbol} lev {leverage}x > max {max_lev}x → cap ke {max_lev}x")
+            leverage = max_lev
+            actual_margin = (qty * entry_price) / leverage if leverage > 0 else 0
+        logger.info(f"📐 LEVERAGE: {symbol} {leverage}x (max={max_lev}x) margin=${actual_margin:.2f}")
+    except Exception as l_err:
+        logger.warning(f"⚠️ Gagal cek max_leverage {symbol}: {l_err}")
     
     # ATR untuk trailing
     atr = entry_price * 0.01  # fallback 1%
@@ -864,9 +981,11 @@ def execute_signal(data: dict) -> dict:
         save_paper_trade(trade)
         
         # Simpan trade data ke active_trade_data hanya untuk paper
+        _paper_margin = (qty * entry_price) / leverage if leverage > 0 else 0
         with state_lock:
             active_trade_data[symbol] = {
                 "symbol": symbol,
+                "created_at": time.time(),
                 "side": pos_side,
                 "entry_price": entry_price,
                 "sl": sl_price,
@@ -877,6 +996,7 @@ def execute_signal(data: dict) -> dict:
                 "qtys": qtys,
                 "qty": qty,
                 "leverage": leverage,
+                "margin": _paper_margin,
                 "risk_pct": risk_pct,
                 "atr": atr,
                 "trailing": {
@@ -909,10 +1029,24 @@ def execute_signal(data: dict) -> dict:
 
     if order_res.get("code") == 0:
         # ── Pakai actual fill price dari exchange, bukan TV price ──
+        tv_entry = entry_price  # simpan TV price sebelum overwrite
         actual_entry = float(order_res.get("data", {}).get("order", {}).get("avgPrice", 0)) or entry_price
         if abs(actual_entry - entry_price) / max(entry_price, 1e-8) > 0.01:
             logger.info(f"🔄 {symbol} fill price {actual_entry} berbeda dari TV price {entry_price} → pakai fill price")
         entry_price = actual_entry
+
+        # ── SLIPPAGE-ADJUSTED TP/SL: shift semua TP/SL oleh delta actual vs TV ──
+        slippage_pct = abs(actual_entry - tv_entry) / max(tv_entry, 1e-8) * 100
+        if slippage_pct > 0.05:
+            delta = actual_entry - tv_entry  # positif = worse fill
+            sl_price = round(sl_price + delta, 3)
+            for i in range(len(tp_prices)):
+                if tp_prices[i] > 0:
+                    tp_prices[i] = round(tp_prices[i] + delta, 3)
+            tp1_price, tp2_price, tp3_price, tp4_price = tp_prices[:4]
+            logger.info(f"🎯 SLIPPAGE ADJUST: {symbol} TV={tv_entry} Actual={actual_entry} Delta=${delta:.4f} → TP/SL shifted ({slippage_pct:.4f}%)")
+        elif tv_entry != actual_entry:
+            logger.info(f"📐 SLIPPAGE OK: {symbol} {slippage_pct:.4f}% < 0.05% — no TP/SL adjust needed")
 
         # ── DIRECTION VALIDATION: pastikan TP/SL arahnya benar vs actual fill ──
         if pos_side == "LONG":
@@ -968,6 +1102,7 @@ def execute_signal(data: dict) -> dict:
                 time.sleep(2)  # Rate limit: 2s gap (CLAUDE.md)
 
         # ── 3. Simpan state SETELAH orders berhasil dipasang ──
+        _live_margin = (qty * entry_price) / leverage if leverage > 0 else 0
         with state_lock:
             active_trade_data[symbol] = {
                 "symbol": symbol,
@@ -981,8 +1116,10 @@ def execute_signal(data: dict) -> dict:
                 "qtys": qtys,
                 "qty": qty,
                 "leverage": leverage,
+                "margin": _live_margin,
                 "risk_pct": risk_pct,
                 "atr": atr,
+                "created_at": time.time(),
                 "trailing": {
                     "activate_atr_mult": 1.0,
                     "offset_atr_mult": 0.5,
@@ -1141,6 +1278,20 @@ def monitor_and_sync_positions():
         audit_position_reconciliation()  # 🔄 Audit rekonsiliasi posisi bursa vs lokal
     except Exception as e:
         logger.error(f"Error monitor reconciliation: {e}")
+
+    # ── FUNDING RATE CHECK: monitor biaya funding untuk posisi aktif ──
+    # TODO: implement check_funding_exposure() — loop posisi aktif,
+    #       hit bx.get_funding_rate(symbol), log peringatan jika rate > 0.01%,
+    #       dan auto-close jika kumulatif funding melebihi threshold.
+    #       Funding rate di BingX dikenakan setiap 8 jam (00:00, 08:00, 16:00 UTC).
+    #       Contoh integrasi:
+    #       try:
+    #           for pos in bx.get_open_positions():
+    #               rate = bx.get_funding_rate(pos["symbol"])
+    #               if abs(rate) > 0.0001:  # >0.01%
+    #                   logger.warning(f"💰 HIGH FUNDING: {pos['symbol']} rate={rate*100:.4f}%")
+    #       except Exception as e:
+    #           logger.error(f"Error monitor funding check: {e}")
 
 def sync_missing_tpsl():
     """Cek semua posisi aktif, jika ada yang tidak punya TP atau SL, pasang otomatis secara granular."""
