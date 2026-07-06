@@ -445,7 +445,7 @@ class Handler(BaseHTTPRequestHandler):
                 # 1. Validasi Keamanan REDACTED_WEBHOOK_SECRET (JSON atau query params)
                 import secrets
                 incoming_secret = data.get("secret") or query_params.get("secret") or ""
-                expected_secret = os.getenv("REDACTED_WEBHOOK_SECRET", "")
+                expected_secret = os.getenv("WEBHOOK_SECRET", "")
                 if not expected_secret:
                     log.error("REDACTED_WEBHOOK_SECRET is not configured in environment. Rejecting request for security.")
                     self._respond(500, {"error": "Internal Server Error: Webhook configuration missing"})
