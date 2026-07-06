@@ -814,6 +814,12 @@ def execute_signal(data: dict) -> dict:
                     leverage = safe_lev
                     _liq_safe_lev = safe_lev
 
+    # ── NO-SL FALLBACK: Tanpa SL, LIQ GUARD tidak bisa hitung → cap agresif ──
+    if sl_price <= 0 and leverage > 10:
+        logger.warning(f"🛡️ NO SL for {symbol} → cap leverage dari {leverage}x ke 10x (tanpa proteksi)")
+        leverage = 10
+        _liq_safe_lev = 10
+
     est_liq_final = brain_engine.estimate_liquidation_price(entry_price, leverage, pos_side, mmr)
     logger.info(f"🛡️ LIQ CHECK: {symbol} {pos_side} | Entry={entry_price:.4f} SL={sl_price:.4f} Liq={est_liq_final:.4f} Lev={leverage}x")
 

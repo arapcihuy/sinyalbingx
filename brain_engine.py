@@ -466,6 +466,7 @@ def calculate_position_size(balance: float, entry_price: float, sl_price: float,
     """
     Hitung ukuran posisi berdasarkan risk management.
     Formula: qty = (balance * risk%) / |entry - sl|
+    Caps qty agar margin tidak melebihi 40% balance.
     """
     cfg = get_symbol_config(symbol)
     price_diff = abs(entry_price - sl_price)
@@ -479,7 +480,15 @@ def calculate_position_size(balance: float, entry_price: float, sl_price: float,
     else:
         qty = risk_amount / price_diff
     
-    # 2. Naikkan qty ke minimum 4 TP jika perlu
+    # 2. MARGIN CAP: pastikan margin tidak melebihi 40% balance
+    if leverage > 0 and entry_price > 0:
+        max_margin = balance * 0.40
+        margin = (qty * entry_price) / leverage
+        if margin > max_margin and margin > 0:
+            qty = (max_margin * leverage) / entry_price
+            logger.info(f"📐 QTY CAP: {symbol} margin ${margin:.2f} > 40% (${max_margin:.2f}) → qty capped ke {qty:.6f}")
+    
+    # 3. Naikkan qty ke minimum 4 TP jika perlu
     desired_qty = qty  # qty hasil perhitungan risk
     min_qty_for_4tp = cfg.get("min_qty", 0.001) * 4
     if desired_qty < min_qty_for_4tp:
@@ -488,7 +497,7 @@ def calculate_position_size(balance: float, entry_price: float, sl_price: float,
 
     qty = desired_qty
 
-    # 3. Apply precision & min_qty
+    # 4. Apply precision & min_qty
     qty_prec = cfg.get("qty_precision", 2)
     qty = round(float(qty), qty_prec)
     qty = max(qty, cfg.get("min_qty", 0.001))
