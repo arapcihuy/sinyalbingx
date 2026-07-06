@@ -300,7 +300,7 @@ def sync_from_exchange_on_startup():
                 sym = p["symbol"]
                 amt = float(p["positionAmt"])
                 if amt == 0: continue
-                side = "LONG" if amt > 0 else "SHORT"
+                side = p.get("positionSide", "LONG" if amt > 0 else "SHORT")
                 # Preserve TP/SL: prioritas dari sinyal TV terakhir, lalu state lama
                 old_trade = active_trade_data.get(sym, {})
                 last_signal = latest_signals.get(sym, {})
