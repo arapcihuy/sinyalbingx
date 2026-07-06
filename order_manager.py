@@ -824,34 +824,35 @@ def execute_signal(data: dict) -> dict:
     else:
         logger.info(f"📺 BRAIN DISABLED → {symbol} pakai TP/SL dari TV")
 
-    # ── LIQUIDATION GUARD: Turunkan leverage kalau SL ngelewatin liquid ──
-    # cfg already loaded above (before brain block)
+    # ── LIQUIDATION GUARD: Pastikan SL trigger SEBELUM liquidation ──
+    # ponytail: iterate -2 per step terlalu lambat (150x→130x). Hitung langsung.
     mmr = float(cfg.get("mmr", 0.005))
     buffer_pct = settings.get("liquidation_buffer_pct", 0.10)
-    max_lev_attempts = 10
 
-    for attempt in range(max_lev_attempts):
-        est_liq = brain_engine.estimate_liquidation_price(entry_price, leverage, pos_side, mmr)
-        if est_liq <= 0:
-            break
+    if sl_price > 0 and entry_price > 0 and leverage > 1:
+        if pos_side == "SHORT":
+            # liq = entry * (1 + 1/lev - mmr). Need liq > sl * (1+buf)
+            # → lev < 1 / (sl*(1+buf)/entry - 1 + mmr)
+            sl_adj = sl_price * (1.0 + buffer_pct)
+            denom = sl_adj / entry_price - 1.0 + mmr
+            if denom > 0:
+                safe_lev = int(1.0 / denom)
+                safe_lev = max(1, safe_lev)
+                if leverage > safe_lev:
+                    logger.warning(f"🛡️ LIQ GUARD: {symbol} SHORT lev {leverage}x → liq dekat SL. Safe max = {safe_lev}x → cap")
+                    leverage = safe_lev
+        else:  # LONG
+            # liq = entry * (1 - 1/lev + mmr). Need liq < sl * (1-buf)
+            # → lev < 1 / (1 - sl*(1-buf)/entry + mmr)
+            sl_adj = sl_price * (1.0 - buffer_pct)
+            denom = 1.0 - sl_adj / entry_price + mmr
+            if denom > 0:
+                safe_lev = int(1.0 / denom)
+                safe_lev = max(1, safe_lev)
+                if leverage > safe_lev:
+                    logger.warning(f"🛡️ LIQ GUARD: {symbol} LONG lev {leverage}x → liq dekat SL. Safe max = {safe_lev}x → cap")
+                    leverage = safe_lev
 
-        if pos_side == "LONG":
-            min_safe_sl = est_liq * (1.0 + buffer_pct)
-            if sl_price > min_safe_sl:
-                break  # AMAN
-            # SL ngelewatin liquid → turunkan leverage
-            old_lev = leverage
-            leverage = max(1, leverage - 2)
-            logger.warning(f"🛡️ LIQ GUARD: {symbol} SL {sl_price} ngelewatin liq {est_liq} → turun leverage {old_lev}x → {leverage}x")
-        else:
-            max_safe_sl = est_liq * (1.0 - buffer_pct)
-            if sl_price < max_safe_sl:
-                break  # AMAN
-            old_lev = leverage
-            leverage = max(1, leverage - 2)
-            logger.warning(f"🛡️ LIQ GUARD: {symbol} SL {sl_price} ngelewatin liq {est_liq} → turun leverage {old_lev}x → {leverage}x")
-
-    # Final log
     est_liq_final = brain_engine.estimate_liquidation_price(entry_price, leverage, pos_side, mmr)
     logger.info(f"🛡️ LIQ CHECK: {symbol} {pos_side} | Entry={entry_price:.4f} SL={sl_price:.4f} Liq={est_liq_final:.4f} Lev={leverage}x")
 
@@ -1161,7 +1162,23 @@ def execute_signal(data: dict) -> dict:
         return {"status": "success", "symbol": symbol, "qty": qty}
     else:
         reason = order_res.get('msg') or str(order_res)
-        return {"status": f"failed: {reason}", "symbol": symbol, "reason": reason}
+        # ── RETRY ON INSUFFICIENT MARGIN: kurangi qty 50%, coba lagi ──
+        if "insufficient" in str(reason).lower() and qty > 0:
+            for retry in range(3):
+                qty = round(qty * 0.5, cfg.get("qty_precision", 3))
+                notional = qty * entry_price
+                if notional < 2:  # BingX min notional $2
+                    break
+                logger.warning(f"🔄 RETRY {retry+1}: {symbol} insufficient margin → kurangi qty ke {qty} (notional ${notional:.2f})")
+                order_res = bx.place_order(symbol, order_side, pos_side, qty, "MARKET")
+                if order_res.get("code") == 0:
+                    logger.info(f"✅ RETRY {retry+1} SUKSES: {symbol} qty={qty}")
+                    break
+                reason = order_res.get('msg') or str(order_res)
+            else:
+                return {"status": f"failed: {reason}", "symbol": symbol, "reason": reason}
+        else:
+            return {"status": f"failed: {reason}", "symbol": symbol, "reason": reason}
 
 
 def _close_position(symbol: str) -> dict:
