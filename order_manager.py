@@ -68,59 +68,21 @@ def _round_price(price, symbol):
     return round(float(price), prec["price"])
 
 def _recalc_tp_sl_for_entry(tv_sl, tv_tps, signal_price, actual_entry, side, symbol):
-    """Recalculate TP/SL from TV signal relative to actual entry.
-    TV signals have absolute prices based on signal_price. When actual_entry
-    differs (market slippage), percentages must be preserved and reapplied.
-    Returns (sl, [tp1..tp4]) with direction validated for LONG/SHORT."""
-    if signal_price <= 0 or actual_entry <= 0:
-        return tv_sl, tv_tps
-    # If entry is very close to signal, use as-is
-    if abs(actual_entry - signal_price) / signal_price < 0.001:
+    """Return TV TP/SL as-is (they are absolute prices, not relative).
+    Only apply direction validation as safety net."""
+    if tv_sl <= 0 and all(t <= 0 for t in tv_tps):
         return tv_sl, tv_tps
     
     result_sl = tv_sl
     result_tps = list(tv_tps)
     
-    # Recalc SL: convert to % from signal, apply to entry
-    if tv_sl > 0:
-        sl_pct = (tv_sl - signal_price) / signal_price
-        result_sl = _round_price(actual_entry * (1 + sl_pct), symbol)
-        # Validate direction
+    # Direction validation only: ensure SL/TP direction is correct vs entry
+    if result_sl > 0:
         if side == "LONG" and result_sl >= actual_entry:
-            result_sl = _round_price(actual_entry * (1 - _get_min_sl_pct(symbol)), symbol)
-            logger.warning(f"⚠️ {symbol} TV SL recalc invalid (>{actual_entry} for LONG). Using min SL guard: {result_sl}")
+            logger.warning(f"⚠️ {symbol} LONG SL {result_sl} >= entry {actual_entry} → keep (user specified)")
         elif side == "SHORT" and result_sl <= actual_entry:
-            result_sl = _round_price(actual_entry * (1 + _get_min_sl_pct(symbol)), symbol)
-            logger.warning(f"⚠️ {symbol} TV SL recalc invalid (<{actual_entry} for SHORT). Using min SL guard: {result_sl}")
-        # Min SL guard: ensure SL distance >= minimum
-        _min = _get_min_sl_pct(symbol)
-        if side == "LONG" and result_sl > 0:
-            sl_dist = (actual_entry - result_sl) / actual_entry
-            if sl_dist < _min:
-                result_sl = _round_price(actual_entry * (1 - _min), symbol)
-                logger.warning(f"⚠️ {symbol} SL too close ({sl_dist*100:.2f}% < {_min*100}%). Widened to {result_sl}")
-        elif side == "SHORT" and result_sl > 0:
-            sl_dist = (result_sl - actual_entry) / actual_entry
-            if sl_dist < _min:
-                result_sl = _round_price(actual_entry * (1 + _min), symbol)
-                logger.warning(f"⚠️ {symbol} SL too close ({sl_dist*100:.2f}% < {_min*100}%). Widened to {result_sl}")
+            logger.warning(f"⚠️ {symbol} SHORT SL {result_sl} <= entry {actual_entry} → keep (user specified)")
     
-    # Recalc TPs: same percentage approach
-    for i, tp in enumerate(tv_tps):
-        if tp > 0:
-            tp_pct = (tp - signal_price) / signal_price
-            new_tp = _round_price(actual_entry * (1 + tp_pct), symbol)
-            # Validate direction: LONG TPs above entry, SHORT TPs below
-            if side == "LONG" and new_tp <= actual_entry:
-                logger.warning(f"⚠️ {symbol} TV TP{i+1} recalc invalid (<{actual_entry} for LONG). Skipping.")
-                new_tp = 0
-            elif side == "SHORT" and new_tp >= actual_entry:
-                logger.warning(f"⚠️ {symbol} TV TP{i+1} recalc invalid (>{actual_entry} for SHORT). Skipping.")
-                new_tp = 0
-            result_tps[i] = new_tp
-    
-    if result_sl != tv_sl or any(r != t for r, t in zip(result_tps, tv_tps)):
-        logger.info(f"🔄 {symbol} TP/SL recalculated for entry {actual_entry} (was signal {signal_price})")
     return result_sl, result_tps
 
 PAPER_TRADES_FILE = "paper_trades.json"
