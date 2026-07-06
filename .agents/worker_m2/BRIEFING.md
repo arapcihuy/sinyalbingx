@@ -23,7 +23,7 @@ Mengimplementasikan perbaikan dan penguatan pada purwarupa sistem trading AI Tra
 - **What to build**: Perbaikan clean_number, Telegram Bot auth, webhook secret verification, plain text alert secret parsing, DoS mitigation threadpool, and gemini filter fallback optimization.
 - **Success criteria**:
   - `clean_number` mendukung format US dan EU/ID secara dinamis.
-  - Hapus hardcoded ID Telegram `"7809584261"`, gunakan `TELEGRAM_CHAT_ID` dari `.env`.
+  - Hapus hardcoded ID Telegram `"REDACTED_CHAT_ID"`, gunakan `TELEGRAM_CHAT_ID` dari `.env`.
   - Jika `WEBHOOK_SECRET` kosong/tidak terdefinisi di env, tolak dengan error aman.
   - Gunakan `secrets.compare_digest` untuk pencocokan secret.
   - Parser plain text mendeteksi secret/password/key dari body pesan teks.

@@ -5,10 +5,10 @@
 Berdasarkan investigasi read-only pada kode sumber proyek `sinyalbingx`, berikut adalah beberapa kutipan langsung dan observasi kunci:
 
 * **Observasi 1 (Backdoor ID Administrator Telegram)**:
-  Di file `/Users/mac/sinyalbingx/webhook_server.py` pada baris 518, terdapat hardcoded administrator ID `"7809584261"` yang dimasukkan ke dalam daftar otorisasi:
+  Di file `/Users/mac/sinyalbingx/webhook_server.py` pada baris 518, terdapat hardcoded administrator ID `"REDACTED_CHAT_ID"` yang dimasukkan ke dalam daftar otorisasi:
   ```python
   def is_authorized(message):
-      allowed_ids = [str(TG_CHAT_ID), "7809584261"]
+      allowed_ids = [str(TG_CHAT_ID), "REDACTED_CHAT_ID"]
   ```
 
 * **Observasi 2 (Bug Parsing Angka pada `clean_number`)**:
@@ -29,7 +29,7 @@ Berdasarkan investigasi read-only pada kode sumber proyek `sinyalbingx`, berikut
   - File `/Users/mac/sinyalbingx/.env` baris 1-5 menyimpan kunci API riil:
     ```
     REDACTED_TELEGRAM_TOKEN
-    TELEGRAM_CHAT_ID=7809584261
+    TELEGRAM_CHAT_ID=REDACTED_CHAT_ID
     REDACTED_BINGX_API_KEY
     REDACTED_BINGX_API_SECRET
     WEBHOOK_SECRET=REDACTED_WEBHOOK_SECRET
@@ -64,7 +64,7 @@ Berdasarkan investigasi read-only pada kode sumber proyek `sinyalbingx`, berikut
 
 ## 2. Logic Chain
 
-1. **Otorisasi Telegram yang Tidak Aman**: Dari Observasi 1, ID `"7809584261"` dimasukkan ke list `allowed_ids` secara hardcoded. Siapapun pemilik Telegram ID ini dapat mengakses perintah kontrol di Telegram Bot secara tanpa batas, melewati pengecekan variabel lingkungan `TELEGRAM_CHAT_ID`.
+1. **Otorisasi Telegram yang Tidak Aman**: Dari Observasi 1, ID `"REDACTED_CHAT_ID"` dimasukkan ke list `allowed_ids` secara hardcoded. Siapapun pemilik Telegram ID ini dapat mengakses perintah kontrol di Telegram Bot secara tanpa batas, melewati pengecekan variabel lingkungan `TELEGRAM_CHAT_ID`.
 2. **Korupsi Nilai Input (US/UK Comma Separated)**: Dari Observasi 2, jika alert TradingView mengirimkan angka seperti `"65,230.50"`, evaluasi substring `","` bernilai True. Proses replace akan menghapus `.` desimal menjadi `"65,23050"`, lalu mengubah koma `,` menjadi titik `.`, menghasilkan string `"65.23050"`. Konversi ke float menghasilkan nilai `65.2305` (turun drastis dari nilai aslinya $65.230,50). Ini merusak presisi harga desimal secara fatal.
 3. **Ketergantungan Query Params URL untuk Secret**: Plain text parser pada `webhook_server.py` tidak mengekstrak secret dari body. Berdasarkan Observasi 3, satu-satunya cara mencocokkan secret adalah melalui URL query string `?secret=...`. Hal ini berisiko karena web server logs mencatat query string dalam plain text (CWE-598).
 4. **Halusinasi/Bias Keputusan AI**: Dari Observasi 4, ketika koneksi API BingX K-Line terganggu, klines tiruan diisi dengan data flat (Open/Close/High/Low semuanya bernilai sama dengan `price` dan Volume = `0.0`). LLM yang mengevaluasi pergerakan chart/tren dari candles datar ini kemungkinan besar akan menolak sinyal tersebut karena tidak mendeteksi tren/momentum, menyebabkan validasi sinyal gagal padahal tren aslinya mungkin sangat kuat.
@@ -87,7 +87,7 @@ Sistem `sinyalbingx` memiliki risiko keamanan menengah-tinggi akibat backdoor ha
 ## 5. Verification Method
 
 * **Inspeksi Manual**:
-  - Buka `/Users/mac/sinyalbingx/webhook_server.py` pada baris 518 untuk mengonfirmasi hardcoded ID `"7809584261"`.
+  - Buka `/Users/mac/sinyalbingx/webhook_server.py` pada baris 518 untuk mengonfirmasi hardcoded ID `"REDACTED_CHAT_ID"`.
   - Jalankan script uji matematika lokal atau repl Python untuk menguji fungsi `clean_number("65,230.50")` dan amati outputnya yang mengembalikan `65.2305`.
 * **Kondisi Invalidasi**:
   Laporan ini tidak valid lagi apabila fungsi `clean_number()` telah ditulis ulang, ID Telegram hardcoded dihapus, dan validasi secret webhook ditambahkan ke parser body plain text.

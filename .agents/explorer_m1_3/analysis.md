@@ -13,7 +13,7 @@
 Sebagai Cybersecurity Auditor & Expert Certified Ethical Hacker (CEH), saya telah melakukan audit keamanan read-only yang mendalam terhadap repositori `sinyalbingx`. Fokus utama audit ini adalah pada mekanisme integrasi data, manajemen rahasia (secrets), integritas parsing webhook, serta ketahanan penanganan kesalahan (error handling) saat berinteraksi dengan API eksternal (BingX & 9Router/Gemini).
 
 Audit ini berhasil mengidentifikasi **4 temuan kritis** yang berdampak langsung pada integritas operasional, keamanan dana, dan kerahasiaan API key:
-1. **Backdoor Otorisasi Telegram (CWE-798)**: Penggunaan ID Administrator hardcoded (`7809584261`) yang dapat mengakses perintah administratif sensitif (cek saldo, pengaturan, PnL, status) secara tidak sah.
+1. **Backdoor Otorisasi Telegram (CWE-798)**: Penggunaan ID Administrator hardcoded (`REDACTED_CHAT_ID`) yang dapat mengakses perintah administratif sensitif (cek saldo, pengaturan, PnL, status) secara tidak sah.
 2. **Korupsi Integritas Data Matematika di Parser Webhook**: Bug kritis pada fungsi `clean_number()` yang merusak angka berformat ribuan koma US (misal: `$65,000` diubah menjadi `$65.0`).
 3. **Paparan Informasi Sensitif melalui Query String URL (CWE-598)**: Mekanisme parser plain text memaksa transmisi secret webhook melalui query parameter URL (`?secret=...`), sehingga rahasia tersebut akan terekspos pada log server dan proxy.
 4. **Resiko Keputusan Acak LLM (Halusinasi AI) pada Fallback K-Line**: Pembuatan data candle mock flat (datar) saat API BingX K-Line gagal, memaksa AI mengambil keputusan trading berdasarkan data yang tidak valid.
@@ -29,11 +29,11 @@ Audit ini berhasil mengidentifikasi **4 temuan kritis** yang berdampak langsung 
   2. Terdapat mekanisme otorisasi di `webhook_server.py` yang ditujukan untuk mengamankan perintah Telegram Bot. Namun, kode tersebut mengandung ID Telegram admin hardcoded yang tidak dapat diubah:
      ```python
      def is_authorized(message):
-         allowed_ids = [str(TG_CHAT_ID), "7809584261"]
+         allowed_ids = [str(TG_CHAT_ID), "REDACTED_CHAT_ID"]
          ...
          authorized = str(message.chat.id) in allowed_ids
      ```
-     Bahkan jika pengguna mengganti `TELEGRAM_CHAT_ID` di file `.env`, pemilik ID `7809584261` akan **selalu diizinkan** oleh sistem untuk mengeksekusi perintah administratif seperti `/status`, `/balance`, `/pnl`, dan `/settings`.
+     Bahkan jika pengguna mengganti `TELEGRAM_CHAT_ID` di file `.env`, pemilik ID `REDACTED_CHAT_ID` akan **selalu diizinkan** oleh sistem untuk mengeksekusi perintah administratif seperti `/status`, `/balance`, `/pnl`, dan `/settings`.
 * **Dampak**: 
   - Penyerang yang memiliki akses ke ID Telegram tersebut dapat membaca saldo akun secara real-time, melihat API key yang disamarkan (masked), memantau posisi trading aktif, dan memicu anomali state.
 
@@ -113,7 +113,7 @@ Untuk mengatasi celah keamanan dan masalah integritas di atas sebelum naik ke ta
 Hapus ID Telegram hardcoded dari daftar yang diizinkan. Gunakan variabel lingkungan admin cadangan jika diperlukan, dan pastikan fallback yang aman.
 * **Sebelum (Rentan)**:
   ```python
-  allowed_ids = [str(TG_CHAT_ID), "7809584261"]
+  allowed_ids = [str(TG_CHAT_ID), "REDACTED_CHAT_ID"]
   ```
 * **Sesudah (Aman)**:
   ```python

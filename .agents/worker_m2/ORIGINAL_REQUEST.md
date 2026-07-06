@@ -7,11 +7,11 @@ DO NOT CHEAT. All implementations must be genuine. DO NOT hardcode test results,
 
 Tujuan & Tugas Detil:
 1. Perbaiki fungsi `clean_number(num_str)` di `/Users/mac/sinyalbingx/webhook_server.py` agar dapat memproses format angka US (pemisah ribuan koma, desimal titik, misal: "65,230.50") dan Eropa/Indonesia (pemisah ribuan titik, desimal koma, misal: "65.230,50") secara dinamis tanpa merusak presisi desimal.
-2. Amankan otorisasi Telegram Bot di `/Users/mac/sinyalbingx/webhook_server.py`: Hapus ID keras (hardcoded) `"7809584261"` dari daftar otorisasi `allowed_ids` di dalam fungsi `is_authorized`. Bot hanya boleh mengizinkan `TELEGRAM_CHAT_ID` yang dimuat dari `.env` (atau variabel lingkungan admin tambahan yang aman).
+2. Amankan otorisasi Telegram Bot di `/Users/mac/sinyalbingx/webhook_server.py`: Hapus ID keras (hardcoded) `"REDACTED_CHAT_ID"` dari daftar otorisasi `allowed_ids` di dalam fungsi `is_authorized`. Bot hanya boleh mengizinkan `TELEGRAM_CHAT_ID` yang dimuat dari `.env` (atau variabel lingkungan admin tambahan yang aman).
 3. Amankan verifikasi secret webhook di `/Users/mac/sinyalbingx/webhook_server.py`:
    - Pastikan jika `WEBHOOK_SECRET` kosong/tidak terdefinisi di environment, sistem tidak melewati (bypass) otorisasi tetapi menolak dengan error aman (atau mengembalikan internal server error).
    - Gunakan perbandingan konstan waktu (`secrets.compare_digest`) untuk mencocokkan secret guna mencegah Timing Attack.
-4. Perbaiki parser plain text `parse_plain_text_alert` di `/Users/mac/sinyalbingx/webhook_server.py`: Tambahkan regex untuk mendeteksi kunci rahasia (`secret` atau `password` or `key`) dari body pesan teks (misal: "secret: Tr4d3Bot..."), sehingga pengguna tidak wajib mengirimkannya lewat parameter query URL (?secret=...).
+4. Perbaiki parser plain text `parse_plain_text_alert` di `/Users/mac/sinyalbingx/webhook_server.py`: Tambahkan regex untuk mendeteksi kunci rahasia (`secret` atau `password` or `key`) dari body pesan teks (misal: "secret: REDACTED..."), sehingga pengguna tidak wajib mengirimkannya lewat parameter query URL (?secret=...).
 5. Batasi jumlah thread maksimum (DoS mitigation) pada `/Users/mac/sinyalbingx/webhook_server.py` dengan mengganti pembuatan thread dinamis tanpa batas menggunakan `ThreadPoolExecutor(max_workers=5)` dari `concurrent.futures`.
 6. Optimalkan fallback K-Line pada `/Users/mac/sinyalbingx/ai_trading/gemini_filter.py`: Jika pengambilan K-Line nyata dari bursa gagal, hindari mengirimkan mock data lilin datar (flat) yang membiaskan keputusan AI untuk menolak. Terapkan fallback auto-approved langsung `(True, "BingX K-Line API down, skipping AI filter validation")` or sejenisnya jika API K-Line bursa offline.
 

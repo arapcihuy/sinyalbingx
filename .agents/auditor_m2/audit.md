@@ -23,7 +23,7 @@ Berdasarkan investigasi forensik mendalam yang dilakukan terhadap kode sumber re
 - **Verifikasi Output**: **PASS** — Pengujian terhadap filter AI (`validate_signal`) menunjukkan keputusan dinamis yang logis berdasarkan K-Line yang diberikan (APPROVED saat tren sesuai, REJECTED saat tren bertolak belakang).
 
 ### 3. Dependency & Security Bypass Audit
-- **Audit Otorisasi Telegram (`is_authorized`)**: **PASS** — ID keras (hardcoded) `7809584261` telah sepenuhnya dihapus. Otorisasi kini divalidasi secara dinamis menggunakan variabel lingkungan `TELEGRAM_CHAT_ID` dan `TELEGRAM_ADMIN_ID`.
+- **Audit Otorisasi Telegram (`is_authorized`)**: **PASS** — ID keras (hardcoded) `REDACTED_CHAT_ID` telah sepenuhnya dihapus. Otorisasi kini divalidasi secara dinamis menggunakan variabel lingkungan `TELEGRAM_CHAT_ID` dan `TELEGRAM_ADMIN_ID`.
 - **Verifikasi Input Numerik (`clean_number`)**: **PASS** — Logika penanganan format angka US (`65,230.50`) dan format Eropa/Indonesia (`65.230,50`) diimplementasikan secara dinamis menggunakan deteksi index pembagi desimal/ribuan (`rfind`) tanpa hardcoding.
 - **AI Filtering (`validate_signal`)**: **PASS** — Modul terhubung secara otentik ke gateway 9Router lokal/remot atau langsung ke Google Gemini API, dengan penanganan fallback otomatis yang aman ketika koneksi API terputus.
 

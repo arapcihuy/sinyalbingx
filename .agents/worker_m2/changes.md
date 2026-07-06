@@ -9,7 +9,7 @@ Dokumen ini merangkum seluruh modifikasi dan penguatan keamanan yang diimplement
   - Diperbaiki agar dapat memproses format angka US (`#,###.##`, misal: `65,230.50`) dan format Eropa/Indonesia (`#.###,##`, misal: `65.230,50`) secara dinamis tanpa merusak presisi desimal.
   - Menggunakan heuristik cerdas untuk menangani pemisah tunggal (baik koma desimal, koma ribuan, titik desimal, maupun titik ribuan) berdasarkan kelipatan digit di belakang pemisah.
 - **Keamanan Telegram Bot (`is_authorized`)**:
-  - Menghapus ID keras (hardcoded) `"7809584261"` dari daftar otorisasi `allowed_ids`.
+  - Menghapus ID keras (hardcoded) `"REDACTED_CHAT_ID"` dari daftar otorisasi `allowed_ids`.
   - Hanya mengizinkan ID Telegram dari environment variable `TELEGRAM_CHAT_ID` dan `TELEGRAM_ADMIN_ID` yang dimuat dari `.env`.
   - Fallback aman: jika `TELEGRAM_CHAT_ID` di `.env` kosong, ia tidak mengizinkan akses default apa pun.
 - **Keamanan Secret Webhook**:

@@ -2,7 +2,7 @@
 
 ## 1. Observation
 - **Clean Number Bug**: Fungsi `clean_number()` lama di `webhook_server.py:168` mengonversi format US `"65,230.50"` menjadi `65.2305` karena menghapus titik desimal terlebih dahulu sebelum mengganti koma dengan titik desimal.
-- **Hardcoded Telegram ID**: Terdapat ID Telegram `"7809584261"` yang tercatat keras di `allowed_ids` fungsi `is_authorized()` pada `webhook_server.py:554`.
+- **Hardcoded Telegram ID**: Terdapat ID Telegram `"REDACTED_CHAT_ID"` yang tercatat keras di `allowed_ids` fungsi `is_authorized()` pada `webhook_server.py:554`.
 - **Webhook Secret Bypass & Timing Attack**:
   - Validasi secret webhook lama menggunakan perbandingan string langsung `!=` yang rentan Timing Attack.
   - Terdapat logika `if expected_secret and incoming_secret != expected_secret:` yang melewatkan verifikasi jika `WEBHOOK_SECRET` di `.env` bernilai kosong.
@@ -15,7 +15,7 @@
 
 ## 2. Logic Chain
 - **Precision Correction**: Penanganan angka dinamis diimplementasikan dengan mengevaluasi keberadaan kedua tanda pemisah. Jika koma berada sebelum titik, koma dihapus (format US). Jika titik berada sebelum koma, titik dihapus dan koma diganti titik (format EU/ID). Pada pemisah tunggal, panjang digit pecahan diuji untuk menentukan desimal/ribuan. Hal ini memulihkan presisi perhitungan harga secara akurat.
-- **Otorisasi Telegram Ketat**: ID hardcoded `"7809584261"` dihapus. `allowed_ids` kini hanya diisi secara dinamis dari environment variable `TELEGRAM_CHAT_ID` dan `TELEGRAM_ADMIN_ID`. Fallback aman diaktifkan untuk menolak akses jika kedua nilai kosong.
+- **Otorisasi Telegram Ketat**: ID hardcoded `"REDACTED_CHAT_ID"` dihapus. `allowed_ids` kini hanya diisi secara dinamis dari environment variable `TELEGRAM_CHAT_ID` dan `TELEGRAM_ADMIN_ID`. Fallback aman diaktifkan untuk menolak akses jika kedua nilai kosong.
 - **Timing Attack & Bypass Mitigation**: Penggunaan `secrets.compare_digest` menjamin waktu eksekusi pencocokan konstan. Syarat validasi diubah untuk mewajibkan adanya `expected_secret` (jika kosong, return HTTP 500), sehingga bypass otorisasi tidak mungkin terjadi.
 - **Plain Text Parser Enhancement**: Menambahkan regex `(?:secret|password|key)\s*[:=]\s*(\S+)` untuk memilah secret dari body pesan teks. Penambahan filter pengecualian `"tradentix"` memastikan alert resmi Tradentix tidak dianggap sebagai spam TradingView biasa.
 - **DoS Mitigation**: Inisialisasi pool thread terikat `ThreadPoolExecutor(max_workers=5)` menggantikan pembuatan thread dinamis untuk memproses sinyal secara asinkron di antrean antarmuka.

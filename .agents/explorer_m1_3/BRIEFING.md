@@ -31,7 +31,7 @@ Analisis integritas data, validasi input, penggunaan .env, error handling K-Line
   - `order_manager.py` (Eksekusi order dan sinkronisasi state lokal)
 - **Key findings**:
   - Penyimpanan kunci API sensitif dalam file `.env` di root direktori berisiko bocor ke Git.
-  - Celah keamanan otorisasi Telegram: Terdapat ID admin hardcoded `7809584261` di `webhook_server.py` yang bertindak sebagai backdoor akses perintah kontrol.
+  - Celah keamanan otorisasi Telegram: Terdapat ID admin hardcoded `REDACTED_CHAT_ID` di `webhook_server.py` yang bertindak sebagai backdoor akses perintah kontrol.
   - Bug matematika kritis di `clean_number()` yang merusak format angka dengan tanda koma ribuan gaya US (misal: `65,000` menjadi `65.0`).
   - Risiko kebocoran rahasia webhook di URL logs akibat parser plain text memaksa pengiriman rahasia melalui query parameter (`?secret=...`).
   - Penggunaan data K-Line tiruan datar (flat mock) saat kegagalan API BingX yang berisiko memicu kesalahan analisis/keputusan LLM.

@@ -47,12 +47,12 @@ I have performed a static code review of the `ai_trading/gemini_filter.py`, `ai_
       self._respond(401, {"error": "unauthorized"})
       return
   ```
-- In `webhook_server.py` at lines 14 and 518, the Telegram Chat ID `7809584261` is hardcoded as default and allowed:
+- In `webhook_server.py` at lines 14 and 518, the Telegram Chat ID `REDACTED_CHAT_ID` is hardcoded as default and allowed:
   ```python
-  TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7809584261")
+  TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "REDACTED_CHAT_ID")
   ...
   def is_authorized(message):
-      allowed_ids = [str(TG_CHAT_ID), "7809584261"]
+      allowed_ids = [str(TG_CHAT_ID), "REDACTED_CHAT_ID"]
   ```
 - In `webhook_server.py` at lines 338-342:
   ```python
@@ -74,7 +74,7 @@ Based on the observations:
 2. **Observation B** menunjukkan celah keamanan serius:
    - Jika `WEBHOOK_SECRET` kosong di environment, `expected_secret` bernilai `""` (falsy), sehingga kondisi `if expected_secret` bernilai `False` dan bypass pengecekan secret. Artinya, siapa saja dapat mengirim payload POST dan memicu eksekusi order riil di BingX.
    - Perbandingan `incoming_secret != expected_secret` rentan terhadap Timing Attack.
-   - Chat ID Telegram `7809584261` di-hardcode ke dalam codebase. Jika variabel environment `TELEGRAM_CHAT_ID` tidak diset secara eksplisit oleh pengguna, bot Telegram akan membocorkan data posisi trading sensitif dan menerima kendali penuh dari pemilik ID Telegram tersebut.
+   - Chat ID Telegram `REDACTED_CHAT_ID` di-hardcode ke dalam codebase. Jika variabel environment `TELEGRAM_CHAT_ID` tidak diset secara eksplisit oleh pengguna, bot Telegram akan membocorkan data posisi trading sensitif dan menerima kendali penuh dari pemilik ID Telegram tersebut.
    - Server menelurkan thread tanpa batasan menggunakan `threading.Thread(...)`. Apabila terjadi badai request atau serangan Denial of Service (DoS) flooding, server dapat mengalami kehabisan sumber daya (CPU/RAM exhaustion).
 
 ---
@@ -103,4 +103,4 @@ Untuk melakukan verifikasi mandiri terhadap celah dan perilaku yang diamati:
 2. **Verifikasi Peneluran Thread**:
    - Kirimkan puluhan request POST beruntun ke webhook server dan periksa jumlah thread aktif pada proses server.
 3. **Verifikasi Hardcoded ID**:
-   - Periksa berkas `webhook_server.py` pada baris 14 dan 518 untuk mengonfirmasi keberadaan ID string `"7809584261"`.
+   - Periksa berkas `webhook_server.py` pada baris 14 dan 518 untuk mengonfirmasi keberadaan ID string `"REDACTED_CHAT_ID"`.

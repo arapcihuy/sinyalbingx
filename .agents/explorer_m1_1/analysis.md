@@ -112,14 +112,14 @@ Aliran data sinyal dari luar hingga eksekusi di bursa berlangsung sebagai beriku
 - **Lokasi**: `webhook_server.py` baris 14 dan 518.
 - **Kode Asli**:
   ```python
-  TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7809584261")
+  TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "REDACTED_CHAT_ID")
   ...
   def is_authorized(message):
-      allowed_ids = [str(TG_CHAT_ID), "7809584261"]
+      allowed_ids = [str(TG_CHAT_ID), "REDACTED_CHAT_ID"]
   ```
-- **Masalah**: Nilai Chat ID `"7809584261"` di-hardcode ke dalam kode sumber sebagai nilai default dan nilai yang diizinkan untuk mengontrol bot Telegram.
+- **Masalah**: Nilai Chat ID `"REDACTED_CHAT_ID"` di-hardcode ke dalam kode sumber sebagai nilai default dan nilai yang diizinkan untuk mengontrol bot Telegram.
 - **Dampak**: 
-  - Jika pengguna lupa mengonfigurasi variabel `TELEGRAM_CHAT_ID` di environment, seluruh notifikasi transaksi keuangan sensitif akan secara otomatis dikirim ke akun Telegram asing pemilik ID `"7809584261"`.
+  - Jika pengguna lupa mengonfigurasi variabel `TELEGRAM_CHAT_ID` di environment, seluruh notifikasi transaksi keuangan sensitif akan secara otomatis dikirim ke akun Telegram asing pemilik ID `"REDACTED_CHAT_ID"`.
   - Pemilik ID Telegram tersebut memiliki otorisasi penuh untuk memanggil perintah administratif seperti `/status`, `/balance`, `/pnl`, dan `/settings`. Ini adalah celah kebocoran data informasi finansial dan akses kontrol yang sangat serius.
 
 #### C. Denial of Service (DoS) via Unbounded Thread Spawning
@@ -196,7 +196,7 @@ def is_authorized(message):
     if admin_id:
         allowed_ids.append(str(admin_id))
         
-    # Pastikan tidak ada fallback hardcoded ID "7809584261"
+    # Pastikan tidak ada fallback hardcoded ID "REDACTED_CHAT_ID"
     authorized = str(message.chat.id) in allowed_ids
     if not authorized:
         log.warning(f"🔒 Unauthorized access attempt from Chat ID: {message.chat.id}")

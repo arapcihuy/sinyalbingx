@@ -10,7 +10,7 @@
     - Kasus 1 (BUY saat tren naik): `APPROVED` ("Tren naik kuat (HH/HL konsisten)...")
     - Kasus 2 (BUY saat tren turun): `REJECTED` ("Tren turun kuat. Belum ada konfirmasi pembalikan arah...")
     - Kasus 3 (SELL saat tren turun): `APPROVED` ("Tren bearish kuat terkonfirmasi...")
-- Otorisasi Telegram bot pada `is_authorized` di `webhook_server.py` memuat allowed IDs secara dinamis melalui `TELEGRAM_CHAT_ID` dan `TELEGRAM_ADMIN_ID` dari environment variables, tanpa ada ID hardcoded `7809584261` di dalam kode.
+- Otorisasi Telegram bot pada `is_authorized` di `webhook_server.py` memuat allowed IDs secara dinamis melalui `TELEGRAM_CHAT_ID` dan `TELEGRAM_ADMIN_ID` dari environment variables, tanpa ada ID hardcoded `REDACTED_CHAT_ID` di dalam kode.
 
 ## 2. Logic Chain
 - Pengujian unit pada `test_additional_security.py` memverifikasi ketepatan fungsi parsing angka `clean_number` untuk format US (koma ribuan, titik desimal) dan format Eropa/Indonesia (titik ribuan, koma desimal), dan semuanya bernilai benar (`65230.50`).
