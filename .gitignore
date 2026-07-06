@@ -28,3 +28,9 @@ latest_signals.json
 
 # Paper trading & scanner
 paper_trades.json
+
+# Security — backup files & databases
+logs/
+*.bak
+*.db
+signals.db

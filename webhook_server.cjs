@@ -4,7 +4,7 @@ const url = require('url');
 
 const PORT = process.env.PORT || 5001;
 const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
-const TG_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '7809584261';
+const TG_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
 
 function tgSend(text) {
   if (!TG_TOKEN) return;
