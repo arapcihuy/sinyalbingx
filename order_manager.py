@@ -824,20 +824,23 @@ def execute_signal(data: dict) -> dict:
     qty = calc_result["total_qty"]
 
     # ── MARGIN CAP: Max 40% available per posisi, biar sisa muat koin lain ──
+    # ponytail: menurunkan lev menambah margin (karena qty independen lev).
+    # Fix: cap qty, bukan lev.
     if brain_enabled and available > 0:
         max_margin_per_pos = available * 0.40
         actual_margin = calc_result["margin"]
         if actual_margin > max_margin_per_pos and actual_margin > 0:
-            # Turunkan lev proporsional sampai margin muat
-            ratio = max_margin_per_pos / actual_margin
-            new_lev = max(1, int(leverage / ratio))
-            if new_lev != leverage:
-                leverage = new_lev
-                # Recalculate qty dengan lev baru
-                calc_result = brain_engine.calculate_smart_multi_tp_qty(_qty_balance, entry_price, sl_price, tp_prices, leverage, risk_pct, symbol)
-                qtys = calc_result["qtys"]
-                qty = calc_result["total_qty"]
-                logger.info(f"🎯 MARGIN CAP: {symbol} lev {leverage}x | margin ${calc_result['margin']:.2f} ≤ ${max_margin_per_pos:.2f} (40% of ${available:.2f})")
+            # Cap qty supaya margin muat, lev tetap aman dari LIQ GUARD
+            max_qty = (max_margin_per_pos * leverage) / entry_price if entry_price > 0 and leverage > 0 else qty
+            if max_qty < qty:
+                # Distribusi ulang ke TP levels proporsional
+                ratio = max_qty / qty
+                qtys = [round(q * ratio, cfg.get("qty_precision", 3)) if q > 0 else 0.0 for q in qtys]
+                qty = round(max(qty * ratio, cfg.get("min_qty", 0.001)), cfg.get("qty_precision", 3))
+                calc_result["qtys"] = qtys
+                calc_result["total_qty"] = qty
+                calc_result["margin"] = (qty * entry_price) / leverage
+                logger.info(f"🎯 MARGIN CAP: {symbol} qty {qty} | margin ${calc_result['margin']:.2f} ≤ ${max_margin_per_pos:.2f} (40% of ${available:.2f})")
 
     # ── POST-QTY DEDUP: brain_engine hard limiter bisa menyamakan harga TP → dedup lagi ──
     seen_prices = set()
