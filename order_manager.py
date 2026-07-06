@@ -828,11 +828,10 @@ def execute_signal(data: dict) -> dict:
     # ponytail: iterate -2 per step terlalu lambat (150x→130x). Hitung langsung.
     mmr = float(cfg.get("mmr", 0.005))
     buffer_pct = settings.get("liquidation_buffer_pct", 0.10)
+    _liq_safe_lev = leverage  # default: no cap
 
     if sl_price > 0 and entry_price > 0 and leverage > 1:
         if pos_side == "SHORT":
-            # liq = entry * (1 + 1/lev - mmr). Need liq > sl * (1+buf)
-            # → lev < 1 / (sl*(1+buf)/entry - 1 + mmr)
             sl_adj = sl_price * (1.0 + buffer_pct)
             denom = sl_adj / entry_price - 1.0 + mmr
             if denom > 0:
@@ -841,9 +840,8 @@ def execute_signal(data: dict) -> dict:
                 if leverage > safe_lev:
                     logger.warning(f"🛡️ LIQ GUARD: {symbol} SHORT lev {leverage}x → liq dekat SL. Safe max = {safe_lev}x → cap")
                     leverage = safe_lev
+                    _liq_safe_lev = safe_lev
         else:  # LONG
-            # liq = entry * (1 - 1/lev + mmr). Need liq < sl * (1-buf)
-            # → lev < 1 / (1 - sl*(1-buf)/entry + mmr)
             sl_adj = sl_price * (1.0 - buffer_pct)
             denom = 1.0 - sl_adj / entry_price + mmr
             if denom > 0:
@@ -852,6 +850,7 @@ def execute_signal(data: dict) -> dict:
                 if leverage > safe_lev:
                     logger.warning(f"🛡️ LIQ GUARD: {symbol} LONG lev {leverage}x → liq dekat SL. Safe max = {safe_lev}x → cap")
                     leverage = safe_lev
+                    _liq_safe_lev = safe_lev
 
     est_liq_final = brain_engine.estimate_liquidation_price(entry_price, leverage, pos_side, mmr)
     logger.info(f"🛡️ LIQ CHECK: {symbol} {pos_side} | Entry={entry_price:.4f} SL={sl_price:.4f} Liq={est_liq_final:.4f} Lev={leverage}x")
@@ -910,8 +909,9 @@ def execute_signal(data: dict) -> dict:
     actual_margin = (qty * entry_price) / leverage if leverage > 0 else 0
     min_margin = cfg.get("min_margin", 1.0)
     if actual_margin < min_margin and available > 0:
-        # Coba bump leverage sekali lagi
+        # Coba bump leverage sekali lagi, TAPI jangan lewati LIQ GUARD cap
         lev_bumped = brain_engine.get_leverage_for_min_margin(available, entry_price, sl_price, pos_side, symbol)
+        lev_bumped = min(lev_bumped, _liq_safe_lev)  # enforce LIQ GUARD cap
         if lev_bumped > leverage:
             leverage = lev_bumped
             actual_margin = (qty * entry_price) / leverage
@@ -941,14 +941,15 @@ def execute_signal(data: dict) -> dict:
     except Exception as n_err:
         logger.warning(f"⚠️ Gagal cek min_notional {symbol}: {n_err}")
     
-    # ── MAX LEVERAGE CAP ──
+    # ── MAX LEVERAGE CAP — respect LIQ GUARD cap ──
     try:
         max_lev = bx.get_max_leverage(symbol)
-        if max_lev > 0 and leverage > max_lev:
-            logger.warning(f"📐 LEV CAP: {symbol} lev {leverage}x > max {max_lev}x → cap ke {max_lev}x")
-            leverage = max_lev
+        effective_max = min(max_lev, _liq_safe_lev) if _liq_safe_lev > 0 else max_lev
+        if effective_max > 0 and leverage > effective_max:
+            logger.warning(f"📐 LEV CAP: {symbol} lev {leverage}x > safe {effective_max}x (exchange max {max_lev}x) → cap ke {effective_max}x")
+            leverage = effective_max
             actual_margin = (qty * entry_price) / leverage if leverage > 0 else 0
-        logger.info(f"📐 LEVERAGE: {symbol} {leverage}x (max={max_lev}x) margin=${actual_margin:.2f}")
+        logger.info(f"📐 LEVERAGE: {symbol} {leverage}x (max={max_lev}x liq_safe={_liq_safe_lev}x) margin=${actual_margin:.2f}")
     except Exception as l_err:
         logger.warning(f"⚠️ Gagal cek max_leverage {symbol}: {l_err}")
     
