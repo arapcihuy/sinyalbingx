@@ -606,7 +606,7 @@ def execute_signal(data: dict) -> dict:
             live_pos = bx.get_open_positions(symbol)
             # Update state file dari kenyataan di bursa
             if not live_pos and symbol in active_trade_data:
-                # Hanya hapus jika posisi sudah ada > 10 detik (hindari race condition API delay)
+                # Hapus posisi stale dari state
                 created_at = active_trade_data[symbol].get("created_at", 0)
                 age = time.time() - created_at if created_at > 0 else 999
                 if age > 10:
@@ -616,8 +616,8 @@ def execute_signal(data: dict) -> dict:
                     save_active_trades()
                 else:
                     logger.info(f"⏳ SYNC: {symbol} belum muncul di BingX ({age:.0f}s old) → biarkan")
-        except:
-            pass
+        except Exception as sync_err:
+            logger.warning(f"⚠️ SYNC gagal untuk {symbol}: {sync_err}")
     
     target_pos_side = "LONG" if action in ["BUY", "LONG"] else "SHORT"
     opposite_pos_side = "SHORT" if target_pos_side == "LONG" else "LONG"
