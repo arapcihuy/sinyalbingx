@@ -28,11 +28,11 @@ Berdasarkan investigasi read-only pada kode sumber proyek `sinyalbingx`, berikut
 * **Observasi 3 (Pemuatan Kunci API & Rahasia Webhook)**:
   - File `/Users/mac/sinyalbingx/.env` baris 1-5 menyimpan kunci API riil:
     ```
-    REDACTED_TELEGRAM_TOKENAAFHpzr3OH0UGh8NvlVwl64RBsfgn_8Fu7Y
+    REDACTED_TELEGRAM_TOKEN
     TELEGRAM_CHAT_ID=7809584261
     REDACTED_BINGX_API_KEY
     REDACTED_BINGX_API_SECRET
-    REDACTED_WEBHOOK_SECRET=REDACTED_WEBHOOK_SECRET
+    WEBHOOK_SECRET=REDACTED_WEBHOOK_SECRET
     ```
   - File `/Users/mac/sinyalbingx/webhook_server.py` baris 297 memeriksa rahasia webhook:
     ```python

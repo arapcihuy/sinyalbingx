@@ -88,7 +88,7 @@ class ChallengerEmpiricalVerification(unittest.TestCase):
         test_env = {
             **os.environ,
             "PORT": port,
-            "REDACTED_WEBHOOK_SECRET": secret,
+            "WEBHOOK_SECRET": secret,
             "PAPER_MODE": "true",
             "USE_DEMO": "true",
             "TELEGRAM_BOT_TOKEN": ""  # Kosongkan agar tidak terjadi crash konflik API 409

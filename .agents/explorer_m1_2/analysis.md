@@ -50,7 +50,7 @@ Sebagai bagian dari kepatuhan terhadap batasan ketat (R2. Isolated Folder Struct
 Server diimplementasikan dalam `webhook_server.py` menggunakan `ThreadingHTTPServer` bawaan Python.
 
 ### Alur Kerja Penerimaan Webhook (`do_POST`):
-1. **Autentikasi (Security Guard)**: Memverifikasi `REDACTED_WEBHOOK_SECRET` secara sinkron sesaat setelah data diterima. Jika tidak valid, mengembalikan `401 Unauthorized` secara instan, mencegah serangan *resource exhaustion* dari request ilegal.
+1. **Autentikasi (Security Guard)**: Memverifikasi `WEBHOOK_SECRET` secara sinkron sesaat setelah data diterima. Jika tidak valid, mengembalikan `401 Unauthorized` secara instan, mencegah serangan *resource exhaustion* dari request ilegal.
 2. **Validasi Simbol**: Memeriksa fungsionalitas perdagangan simbol (`is_symbol_tradeable`) secara sinkron.
 3. **Penyaringan Asinkron**: Jika valid, server menginisiasi thread latar belakang:
    ```python

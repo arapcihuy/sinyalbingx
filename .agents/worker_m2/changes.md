@@ -14,7 +14,7 @@ Dokumen ini merangkum seluruh modifikasi dan penguatan keamanan yang diimplement
   - Fallback aman: jika `TELEGRAM_CHAT_ID` di `.env` kosong, ia tidak mengizinkan akses default apa pun.
 - **Keamanan Secret Webhook**:
   - Mengubah pencocokan secret webhook menggunakan perbandingan konstan waktu (`secrets.compare_digest`) guna mencegah serangan Timing Attack.
-  - Memastikan jika `REDACTED_WEBHOOK_SECRET` kosong/tidak terdefinisi di environment, sistem tidak melewati (bypass) otorisasi tetapi menolak dengan error aman (HTTP 500 Internal Server Error).
+  - Memastikan jika `WEBHOOK_SECRET` kosong/tidak terdefinisi di environment, sistem tidak melewati (bypass) otorisasi tetapi menolak dengan error aman (HTTP 500 Internal Server Error).
 - **Parser Plain Text (`parse_plain_text_alert`)**:
   - Menambahkan regex untuk mendeteksi kunci rahasia (`secret: ...`, `password: ...`, `key: ...`) dari body pesan teks sehingga query param tidak wajib dikirimkan di URL.
   - Melonggarkan filter proteksi asalkan pesan mengandung kata `"tradentix"` agar pesan-pesan uji coba yang valid (format Indonesia) tidak salah diabaikan sebagai spam/default TradingView.

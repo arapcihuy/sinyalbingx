@@ -41,7 +41,7 @@ I have performed a static code review of the `ai_trading/gemini_filter.py`, `ai_
 - In `webhook_server.py` at lines 297-302:
   ```python
   incoming_secret = data.get("secret") or query_params.get("secret")
-  expected_secret = os.getenv("REDACTED_WEBHOOK_SECRET", "")
+  expected_secret = os.getenv("WEBHOOK_SECRET", "")
   if expected_secret and incoming_secret != expected_secret:
       log.warning(f"Unauthorized access attempt: secret mismatch")
       self._respond(401, {"error": "unauthorized"})
@@ -72,7 +72,7 @@ Based on the observations:
    - Panggilan HTTP ke 9Router dan Gemini API masing-masing memiliki timeout 15 detik. Jika terjadi hang beruntun pada kedua koneksi ini, pemrosesan filter AI di latar belakang bisa memakan waktu hingga 30 detik sebelum gagal. Hal ini dapat menghambat eksekusi order trading yang sensitif terhadap waktu.
    - Data mock netral dengan harga konstan (`open == close`) dan volume `0.0` akan dikirim ke LLM jika API BingX gagal. Lilin tanpa pergerakan dan tanpa volume ini kemungkinan besar akan ditolak oleh model penyaringan AI, memicu False Negative.
 2. **Observation B** menunjukkan celah keamanan serius:
-   - Jika `REDACTED_WEBHOOK_SECRET` kosong di environment, `expected_secret` bernilai `""` (falsy), sehingga kondisi `if expected_secret` bernilai `False` dan bypass pengecekan secret. Artinya, siapa saja dapat mengirim payload POST dan memicu eksekusi order riil di BingX.
+   - Jika `WEBHOOK_SECRET` kosong di environment, `expected_secret` bernilai `""` (falsy), sehingga kondisi `if expected_secret` bernilai `False` dan bypass pengecekan secret. Artinya, siapa saja dapat mengirim payload POST dan memicu eksekusi order riil di BingX.
    - Perbandingan `incoming_secret != expected_secret` rentan terhadap Timing Attack.
    - Chat ID Telegram `7809584261` di-hardcode ke dalam codebase. Jika variabel environment `TELEGRAM_CHAT_ID` tidak diset secara eksplisit oleh pengguna, bot Telegram akan membocorkan data posisi trading sensitif dan menerima kendali penuh dari pemilik ID Telegram tersebut.
    - Server menelurkan thread tanpa batasan menggunakan `threading.Thread(...)`. Apabila terjadi badai request atau serangan Denial of Service (DoS) flooding, server dapat mengalami kehabisan sumber daya (CPU/RAM exhaustion).
@@ -97,7 +97,7 @@ Arsitektur penyaringan sinyal AI Tradentix saat ini memiliki beberapa celah kean
 ## 5. Verification Method
 Untuk melakukan verifikasi mandiri terhadap celah dan perilaku yang diamati:
 1. **Verifikasi Bypass Webhook Secret**:
-   - Jalankan `webhook_server.py` secara lokal dengan mengosongkan variabel lingkungan `REDACTED_WEBHOOK_SECRET=""`.
+   - Jalankan `webhook_server.py` secara lokal dengan mengosongkan variabel lingkungan `WEBHOOK_SECRET=""`.
    - Jalankan perintah `curl` (atau script pengujian HTTP) untuk mengirim POST request ke `http://127.0.0.1:8080/tradingview` dengan payload JSON tanpa key `secret`.
    - Amati apakah server mengembalikan respons `200 OK` (menandakan bypass sukses).
 2. **Verifikasi Peneluran Thread**:

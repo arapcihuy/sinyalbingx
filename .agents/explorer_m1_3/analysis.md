@@ -70,7 +70,7 @@ Audit ini berhasil mengidentifikasi **4 temuan kritis** yang berdampak langsung 
 #### Temuan 3: Paparan Informasi Sensitif via Query String URL pada Webhook (Medium Severity)
 * **Lokasi Kode**: `webhook_server.py` (Baris 295-302)
 * **Deskripsi Masalah**:
-  Mekanisme autentikasi webhook server membandingkan parameter `secret` yang dikirim dari klien dengan `REDACTED_WEBHOOK_SECRET` di `.env`. 
+  Mekanisme autentikasi webhook server membandingkan parameter `secret` yang dikirim dari klien dengan `WEBHOOK_SECRET` di `.env`. 
   ```python
   incoming_secret = data.get("secret") or query_params.get("secret")
   ```

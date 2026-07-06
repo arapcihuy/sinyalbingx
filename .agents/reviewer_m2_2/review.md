@@ -71,7 +71,7 @@ Oleh karena itu, verdict untuk review ini adalah **REQUEST_CHANGES**.
 *   **Pencegahan Timing Attack pada Secret Webhook** $\rightarrow$ *VERIFIED* $\rightarrow$ **PASS**  
     *Method*: Kode di `webhook_server.py:336` menggunakan `secrets.compare_digest(incoming_secret, expected_secret)` yang menjamin perbandingan string konstan waktu.
 *   **Bypass Proteksi Secret Webhook Dicegah** $\rightarrow$ *VERIFIED* $\rightarrow$ **PASS**  
-    *Method*: Kode di `webhook_server.py:332` memastikan bahwa jika `REDACTED_WEBHOOK_SECRET` kosong di environment, sistem menolak request dengan HTTP 500 alih-alih mengizinkan bypass.
+    *Method*: Kode di `webhook_server.py:332` memastikan bahwa jika `WEBHOOK_SECRET` kosong di environment, sistem menolak request dengan HTTP 500 alih-alih mengizinkan bypass.
 *   **Mitigasi Unbounded Threading DoS** $\rightarrow$ *VERIFIED* $\rightarrow$ **PASS**  
     *Method*: Menggunakan `ThreadPoolExecutor(max_workers=5)` untuk memproses sinyal secara asinkron. Uji coba dengan `scratch/test_threadpool_limit.py` membuktikan bahwa beban kerja dibatasi maksimal 5 thread paralel secara akurat.
 *   **Penanganan K-Line Offline Tanpa Bias AI** $\rightarrow$ *VERIFIED* $\rightarrow$ **PASS**  

@@ -26,8 +26,8 @@
 // ⚙️ KONFIGURASI
 const CONFIG = {
   BINGX_API_KEY:        'YOUR_BINGX_API_KEY',
-  REDACTED_SECRET_KEY:     'YOUR_REDACTED_SECRET_KEY',
-  REDACTED_WEBHOOK_SECRET:       'YOUR_REDACTED_WEBHOOK_SECRET',
+  SECRET_KEY:     'YOUR_SECRET_KEY',
+  WEBHOOK_SECRET:       'YOUR_WEBHOOK_SECRET',
   PAPER_MODE:           true,          // true = testing
   RISK_PER_TRADE:       2,             // % saldo per trade (1-5%)
   POSITION_SIZE_USDT:   100,           // fallback ukuran posisi untuk mode paper
@@ -61,7 +61,7 @@ export default {
       const data = await request.json();
       console.log('[INCOMING]', JSON.stringify(data));
 
-      if (data.secret !== CONFIG.REDACTED_WEBHOOK_SECRET) {
+      if (data.secret !== CONFIG.WEBHOOK_SECRET) {
         return new Response('Unauthorized', { status: 401, headers: cors() });
       }
 
@@ -283,7 +283,7 @@ async function apiCall(path, params) {
     .map(([k, v]) => `${k}=${v}`)
     .join('&');
 
-  const signature = await hmacSHA256(queryStr, CONFIG.REDACTED_SECRET_KEY);
+  const signature = await hmacSHA256(queryStr, CONFIG.SECRET_KEY);
   const url = `https://open-api.bingx.com${path}`;
   const body = `${queryStr}&signature=${signature}`;
 

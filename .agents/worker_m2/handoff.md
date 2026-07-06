@@ -5,7 +5,7 @@
 - **Hardcoded Telegram ID**: Terdapat ID Telegram `"7809584261"` yang tercatat keras di `allowed_ids` fungsi `is_authorized()` pada `webhook_server.py:554`.
 - **Webhook Secret Bypass & Timing Attack**:
   - Validasi secret webhook lama menggunakan perbandingan string langsung `!=` yang rentan Timing Attack.
-  - Terdapat logika `if expected_secret and incoming_secret != expected_secret:` yang melewatkan verifikasi jika `REDACTED_WEBHOOK_SECRET` di `.env` bernilai kosong.
+  - Terdapat logika `if expected_secret and incoming_secret != expected_secret:` yang melewatkan verifikasi jika `WEBHOOK_SECRET` di `.env` bernilai kosong.
 - **Plain Text Parser Limitation**: Fungsi `parse_plain_text_alert()` lama mengabaikan seluruh alert yang mengandung `"order sell @"` atau `"terisi pada"`, yang justru memicu kegagalan pada pengujian format Indonesia (Test Case 7). Selain itu, tidak terdapat parser untuk membaca secret dari body teks.
 - **Unbounded Threading DoS**: Pemrosesan asinkron per request di `do_POST` `/tradingview` memanggil `threading.Thread(...).start()` secara dinamis tanpa batasan maksimum.
 - **Flat Candles AI Bias**: Pada `ai_trading/gemini_filter.py:106`, jika API K-line offline, sistem mengirim data lilin tiruan datar (flat mock candles) ke Gemini, yang membiaskan model untuk menolak sinyal tersebut.

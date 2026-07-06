@@ -98,13 +98,13 @@ Aliran data sinyal dari luar hingga eksekusi di bursa berlangsung sebagai beriku
 - **Kode Asli**:
   ```python
   incoming_secret = data.get("secret") or query_params.get("secret")
-  expected_secret = os.getenv("REDACTED_WEBHOOK_SECRET", "")
+  expected_secret = os.getenv("WEBHOOK_SECRET", "")
   if expected_secret and incoming_secret != expected_secret:
       log.warning(f"Unauthorized access attempt: secret mismatch")
       self._respond(401, {"error": "unauthorized"})
       return
   ```
-- **Masalah**: Logika kondisional `if expected_secret` berarti jika variabel lingkungan `REDACTED_WEBHOOK_SECRET` tidak dikonfigurasi (bernilai kosong `""`), maka pengecekan tersebut dilewati seluruhnya (`if expected_secret` bernilai `False`).
+- **Masalah**: Logika kondisional `if expected_secret` berarti jika variabel lingkungan `WEBHOOK_SECRET` tidak dikonfigurasi (bernilai kosong `""`), maka pengecekan tersebut dilewati seluruhnya (`if expected_secret` bernilai `False`).
 - **Dampak**: Siapapun di internet dapat mengirimkan sinyal POST palsu ke `/tradingview` untuk memicu eksekusi order riil di bursa BingX tanpa memerlukan kunci secret. Ini merupakan celah keamanan fatal (Authentication Bypass).
 - **Kerentanan Tambahan**: Perbandingan string `incoming_secret != expected_secret` rentan terhadap *Timing Attack*. Perbandingan string standar Python keluar lebih cepat jika karakter pertama tidak cocok, sehingga penyerang dapat menebak secret karakter demi karakter berdasarkan perbedaan waktu respons server milidetik.
 
@@ -164,10 +164,10 @@ Ubah logika verifikasi secret pada `webhook_server.py` untuk mewajibkan keberada
 ```python
 import secrets
 
-expected_secret = os.getenv("REDACTED_WEBHOOK_SECRET", "")
+expected_secret = os.getenv("WEBHOOK_SECRET", "")
 # Wajibkan secret diisi di environment
 if not expected_secret:
-    log.error("CRITICAL: REDACTED_WEBHOOK_SECRET tidak dikonfigurasi di environment!")
+    log.error("CRITICAL: WEBHOOK_SECRET tidak dikonfigurasi di environment!")
     self._respond(500, {"error": "Internal server configuration error"})
     return
 

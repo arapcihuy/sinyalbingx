@@ -90,7 +90,7 @@ cp .env.example .env
 |----------|----------|-------------|
 | `BINGX_API_KEY` | ✅ | BingX API key (Trade only, JANGAN Withdraw!) |
 | `BINGX_API_SECRET` | ✅ | BingX API secret |
-| `REDACTED_WEBHOOK_SECRET` | ✅ | Password rahasia untuk validasi webhook |
+| `WEBHOOK_SECRET` | ✅ | Password rahasia untuk validasi webhook |
 | `SYMBOL` | ✅ | Trading pair (default: `BTC-USDT`) |
 | `LEVERAGE` | ✅ | Leverage 1-100 |
 | `MARGIN_MODE` | ✅ | `ISOLATED` atau `CROSSED` |
@@ -129,11 +129,11 @@ python webhook_server.py
 1. Import `TRADENTIX_BOT_WEBHOOK.pine` ke TradingView
 2. Add indicator ke chart
 3. Buat Alert → Webhook URL: `https://your-domain/webhook`
-4. Isi `REDACTED_WEBHOOK_SECRET` di alert message
+4. Isi `WEBHOOK_SECRET` di alert message
 
 ## 🔐 Security
 
-- **Webhook Secret** — Set `REDACTED_WEBHOOK_SECRET` di `.env` DAN di TradingView alert
+- **Webhook Secret** — Set `WEBHOOK_SECRET` di `.env` DAN di TradingView alert
 - **API Key** — Hanya beri izin Trade, JANGAN Withdraw
 - **Demo Mode** — Selalu test di demo account dulu
 

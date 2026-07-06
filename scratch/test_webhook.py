@@ -7,7 +7,7 @@ print("🚀 Memulai pengujian otomatis untuk Webhook Server...")
 
 # Jalankan server sebagai subprocess di port 8088
 import os
-test_env = {**os.environ, "PORT": "8088", "REDACTED_WEBHOOK_SECRET": "SuperSecretPassword123"}
+test_env = {**os.environ, "PORT": "8088", "WEBHOOK_SECRET": "SuperSecretPassword123"}
 proc = subprocess.Popen([sys.executable, "webhook_server.py"], env=test_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 # Tunggu server online

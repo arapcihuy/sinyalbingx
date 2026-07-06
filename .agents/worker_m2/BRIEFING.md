@@ -24,7 +24,7 @@ Mengimplementasikan perbaikan dan penguatan pada purwarupa sistem trading AI Tra
 - **Success criteria**:
   - `clean_number` mendukung format US dan EU/ID secara dinamis.
   - Hapus hardcoded ID Telegram `"7809584261"`, gunakan `TELEGRAM_CHAT_ID` dari `.env`.
-  - Jika `REDACTED_WEBHOOK_SECRET` kosong/tidak terdefinisi di env, tolak dengan error aman.
+  - Jika `WEBHOOK_SECRET` kosong/tidak terdefinisi di env, tolak dengan error aman.
   - Gunakan `secrets.compare_digest` untuk pencocokan secret.
   - Parser plain text mendeteksi secret/password/key dari body pesan teks.
   - Gunakan `ThreadPoolExecutor(max_workers=5)` untuk membatasi thread.
@@ -35,7 +35,7 @@ Mengimplementasikan perbaikan dan penguatan pada purwarupa sistem trading AI Tra
 ## Key Decisions Made
 - Menggunakan parameter rfind desimal untuk format US/EU secara dinamis di clean_number.
 - Menggunakan ThreadPoolExecutor(max_workers=5) global di webhook_server.py untuk mitigasi DoS.
-- Menolak otorisasi jika REDACTED_WEBHOOK_SECRET kosong di env dan menggunakan compare_digest untuk timing attack mitigation.
+- Menolak otorisasi jika WEBHOOK_SECRET kosong di env dan menggunakan compare_digest untuk timing attack mitigation.
 - Mengembalikan persetujuan otomatis langsung (True, "BingX K-Line API down...") jika API bursa mati demi stabilitas operasional.
 
 ## Artifact Index

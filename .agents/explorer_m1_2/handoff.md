@@ -21,7 +21,7 @@
   - Kasus 3 (Baris 121-132): `SELL` saat tren bearish mock (lilin turun dari 67,000 ke 63,000).
 - **Asinkronitas Webhook Server (`webhook_server.py`)**:
   Di dalam `webhook_server.py` pada penanganan POST ke `/tradingview`:
-  - Baris 299: Memverifikasi `REDACTED_WEBHOOK_SECRET` secara sinkron.
+  - Baris 299: Memverifikasi `WEBHOOK_SECRET` secara sinkron.
   - Baris 338-342: Menjalankan pemrosesan asinkron di thread baru:
     ```python
     # 4. Jalankan Eksekusi secara Asinkron
