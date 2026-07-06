@@ -8,6 +8,24 @@ os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
 os.environ['SSL_CERT_FILE'] = certifi.where()
 import certifi
 import os
+
+# ── RATE LIMIT GUARD ──
+_rate_limit_until = 0  # unix timestamp when rate limit clears
+
+def _check_rate_limit():
+    """Wait if BingX rate limit is active (100410)."""
+    global _rate_limit_until
+    now = time.time()
+    if now < _rate_limit_until:
+        wait = _rate_limit_until - now
+        import logging as _log
+        _log.getLogger(__name__).warning(f"⏳ Rate limit aktif, tunggu {wait:.0f}s...")
+        time.sleep(wait + 1)  # +1s buffer
+
+def _set_rate_limit(until_ts_ms: int):
+    """Set rate limit cooldown from BingX 100410 response."""
+    global _rate_limit_until
+    _rate_limit_until = until_ts_ms / 1000 + 5  # +5s buffer
 os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
 import json
 import os
@@ -82,6 +100,7 @@ def _get_headers() -> dict:
 def _request(method: str, path: str, params: dict = None) -> dict:
     """Buat request ke BingX API dengan pemisahan Query vs Body untuk V2."""
     import logging as _log
+    _check_rate_limit()  # Wait if rate limited
     _logger = _log.getLogger(__name__)
     
     if params is None:
