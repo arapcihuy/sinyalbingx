@@ -26,6 +26,8 @@ SYMBOL_CONFIG = {
         "qty_precision": 3,
         "price_precision": 2,
         "min_margin": 5.0,          # BingX minimum margin per position
+        "max_lev": 150,             # BingX max leverage BTC
+        "mmr": 0.004,               # Maintenance margin rate BTC
     },
     "ETH-USDT": {
         "atr_period": 14,
@@ -37,6 +39,8 @@ SYMBOL_CONFIG = {
         "qty_precision": 2,
         "price_precision": 2,
         "min_margin": 2.0,
+        "max_lev": 100,
+        "mmr": 0.005,
     },
     "BNB-USDT": {
         "atr_period": 14,
@@ -48,6 +52,8 @@ SYMBOL_CONFIG = {
         "qty_precision": 2,
         "price_precision": 2,
         "min_margin": 1.0,
+        "max_lev": 75,
+        "mmr": 0.005,
     },
 }
 
@@ -62,6 +68,8 @@ DEFAULT_CONFIG = {
     "qty_precision": 3,
     "price_precision": 2,
     "min_margin": 1.0,  # default min margin untuk symbol yg ga dikenal
+    "max_lev": 100,
+    "mmr": 0.005,
 }
 
 # Leverage tiers berdasarkan saldo (leverage dinaikkan untuk saldo kecil agar margin cukup memasang 4 TP)
@@ -488,11 +496,11 @@ def calculate_position_size(balance: float, entry_price: float, sl_price: float,
             qty = (max_margin * leverage) / entry_price
             logger.info(f"📐 QTY CAP: {symbol} margin ${margin:.2f} > 40% (${max_margin:.2f}) → qty capped ke {qty:.6f}")
     
-    # 3. Naikkan qty ke minimum 4 TP jika perlu
+    # 3. Naikkan qty ke minimum jika perlu (BingX min order ~$2 notional)
     desired_qty = qty  # qty hasil perhitungan risk
-    min_qty_for_4tp = cfg.get("min_qty", 0.001) * 4
+    min_qty_for_4tp = cfg.get("min_qty", 0.001)  # ponytail: BingX accepts split across TPs, no need 4x
     if desired_qty < min_qty_for_4tp:
-        logger.warning(f"⚠️ Qty {desired_qty:.4f} < min 4TP ({min_qty_for_4tp}). Setting ke {min_qty_for_4tp}")
+        logger.warning(f"⚠️ Qty {desired_qty:.4f} < min ({min_qty_for_4tp}). Setting ke {min_qty_for_4tp}")
         desired_qty = min_qty_for_4tp
 
     qty = desired_qty

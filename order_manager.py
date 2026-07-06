@@ -754,10 +754,10 @@ def execute_signal(data: dict) -> dict:
         open_count = len(active_symbols)
         
         # Risk% disesuaikan jumlah posisi & sisa margin
-        risk_pct = float(brain_engine.get_risk_for_positions(available, open_count, active_symbols))
+        risk_pct = float(brain_engine.get_risk_for_positions(balance, open_count, active_symbols))
         
         # Leverage disesuaikan utk target margin (2x risk_amount, min = min_margin)
-        risk_amount = available * risk_pct / 100
+        risk_amount = balance * risk_pct / 100
         sl_delta = abs(entry_price - sl_price)
         min_margin = cfg.get("min_margin", 1.0)
         max_lev = cfg.get("max_lev", 50)
@@ -778,11 +778,11 @@ def execute_signal(data: dict) -> dict:
         
         # Kalau margin < min_margin, turunin lev
         if margin < min_margin:
-            leverage = brain_engine.get_leverage_for_min_margin(available, entry_price, sl_price, pos_side, symbol)
+            leverage = brain_engine.get_leverage_for_min_margin(balance, entry_price, sl_price, pos_side, symbol)
         else:
             leverage = lev_for_target
         
-        logger.info(f"🧠 BRAIN LEV: {leverage}x | Risk: {risk_pct}% | Open: {open_count} | Available: ${available:.2f}")
+        logger.info(f"🧠 BRAIN LEV: {leverage}x | Risk: {risk_pct}% | Open: {open_count} | Equity: ${balance:.2f} | Available: ${available:.2f}")
     else:
         logger.info(f"📺 BRAIN DISABLED → {symbol} pakai TP/SL dari TV")
 
@@ -824,7 +824,7 @@ def execute_signal(data: dict) -> dict:
     logger.info(f"🛡️ LIQ CHECK: {symbol} {pos_side} | Entry={entry_price:.4f} SL={sl_price:.4f} Liq={est_liq_final:.4f} Lev={leverage}x")
 
     # Hitung kuantitas cerdas multi-TP — pakai available (bukan balance) supaya margin ga meledak
-    _qty_balance = available if brain_enabled else balance
+    _qty_balance = balance  # ponytail: always use equity for fair allocation across all coins
     calc_result = brain_engine.calculate_smart_multi_tp_qty(_qty_balance, entry_price, sl_price, tp_prices, leverage, risk_pct, symbol)
     qtys = calc_result["qtys"]
     qty = calc_result["total_qty"]
@@ -833,7 +833,8 @@ def execute_signal(data: dict) -> dict:
     # ponytail: menurunkan lev menambah margin (karena qty independen lev).
     # Fix: cap qty, bukan lev.
     if brain_enabled and available > 0:
-        max_margin_per_pos = available * 0.40
+        # Fair share: equity dibagi rata semua posisi (termasuk yang baru)
+        max_margin_per_pos = balance / max(open_count, 1)
         actual_margin = calc_result["margin"]
         if actual_margin > max_margin_per_pos and actual_margin > 0:
             # Cap qty supaya margin muat, lev tetap aman dari LIQ GUARD
@@ -846,7 +847,7 @@ def execute_signal(data: dict) -> dict:
                 calc_result["qtys"] = qtys
                 calc_result["total_qty"] = qty
                 calc_result["margin"] = (qty * entry_price) / leverage
-                logger.info(f"🎯 MARGIN CAP: {symbol} qty {qty} | margin ${calc_result['margin']:.2f} ≤ ${max_margin_per_pos:.2f} (40% of ${available:.2f})")
+                logger.info(f"🎯 MARGIN CAP: {symbol} qty {qty} | margin ${calc_result['margin']:.2f} ≤ ${max_margin_per_pos:.2f} (fair share of ${balance:.2f} / {open_count} positions)")
 
     # ── POST-QTY DEDUP: brain_engine hard limiter bisa menyamakan harga TP → dedup lagi ──
     seen_prices = set()

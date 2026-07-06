@@ -9,4 +9,17 @@
 ## Otak Bot (Leverage & Margin)
 1. **Leverage & Quantity**: Urusan leverage, margin mode, dan quantity posisi sepenuhnya menggunakan perhitungan otak bot (`brain_engine`).
 2. **Dinamis untuk Saldo Kecil**: Jika saldo bursa kecil, naikkan leverage (misal ke 20x atau 25x) untuk memastikan margin cukup untuk menampung minimal 4 order TP (BingX min qty order 0.001 BTC).
-3. **Audit Posisi**: Selalu pastikan jumlah total Qty TP tidak melebihi Qty posisi aktif ($\sum \text{TP} \le \text{Posisi}$) untuk mencegah pembukaan order SHORT baru tidak sengaja.
+3. **Audit Posisi**: Selalu pastikan jumlah total Qty TP tidak melebihi Qty posisi aktif ($\\sum \\text{TP} \\le \\text{Posisi}$) untuk mencegah pembukaan order SHORT baru tidak sengaja.
+
+## Semua Coin Wajib Masuk
+1. **No Block**: Semua 6 coin (BTC, ETH, SOL, XRP, BNB, ADA) WAJIB bisa entry kapan saja. Tidak ada coin yang di-block karena margin "habis".
+2. **Fair Share Margin**: `max_margin_per_pos = equity / jumlah_posisi`. Setiap coin dapat jatah adil dari total equity, bukan dari sisa available.
+3. **Leverage Auto-Adjust**: Leverage naik otomatis sampai margin muat dalam jatah. Kalau leverage mentok `max_lev` dan masih kelebihan → qty dikurangi (bukan block).
+4. **Risk Pakai Equity**: Risk calculation selalu pakai `balance` (equity total), BUKAN `available` (sisa setelah posisi lain). Ini memastikan coin kecil ga "makan" jatah coin besar.
+5. **Min Qty BingX**: BingX min order 0.001 (BTC) / 0.01 (lainnya). Qty boleh dibagi di bawah min untuk TP split — BingX terima.
+
+## Margin Allocation Philosophy
+- Equity $35 → 6 coin → ~$5.8/coin
+- BTC min 0.001 × $63k = $63 notional → butuh leverage cukup tinggi (15-20x) supaya margin ~$3-4
+- Coin kecil (SOL/ADA/XRP/BNB) notional $10-30 → leverage 15-20x → margin $0.5-2
+- Total margin ~$8-12 dari $35 equity = 23-34% utilization → aman
