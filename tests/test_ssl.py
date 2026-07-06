@@ -6,7 +6,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("test_ssl")
 
 token = "8610835184:AAFHpzr3OH0UGh8NvlVwl64RBsfgn_8Fu7Y"
-chat_id = "7809584261"
+chat_id = "YOUR_CHAT_ID"
 url = f"https://api.telegram.org/bot{token}/getMe"
 
 logger.info("Test 1: Standard requests")
