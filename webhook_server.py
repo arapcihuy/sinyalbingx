@@ -447,7 +447,7 @@ class Handler(BaseHTTPRequestHandler):
                 incoming_secret = data.get("secret") or query_params.get("secret") or ""
                 expected_secret = os.getenv("WEBHOOK_SECRET", "")
                 if not expected_secret:
-                    log.error("REDACTED_WEBHOOK_SECRET is not configured in environment. Rejecting request for security.")
+                    log.error("WEBHOOK_SECRET is not configured in environment. Rejecting request for security.")
                     self._respond(500, {"error": "Internal Server Error: Webhook configuration missing"})
                     return
                 if not secrets.compare_digest(incoming_secret, expected_secret):

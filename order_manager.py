@@ -1017,17 +1017,20 @@ def execute_signal(data: dict) -> dict:
     # Live Execution
     bx.set_leverage(symbol, leverage, pos_side)
 
-    # ── CANCEL ALL EXISTING ORDERS sebelum pasang SL/TP baru ──
-    # Mencegah SL/TP lama menumpuk jadi dobel
-    try:
-        bx.cancel_all_orders(symbol)
-        logger.info(f"🧹 Semua order lama di-{symbol} dibuang sebelum entry baru.")
-    except Exception as cancel_err:
-        logger.warning(f"⚠️ Gagal cancel orders {symbol}: {cancel_err}")
-
     order_res = bx.place_order(symbol, order_side, pos_side, qty, "MARKET")
 
+    # ── CANCEL ALL EXISTING ORDERS setelah entry SUKSES ──
+    # ponytail: dahulu cancel SEBELUM entry → re-sent signal hapus SL/TP lama walau entry gagal.
+    # Sekarang cancel HANYA jika entry berhasil → posisi lama tetap terlindungi sampai entry baru fill.
+
     if order_res.get("code") == 0:
+        # ── CANCEL ALL EXISTING ORDERS setelah entry SUKSES ──
+        try:
+            bx.cancel_all_orders(symbol)
+            logger.info(f"🧹 Semua order lama di-{symbol} dibuang setelah entry baru fill.")
+        except Exception as cancel_err:
+            logger.warning(f"⚠️ Gagal cancel orders {symbol}: {cancel_err}")
+
         # ── Pakai actual fill price dari exchange, bukan TV price ──
         tv_entry = entry_price  # simpan TV price sebelum overwrite
         actual_entry = float(order_res.get("data", {}).get("order", {}).get("avgPrice", 0)) or entry_price
