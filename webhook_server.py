@@ -533,7 +533,7 @@ def start_background_monitor():
                 order_manager.monitor_and_sync_positions()
             except Exception as e:
                 log.error(f"Error di background monitor loop: {e}")
-            time.sleep(30) # ponytail: was 15s, bumped to 30s to avoid 100410 rate limit
+            time.sleep(120) # ponytail: was 30s, bumped to 120s to avoid 100410 rate limit cascade
             
     t = threading.Thread(target=monitor_loop, daemon=True)
     t.start()
