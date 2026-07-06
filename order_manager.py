@@ -1020,6 +1020,20 @@ def execute_signal(data: dict) -> dict:
 
     order_res = bx.place_order(symbol, order_side, pos_side, qty, "MARKET")
 
+    # ── RETRY ON INSUFFICIENT MARGIN: kurangi qty 50%, coba lagi ──
+    if order_res.get("code") != 0 and "insufficient" in str(order_res.get("msg", "")).lower() and qty > 0:
+        for retry in range(3):
+            qty = round(qty * 0.5, cfg.get("qty_precision", 3))
+            notional = qty * entry_price
+            if notional < 2:  # BingX min notional $2
+                logger.warning(f"🚫 RETRY {retry+1}: {symbol} qty terlalu kecil {qty} (notional ${notional:.2f}) → stop")
+                break
+            logger.warning(f"🔄 RETRY {retry+1}: {symbol} insufficient margin → kurangi qty ke {qty} (notional ${notional:.2f})")
+            order_res = bx.place_order(symbol, order_side, pos_side, qty, "MARKET")
+            if order_res.get("code") == 0:
+                logger.info(f"✅ RETRY {retry+1} SUKSES: {symbol} qty={qty}")
+                break
+
     # ── CANCEL ALL EXISTING ORDERS setelah entry SUKSES ──
     # ponytail: dahulu cancel SEBELUM entry → re-sent signal hapus SL/TP lama walau entry gagal.
     # Sekarang cancel HANYA jika entry berhasil → posisi lama tetap terlindungi sampai entry baru fill.
@@ -1162,23 +1176,7 @@ def execute_signal(data: dict) -> dict:
         return {"status": "success", "symbol": symbol, "qty": qty}
     else:
         reason = order_res.get('msg') or str(order_res)
-        # ── RETRY ON INSUFFICIENT MARGIN: kurangi qty 50%, coba lagi ──
-        if "insufficient" in str(reason).lower() and qty > 0:
-            for retry in range(3):
-                qty = round(qty * 0.5, cfg.get("qty_precision", 3))
-                notional = qty * entry_price
-                if notional < 2:  # BingX min notional $2
-                    break
-                logger.warning(f"🔄 RETRY {retry+1}: {symbol} insufficient margin → kurangi qty ke {qty} (notional ${notional:.2f})")
-                order_res = bx.place_order(symbol, order_side, pos_side, qty, "MARKET")
-                if order_res.get("code") == 0:
-                    logger.info(f"✅ RETRY {retry+1} SUKSES: {symbol} qty={qty}")
-                    break
-                reason = order_res.get('msg') or str(order_res)
-            else:
-                return {"status": f"failed: {reason}", "symbol": symbol, "reason": reason}
-        else:
-            return {"status": f"failed: {reason}", "symbol": symbol, "reason": reason}
+        return {"status": f"failed: {reason}", "symbol": symbol, "reason": reason}
 
 
 def _close_position(symbol: str) -> dict:
