@@ -1061,6 +1061,22 @@ def execute_signal(data: dict) -> dict:
                     tp_prices[i] = 0
                     qtys[i] = 0
 
+        # ── MIN SL GUARD (CLAUDE.md): SL minimal 2% BTC, 3% ETH, 2.5% lainnya ──
+        if sl_price > 0:
+            _min_sl = _get_min_sl_pct(symbol)
+            if pos_side == "LONG":
+                sl_dist = (entry_price - sl_price) / entry_price
+                if sl_dist < _min_sl:
+                    old_sl = sl_price
+                    sl_price = _round_price(entry_price * (1.0 - _min_sl), symbol)
+                    logger.warning(f"🛡️ MIN SL GUARD: {symbol} LONG SL {old_sl} ({sl_dist*100:.2f}%) < min {_min_sl*100}% → widened to {sl_price}")
+            else:  # SHORT
+                sl_dist = (sl_price - entry_price) / entry_price
+                if sl_dist < _min_sl:
+                    old_sl = sl_price
+                    sl_price = _round_price(entry_price * (1.0 + _min_sl), symbol)
+                    logger.warning(f"🛡️ MIN SL GUARD: {symbol} SHORT SL {old_sl} ({sl_dist*100:.2f}%) < min {_min_sl*100}% → widened to {sl_price}")
+
         # ── 1. Pasang STOP LOSS DULU (sebelum simpan state) ──
         sl_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": symbol, "side": sl_side, "positionSide": pos_side,
