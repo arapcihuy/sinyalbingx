@@ -1080,14 +1080,27 @@ def execute_signal(data: dict) -> dict:
         placed_tp = []
         for i, tp_price in enumerate(tp_prices):
             tp_qty = qtys[i]
+            is_last_tp = (i == len(tp_prices) - 1) or (i < len(tp_prices) - 1 and all(tp_prices[j] <= 0 for j in range(i+1, len(tp_prices))))
             if tp_price > 0 and tp_qty > 0:
-                tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
-                    "symbol": symbol, "side": sl_side, "positionSide": pos_side,
-                    "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price, "quantity": tp_qty,
-                    "priceProtect": "true"
-                })
+                if is_last_tp:
+                    # TP terakhir → FULL CLOSE (closePosition=true, tanpa qty)
+                    # Ini memastikan sisa posisi apapun (rounding error dll) pasti ke-close
+                    tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
+                        "symbol": symbol, "side": sl_side, "positionSide": pos_side,
+                        "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price,
+                        "closePosition": "true",
+                        "priceProtect": "true"
+                    })
+                    logger.info(f"🎯 TP{i+1} FULL CLOSE @ {tp_price}")
+                else:
+                    # TP partial → qty specifik
+                    tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
+                        "symbol": symbol, "side": sl_side, "positionSide": pos_side,
+                        "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price, "quantity": tp_qty,
+                        "priceProtect": "true"
+                    })
                 if tp_res.get("code") == 0:
-                    placed_tp.append((tp_price, tp_qty))
+                    placed_tp.append((tp_price, tp_qty if not is_last_tp else "FULL"))
                 else:
                     logger.warning(f"🎯 Gagal pasang TP{i+1} untuk {symbol}: {tp_res.get('msg')}")
                 time.sleep(2)  # Rate limit: 2s gap (CLAUDE.md)

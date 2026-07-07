@@ -548,7 +548,8 @@ def calculate_smart_multi_tp_qty(balance: float, entry_price: float, sl_price: f
             else:
                 q = total_qty * weights[tp_idx]
             
-            q = round(max(q, cfg.get("min_qty", 0.001)), qty_prec)
+            # ponytail: no min_qty floor for TP split — BingX accepts sub-min qty per TP order (CLAUDE.md §Min Qty)
+            q = round(q, qty_prec)
             final_qtys[i] = q
             assigned_qty += q
             tp_idx += 1
