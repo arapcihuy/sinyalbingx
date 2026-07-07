@@ -520,6 +520,9 @@ def calculate_smart_multi_tp_qty(balance: float, entry_price: float, sl_price: f
     """
     cfg = get_symbol_config(symbol)
     qty_prec = cfg.get("qty_precision", 2)
+    # ponytail: TP split perlu presisi lebih tinggi dari entry qty
+    # BingX terima sub-min qty untuk TP orders (CLAUDE.md §Min Qty)
+    tp_prec = max(qty_prec + 1, 4)
     
     # 1. Hitung total qty berdasarkan budget risk
     total_qty = calculate_position_size(balance, entry_price, sl_price, risk_percent, symbol, leverage)
@@ -549,13 +552,13 @@ def calculate_smart_multi_tp_qty(balance: float, entry_price: float, sl_price: f
                 q = total_qty * weights[tp_idx]
             
             # ponytail: no min_qty floor for TP split — BingX accepts sub-min qty per TP order (CLAUDE.md §Min Qty)
-            q = round(q, qty_prec)
+            q = round(q, tp_prec)
             final_qtys[i] = q
             assigned_qty += q
             tp_idx += 1
             
     # 3. Recalculate total qty after rounding
-    actual_total = round(sum(final_qtys), qty_prec)
+    actual_total = round(sum(final_qtys), tp_prec)
     
     # [REMOVED] Dynamic TP Consolidation — TP/SL fully from TV, bot tidak modify
             
