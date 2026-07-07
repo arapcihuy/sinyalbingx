@@ -674,8 +674,10 @@ def execute_signal(data: dict) -> dict:
         if not paper_mode:
             balance_data = bx._request('GET', '/openApi/swap/v2/user/balance')
             if balance_data and balance_data.get("code") == 0:
-                balance = float(balance_data["data"]["balance"]["availableMargin"])
-                _LAST_KNOWN_BALANCE = float(balance_data["data"]["balance"]["equity"])
+                # CLAUDE.md: Risk Pakai Equity — pakai equity total, BUKAN available
+                # Biar semua coin wajib masuk & fair share dari total pool
+                balance = float(balance_data["data"]["balance"]["equity"])
+                _LAST_KNOWN_BALANCE = balance
     except Exception as e:
         logger.error(f"Gagal update balance live: {e}")
     
@@ -1491,13 +1493,25 @@ def sync_missing_tpsl():
                             tp_qty = round(amt * weights[i], 3) if i < len(weights) else round(amt * 0.1, 3)
                             tp_qty = min(remaining_qty_to_cover, tp_qty)
                             
+                            # Cek apakah ini TP terakhir yang valid
+                            is_last_tp = all(tp_prices[j] <= 0 for j in range(i+1, len(tp_prices)))
+                            
                             if tp_qty > 0:
                                 logger.info(f"⚠️ {symbol} missing TP{i+1}. Memasang TP {tp_val} (qty: {tp_qty})...")
-                                bx._request("POST", "/openApi/swap/v2/trade/order", {
-                                    "symbol": symbol, "side": sl_side, "positionSide": side,
-                                    "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_val, "quantity": tp_qty,
-                                    "priceProtect": "true"
-                                })
+                                if is_last_tp:
+                                    # TP terakhir → FULL CLOSE (closePosition=true)
+                                    bx._request("POST", "/openApi/swap/v2/trade/order", {
+                                        "symbol": symbol, "side": sl_side, "positionSide": side,
+                                        "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_val,
+                                        "closePosition": "true",
+                                        "priceProtect": "true"
+                                    })
+                                else:
+                                    bx._request("POST", "/openApi/swap/v2/trade/order", {
+                                        "symbol": symbol, "side": sl_side, "positionSide": side,
+                                        "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_val, "quantity": tp_qty,
+                                        "priceProtect": "true"
+                                    })
                                 current_tp_qty += tp_qty
                                 tp_count += 1
                         except Exception as e:
@@ -1717,14 +1731,25 @@ def check_and_update_trailing_sl():
                                 if not has_tp:
                                     for i, tp_price in enumerate(tp_prices):
                                         tp_qty = round(qty * weights[i], 4)
+                                        is_last_tp = all(tp_prices[j] <= 0 for j in range(i+1, len(tp_prices)))
                                         if tp_price > 0 and tp_qty > 0:
-                                            bx._request("POST", "/openApi/swap/v2/trade/order", {
-                                                "symbol": symbol, "side": "BUY" if pos_side == "SHORT" else "SELL",
-                                                "positionSide": pos_side, "type": "TAKE_PROFIT_MARKET",
-                                                "stopPrice": tp_price, "quantity": tp_qty,
-                                                "priceProtect": "true"
-                                            })
-                                            logger.info(f"✅ Adopt TP{i+1} dipasang {symbol} @ {tp_price} (qty: {tp_qty})")
+                                            if is_last_tp:
+                                                # TP terakhir → FULL CLOSE
+                                                bx._request("POST", "/openApi/swap/v2/trade/order", {
+                                                    "symbol": symbol, "side": "BUY" if pos_side == "SHORT" else "SELL",
+                                                    "positionSide": pos_side, "type": "TAKE_PROFIT_MARKET",
+                                                    "stopPrice": tp_price,
+                                                    "closePosition": "true",
+                                                    "priceProtect": "true"
+                                                })
+                                            else:
+                                                bx._request("POST", "/openApi/swap/v2/trade/order", {
+                                                    "symbol": symbol, "side": "BUY" if pos_side == "SHORT" else "SELL",
+                                                    "positionSide": pos_side, "type": "TAKE_PROFIT_MARKET",
+                                                    "stopPrice": tp_price, "quantity": tp_qty,
+                                                    "priceProtect": "true"
+                                                })
+                                            logger.info(f"✅ Adopt TP{i+1} dipasang {symbol} @ {tp_price} (qty: {'FULL' if is_last_tp else tp_qty})")
                                             time.sleep(2)  # Rate limit: 2s gap (CLAUDE.md)
                                     logger.info(f"✅ Adopt {len(tp_prices)} TP dipasang {symbol}")
                                 else:
@@ -1997,13 +2022,25 @@ def check_and_update_trailing_sl():
                                     # ponytail: no min_qty floor — BingX accepts sub-min qty for TP split
                                     _tp_qty = min(round(qty * weights[_i], 4), _remaining)
                                 if _tp_qty > 0:
-                                    _tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
-                                        "symbol": symbol, "side": sl_side, "positionSide": pos_side,
-                                        "type": "TAKE_PROFIT_MARKET", "stopPrice": _tp_val, "quantity": _tp_qty
-                                    })
+                                    # Cek apakah ini TP terakhir yang valid
+                                    _is_last_tp = all(tp_prices_re[j] <= 0 for j in range(_i+1, len(tp_prices_re)))
+                                    if _is_last_tp:
+                                        # TP terakhir → FULL CLOSE
+                                        _tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
+                                            "symbol": symbol, "side": sl_side, "positionSide": pos_side,
+                                            "type": "TAKE_PROFIT_MARKET", "stopPrice": _tp_val,
+                                            "closePosition": "true",
+                                            "priceProtect": "true"
+                                        })
+                                    else:
+                                        _tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
+                                            "symbol": symbol, "side": sl_side, "positionSide": pos_side,
+                                            "type": "TAKE_PROFIT_MARKET", "stopPrice": _tp_val, "quantity": _tp_qty,
+                                            "priceProtect": "true"
+                                        })
                                     if _tp_res.get("code", -1) == 0:
                                         current_tp_qty_placed += _tp_qty
-                                        logger.info(f"🎯 Re-TP{_i+1} terpasang di {_tp_val} (qty: {_tp_qty})")
+                                        logger.info(f"🎯 Re-TP{_i+1} terpasang di {_tp_val} (qty: {'FULL' if _is_last_tp else _tp_qty})")
                                     else:
                                         logger.warning(f"⚠️ Re-TP{_i+1} gagal: {_tp_res.get('msg')}")
                         else:
