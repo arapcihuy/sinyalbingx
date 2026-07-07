@@ -1487,9 +1487,8 @@ def sync_missing_tpsl():
                             cfg = get_symbol_config(symbol)
                             min_qty = cfg.get("min_qty", 0.001)
                             
-                            # Coba pakai standard weight, tapi clamp agar gak lewat amt, minimal min_qty
+                            # ponytail: no min_qty floor — BingX accepts sub-min qty for TP split
                             tp_qty = round(amt * weights[i], 3) if i < len(weights) else round(amt * 0.1, 3)
-                            tp_qty = max(min_qty, tp_qty)
                             tp_qty = min(remaining_qty_to_cover, tp_qty)
                             
                             if tp_qty > 0:
@@ -1995,7 +1994,8 @@ def check_and_update_trailing_sl():
                                     _tp_qty = tp_qtys_from_state[_i]
                                 else:
                                     _remaining = qty - current_tp_qty_placed
-                                    _tp_qty = max(_min_qty_re, min(round(qty * weights[_i], 4), _remaining))
+                                    # ponytail: no min_qty floor — BingX accepts sub-min qty for TP split
+                                    _tp_qty = min(round(qty * weights[_i], 4), _remaining)
                                 if _tp_qty > 0:
                                     _tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
                                         "symbol": symbol, "side": sl_side, "positionSide": pos_side,
