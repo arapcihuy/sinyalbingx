@@ -348,6 +348,7 @@ def sync_from_exchange_on_startup():
                     "peak_price": old_trade.get("peak_price", 0),
                     "trailing_sl_price": old_trade.get("trailing_sl_price", 0),
                     "milestone_reached": old_trade.get("milestone_reached", ""),
+                    "created_at": old_trade.get("created_at", int(p.get("createTime", 0)) / 1000),
                 }
             
             # Compare: jika berbeda, update
@@ -1686,7 +1687,7 @@ def check_tp_hits():
             all_orders = history_res.get("data", {}).get("orders", [])
             
             # Filter: hanya TAKE_PROFIT_MARKET yang statusnya FILLED dan setelah trade dibuka
-            trade_created = trade.get("created_at", 0)
+            trade_created = trade.get("created_at") or 0
             filled_tp = []
             for o in all_orders:
                 if o.get("type") == "TAKE_PROFIT_MARKET" and o.get("status") == "FILLED":
