@@ -1685,10 +1685,15 @@ def check_tp_hits():
                 continue
             all_orders = history_res.get("data", {}).get("orders", [])
             
-            # Filter: hanya TAKE_PROFIT_MARKET yang statusnya FILLED
+            # Filter: hanya TAKE_PROFIT_MARKET yang statusnya FILLED dan setelah trade dibuka
+            trade_created = trade.get("created_at", 0)
             filled_tp = []
             for o in all_orders:
                 if o.get("type") == "TAKE_PROFIT_MARKET" and o.get("status") == "FILLED":
+                    # Skip old orders dari trade sebelumnya
+                    order_time = int(o.get("updateTime", o.get("time", 0))) / 1000
+                    if trade_created > 0 and order_time < trade_created:
+                        continue
                     filled_tp.append(float(o.get("stopPrice", 0)))
             
             for tp_key, (level, tp_price) in tp_levels.items():
