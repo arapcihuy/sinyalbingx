@@ -28,6 +28,20 @@ def _should_notify(symbol: str, notif_type: str) -> bool:
     _notif_cooldown[key] = time.time()
     return True
 
+def _get_last_tp_idx(tp_prices: list, side: str) -> int:
+    """Return index of TP that should get closePosition=true (last to hit).
+    
+    LONG: highest TP hits last → index of max price
+    SHORT: lowest TP hits last → index of min price
+    """
+    valid = [(i, p) for i, p in enumerate(tp_prices) if p > 0]
+    if not valid:
+        return 0
+    if side == "LONG":
+        return max(valid, key=lambda x: x[1])[0]
+    else:  # SHORT
+        return min(valid, key=lambda x: x[1])[0]
+
 # Global State & Locks
 state_lock = threading.RLock()
 latest_signals = {}
@@ -308,7 +322,7 @@ def sync_from_exchange_on_startup():
                                     tp_ex.append(float(o.get("stopPrice", 0)))
                                 elif "STOP" in o.get("type", ""):
                                     sl_val = float(o.get("stopPrice", 0))
-                            tp_ex.sort()
+                            tp_ex.sort(reverse=(side == "SHORT"))
                             if len(tp_ex) >= 1: tp1_val = tp_ex[0]
                             if len(tp_ex) >= 2: tp2_val = tp_ex[1]
                             if len(tp_ex) >= 3: tp3_val = tp_ex[2]
@@ -396,12 +410,12 @@ def check_paper_exit():
             if t["side"] == "LONG":
                 if curr_price <= t["sl"]:
                     exit_trigger = "SL"
-                elif curr_price >= t["tp"]:
+                elif t.get("tp", 0) > 0 and curr_price >= t["tp"]:
                     exit_trigger = "TP"
             else:  # SHORT
                 if curr_price >= t["sl"]:
                     exit_trigger = "SL"
-                elif curr_price <= t["tp"]:
+                elif t.get("tp", 0) > 0 and curr_price <= t["tp"]:
                     exit_trigger = "TP"
             if exit_trigger:
                 t["status"] = f"CLOSED_{exit_trigger}"
@@ -446,7 +460,10 @@ def notify_tp_hit(symbol: str, tp_level: int, tp_price: float, trade_data: dict)
         TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", None)
         entry = trade_data.get("entry_price", 0)
         side = trade_data.get("side", "LONG")
-        pct = ((tp_price - entry) / entry * 100) if entry > 0 else 0
+        if side == "LONG":
+            pct = ((tp_price - entry) / entry * 100) if entry > 0 else 0
+        else:  # SHORT
+            pct = ((entry - tp_price) / entry * 100) if entry > 0 else 0
         msg = (
             f"🎯 *TP{tp_level} KENA! ({side})*\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
@@ -646,7 +663,11 @@ def execute_signal(data: dict) -> dict:
     sl_side = "SELL" if pos_side == "LONG" else "BUY"
 
     paper_mode = get_paper_mode()
-    entry_price = float(data.get("price", 0)) or bx.get_current_price(symbol)
+    try:
+        entry_price = float(data.get("price", 0)) or bx.get_current_price(symbol)
+    except Exception as e:
+        logger.error(f"❌ Gagal get entry price {symbol}: {e}")
+        return {"status": "failed: cannot get price", "symbol": symbol}
     
     global _LAST_KNOWN_BALANCE
     # Jika paper_mode, hindari panggil API saldo real jika error
@@ -1030,12 +1051,13 @@ def execute_signal(data: dict) -> dict:
 
         # ── SLIPPAGE-ADJUSTED TP/SL: shift semua TP/SL oleh delta actual vs TV ──
         slippage_pct = abs(actual_entry - tv_entry) / max(tv_entry, 1e-8) * 100
+        _prec = get_symbol_precision(symbol)
         if slippage_pct > 0.05:
             delta = actual_entry - tv_entry  # positif = worse fill
-            sl_price = round(sl_price + delta, 3)
+            sl_price = round(sl_price + delta, _prec["price"])
             for i in range(len(tp_prices)):
                 if tp_prices[i] > 0:
-                    tp_prices[i] = round(tp_prices[i] + delta, 3)
+                    tp_prices[i] = round(tp_prices[i] + delta, _prec["price"])
             tp1_price, tp2_price, tp3_price, tp4_price = tp_prices[:4]
             logger.info(f"🎯 SLIPPAGE ADJUST: {symbol} TV={tv_entry} Actual={actual_entry} Delta=${delta:.4f} → TP/SL shifted ({slippage_pct:.4f}%)")
         elif tv_entry != actual_entry:
@@ -1045,7 +1067,7 @@ def execute_signal(data: dict) -> dict:
         if pos_side == "LONG":
             if sl_price >= entry_price:
                 logger.warning(f"🛡️ FIX: LONG SL {sl_price} >= entry {entry_price} → auto-adjust ke entry - 1%")
-                sl_price = round(entry_price * 0.99, 3)
+                sl_price = round(entry_price * 0.99, _prec["price"])
             for i in range(len(tp_prices)):
                 if tp_prices[i] > 0 and tp_prices[i] <= entry_price:
                     logger.warning(f"🎯 FIX: LONG TP{i+1}={tp_prices[i]} <= entry {entry_price} → skip")
@@ -1054,7 +1076,7 @@ def execute_signal(data: dict) -> dict:
         else:  # SHORT
             if sl_price <= entry_price:
                 logger.warning(f"🛡️ FIX: SHORT SL {sl_price} <= entry {entry_price} → auto-adjust ke entry + 1%")
-                sl_price = round(entry_price * 1.01, 3)
+                sl_price = round(entry_price * 1.01, _prec["price"])
             for i in range(len(tp_prices)):
                 if tp_prices[i] > 0 and tp_prices[i] >= entry_price:
                     logger.warning(f"🎯 FIX: SHORT TP{i+1}={tp_prices[i]} >= entry {entry_price} → skip")
@@ -1095,10 +1117,13 @@ def execute_signal(data: dict) -> dict:
         # ── 2. Pasang Tiap Level TP ──
         time.sleep(2)  # BingX rate limit
 
+        # Determine which TP is "last to hit" based on side
+        last_tp_idx = _get_last_tp_idx(tp_prices, pos_side)
+
         placed_tp = []
         for i, tp_price in enumerate(tp_prices):
             tp_qty = qtys[i]
-            is_last_tp = (i == len(tp_prices) - 1) or (i < len(tp_prices) - 1 and all(tp_prices[j] <= 0 for j in range(i+1, len(tp_prices))))
+            is_last_tp = (i == last_tp_idx)
             if tp_price > 0 and tp_qty > 0:
                 if is_last_tp:
                     # TP terakhir → FULL CLOSE (closePosition=true, tanpa qty)
@@ -1200,8 +1225,19 @@ def _close_position(symbol: str) -> dict:
         side = pos["positionSide"]
         qty = abs(float(pos["positionAmt"]))
         close_side = "SELL" if side == "LONG" else "BUY"
-        bx.place_order(symbol, close_side, side, qty)
-    bx.cancel_all_orders(symbol)
+        try:
+            close_res = bx.place_order(symbol, close_side, side, qty)
+            if close_res.get("code") != 0:
+                logger.error(f"🛑 Gagal close {symbol}: {close_res.get('msg')}")
+                return {"msg": f"Failed to close {symbol}: {close_res.get('msg')}"}
+        except Exception as close_err:
+            logger.error(f"🛑 Exception closing {symbol}: {close_err}")
+            return {"msg": f"Exception closing {symbol}: {close_err}"}
+    
+    try:
+        bx.cancel_all_orders(symbol)
+    except Exception as cancel_err:
+        logger.warning(f"⚠️ Gagal cancel orders {symbol}: {cancel_err}")
     
     if symbol in active_trade_data:
         with state_lock:
@@ -1233,7 +1269,7 @@ def audit_position_reconciliation():
         real_symbols = [p["symbol"] for p in real_positions]
         
         # Ambil posisi di log lokal
-        local_trades = load_active_trades()
+        local_trades = active_trade_data
         local_symbols = [sym for sym, data in local_trades.items() if data.get("status") in ("OPEN", "OPEN_SYNCED")]
         
         # Cari ketidakcocokan (mismatch)
@@ -1373,10 +1409,10 @@ def sync_missing_tpsl():
                 sl_price, recalc_tps = _recalc_tp_sl_for_entry(
                     tv_sl, tv_tps_raw, tv_signal_price, entry, side, symbol
                 )
-                tp1_price = recalc_tps[0] or state_tp1
-                tp2_price = recalc_tps[1] or state_tp2
-                tp3_price = recalc_tps[2] or state_tp3
-                tp4_price = recalc_tps[3] or state_tp4
+                tp1_price = recalc_tps[0] if recalc_tps[0] > 0 else state_tp1
+                tp2_price = recalc_tps[1] if recalc_tps[1] > 0 else state_tp2
+                tp3_price = recalc_tps[2] if recalc_tps[2] > 0 else state_tp3
+                tp4_price = recalc_tps[3] if recalc_tps[3] > 0 else state_tp4
             else:
                 # Tidak ada TV signal → baca dari exchange orders (source of truth)
                 ex_sl = 0
@@ -1397,7 +1433,10 @@ def sync_missing_tpsl():
                 # Guard SL: hindari SL = entry atau nol, gunakan minimum SL percent
                 if sl_price <= 0 or abs(sl_price - entry) < 1e-8:
                     _min_sl = _get_min_sl_pct(symbol)
-                    sl_price = _round_price(entry * (1.0 - _min_sl), symbol)
+                    if side == "LONG":
+                        sl_price = _round_price(entry * (1.0 - _min_sl), symbol)
+                    else:  # SHORT
+                        sl_price = _round_price(entry * (1.0 + _min_sl), symbol)
                     logger.warning(f"🛡️ Adjusted SL for {symbol}: set to guard price {sl_price} (min pct {_min_sl*100:.2f}%)")
                 # Guard TP: hindari TP = entry
                 for idx, tp_val in enumerate([tp1_price, tp2_price, tp3_price, tp4_price], start=1):
@@ -1417,14 +1456,21 @@ def sync_missing_tpsl():
             if sl_price == 0 and tp1_price == 0:
                 import brain_engine
                 logger.warning(f"⚠️ {symbol} tidak punya TP/SL dari sinyal TV maupun state. Fallback ke brain_engine.")
-                plan = brain_engine.get_full_trade_plan(10000.0, entry, side, symbol)
+                try:
+                    _actual_balance = bx.get_balance()
+                except:
+                    _actual_balance = 100.0
+                plan = brain_engine.get_full_trade_plan(_actual_balance, entry, side, symbol)
                 sl_price = plan["sl"]
                 tp_prices = [plan["tp1"], plan["tp2"], plan.get("tp3", 0), plan.get("tp4", 0)]
                 # Validate SL: avoid SL == entry or zero; apply minimum SL guard
                 if sl_price <= 0 or abs(sl_price - entry) < 1e-8:
                     # Calculate a safe SL using the configured minimum SL percentage
                     _min_sl = _get_min_sl_pct(symbol)
-                    sl_price = _round_price(entry * (1.0 - _min_sl), symbol)
+                    if side == "LONG":
+                        sl_price = _round_price(entry * (1.0 - _min_sl), symbol)
+                    else:  # SHORT
+                        sl_price = _round_price(entry * (1.0 + _min_sl), symbol)
                     logger.warning(f"🛡️ Adjusted SL for {symbol}: original SL was {plan['sl']}, set to guard price {sl_price} (min pct {_min_sl*100:.2f}%)")
 
             sl_side = "SELL" if side == "LONG" else "BUY"
@@ -1435,8 +1481,8 @@ def sync_missing_tpsl():
                     curr_price = bx.get_current_price(symbol)
                 except:
                     curr_price = entry
-                sl_invalid = (side == "LONG" and sl_price >= curr_price) or \
-                             (side == "SHORT" and sl_price <= curr_price)
+                sl_invalid = (side == "LONG" and sl_price >= entry) or \
+                             (side == "SHORT" and sl_price <= entry)
                 if sl_invalid:
                     logger.warning(f"⚠️ {symbol} SL {sl_price} invalid (harga skrg {curr_price}). Skip pasang SL.")
                     results.append(f"⚠️ {symbol}: SL {sl_price} di {('atas' if side=='LONG' else 'bawah')} harga {curr_price}, skip.")
@@ -1474,6 +1520,9 @@ def sync_missing_tpsl():
             tp_count = 0
             weights = [0.35, 0.30, 0.20, 0.15]  # Distribusi qty: TP1=35%, TP2=30%, TP3=20%, TP4=15%
 
+            # Determine which TP is "last to hit" based on side
+            last_tp_idx = _get_last_tp_idx(tp_prices, side)
+
             # CEK: Berapa total TP qty yang sudah ada?
             current_tp_qty = sum(float(o.get("origQty", 0)) for o in open_orders if "TAKE_PROFIT" in o.get("type", ""))
             if current_tp_qty >= amt * 0.99:
@@ -1510,7 +1559,7 @@ def sync_missing_tpsl():
                             tp_qty = min(remaining_qty_to_cover, tp_qty)
                             
                             # Cek apakah ini TP terakhir yang valid
-                            is_last_tp = all(tp_prices[j] <= 0 for j in range(i+1, len(tp_prices)))
+                            is_last_tp = (i == last_tp_idx)
                             
                             if tp_qty > 0:
                                 logger.info(f"⚠️ {symbol} missing TP{i+1}. Memasang TP {tp_val} (qty: {tp_qty})...")
@@ -1551,21 +1600,64 @@ def apply_manual_tpsl(symbol, tp_price, sl_price):
         pos = positions[0]
         pos_side = pos["positionSide"]
         qty = abs(float(pos["positionAmt"]))
+        entry = float(pos["avgPrice"])
         sl_side = "SELL" if pos_side == "LONG" else "BUY"
-        bx._request("POST", "/openApi/swap/v2/trade/order", {
+        
+        # Direction validation
+        if pos_side == "LONG" and sl_price >= entry:
+            return {"error": f"SL {sl_price} >= entry {entry} for LONG"}
+        if pos_side == "SHORT" and sl_price <= entry:
+            return {"error": f"SL {sl_price} <= entry {entry} for SHORT"}
+        
+        # TP price validation
+        if tp_price <= 0:
+            return {"error": f"Invalid tp_price {tp_price}"}
+        if pos_side == "LONG" and tp_price <= entry:
+            return {"error": f"LONG TP {tp_price} must be > entry {entry}"}
+        if pos_side == "SHORT" and tp_price >= entry:
+            return {"error": f"SHORT TP {tp_price} must be < entry {entry}"}
+        
+        # Cancel existing orders first
+        bx.cancel_all_orders(symbol)
+        import time
+        time.sleep(2)
+        
+        # Place SL
+        sl_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": symbol, "side": sl_side, "positionSide": pos_side,
             "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": qty,
+            "priceProtect": "true"
         })
-        bx._request("POST", "/openApi/swap/v2/trade/order", {
+        
+        # Place TP with closePosition=true
+        tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": symbol, "side": sl_side, "positionSide": pos_side,
-            "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price, "quantity": qty
+            "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price,
+            "closePosition": "true",
+            "priceProtect": "true"
         })
+        
+        # Check results
+        errors = []
+        if sl_res.get("code") != 0:
+            errors.append(f"SL failed: {sl_res.get('msg')}")
+        if tp_res.get("code") != 0:
+            errors.append(f"TP failed: {tp_res.get('msg')}")
+        
+        if errors:
+            return {"error": "; ".join(errors)}
+        
         return {"symbol": symbol, "tps": [tp_price], "sl": sl_price}
     except Exception as e:
         return {"error": str(e)}
 
 def check_tp_hits():
-    """Cek apakah order TP sudah ter-fill di bursa, kirim notif Telegram per level."""
+    """Cek apakah order TP sudah ter-fill di bursa via order history, kirim notif per level.
+    
+    Uses /openApi/swap/v2/trade/allOrders to find FILLED TAKE_PROFIT_MARKET orders,
+    matching against our TP prices. This avoids false positives from BingX auto-cancel
+    when position is closed by another TP.
+    """
     try:
         paper_mode = get_paper_mode()
         if paper_mode:
@@ -1585,18 +1677,19 @@ def check_tp_hits():
             if notified_key not in trade:
                 trade[notified_key] = {}
             
-            # Ambil open orders di bursa
-            orders_res = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol, "pageSize": 50})
-            if orders_res.get("code") != 0:
+            # Ambil order history (last 50 orders, filter TP MARKET)
+            history_res = bx._request("GET", "/openApi/swap/v2/trade/allOrders", {
+                "symbol": symbol, "pageSize": 50
+            })
+            if history_res.get("code") != 0:
                 continue
-            open_orders = orders_res.get("data", {}).get("orders", [])
-            open_tp_prices = set()
-            for o in open_orders:
-                if o.get("type") == "TAKE_PROFIT_MARKET":
-                    try:
-                        open_tp_prices.add(float(o["stopPrice"]))
-                    except (ValueError, KeyError):
-                        pass
+            all_orders = history_res.get("data", {}).get("orders", [])
+            
+            # Filter: hanya TAKE_PROFIT_MARKET yang statusnya FILLED
+            filled_tp = []
+            for o in all_orders:
+                if o.get("type") == "TAKE_PROFIT_MARKET" and o.get("status") == "FILLED":
+                    filled_tp.append(float(o.get("stopPrice", 0)))
             
             for tp_key, (level, tp_price) in tp_levels.items():
                 if tp_price <= 0:
@@ -1604,13 +1697,11 @@ def check_tp_hits():
                 if trade[notified_key].get(tp_key):
                     continue  # Sudah dinotif
                 
-                # Jika TP price tidak ada di open orders → sudah ter-fill
+                # Cek apakah TP price match dengan order yang benar-benar FILLED
                 tp_rounded = round(tp_price, 2)
-                found_open = any(abs(float(o.get("stopPrice", 0)) - tp_rounded) < 0.5 
-                                  for o in open_orders if o.get("type") == "TAKE_PROFIT_MARKET")
+                is_filled = any(abs(fp - tp_rounded) < max(tp_rounded * 0.001, 0.5) for fp in filled_tp)
                 
-                if not found_open:
-                    # TP sudah terkena (order hilang dari open orders)
+                if is_filled:
                     notify_tp_hit(symbol, level, tp_price, trade)
                     trade[notified_key][tp_key] = True
             
@@ -1649,18 +1740,24 @@ def check_and_update_trailing_sl():
         
         # Hapus symbol yang sudah tidak ada di bursa dari active_trade_data dengan notifikasi
         updated_state = False
+        closed_symbols = []
         with state_lock:
             for sym in list(active_trade_data.keys()):
                 if sym not in open_symbols:
-                    try:
-                        if not paper_mode and _should_notify(sym, "live_close"):
-                            notify_live_close(sym, active_trade_data[sym])
-                            _recently_closed[sym] = time.time()
-                    except Exception as n_err:
-                        logger.error(f"Error notifying live close for {sym}: {n_err}")
+                    closed_symbols.append((sym, active_trade_data[sym]))
                     del active_trade_data[sym]
                     updated_state = True
-                
+        
+        # Kirim notifikasi DI LUAR lock (network I/O)
+        if not paper_mode:
+            for sym, trade_data in closed_symbols:
+                try:
+                    if _should_notify(sym, "live_close"):
+                        notify_live_close(sym, trade_data)
+                        _recently_closed[sym] = time.time()
+                except Exception as n_err:
+                    logger.error(f"Error notifying live close for {sym}: {n_err}")
+        
         if updated_state:
             save_active_trades()
             
@@ -1745,9 +1842,11 @@ def check_and_update_trailing_sl():
                                     logger.info(f"✅ Adopt SL dipasang {symbol} @ {sl_val}")
                                 
                                 if not has_tp:
+                                    # Determine which TP is "last to hit" based on side
+                                    _last_tp_idx = _get_last_tp_idx(tp_prices, pos_side)
                                     for i, tp_price in enumerate(tp_prices):
                                         tp_qty = round(qty * weights[i], 4)
-                                        is_last_tp = all(tp_prices[j] <= 0 for j in range(i+1, len(tp_prices)))
+                                        is_last_tp = (i == _last_tp_idx)
                                         if tp_price > 0 and tp_qty > 0:
                                             if is_last_tp:
                                                 # TP terakhir → FULL CLOSE
@@ -1829,7 +1928,7 @@ def check_and_update_trailing_sl():
             
             # --- 2. AUTO-CALIBRATION: Kalibrasi ulang jika entry di bursa berbeda dengan state ---
             # Jika selisih entry bursa vs state > 0.1%, lakukan kalibrasi ulang level TP/SL
-            if abs(avg_price - entry_price) / entry_price > 0.001:
+            if entry_price > 0 and abs(avg_price - entry_price) / entry_price > 0.001:
                 try:
                     logger.info(f"🔄 Kalibrasi TP/SL {symbol} karena slippage: {entry_price} -> {avg_price}")
                     prec = get_symbol_precision(symbol)
@@ -1931,6 +2030,8 @@ def check_and_update_trailing_sl():
                 peak_price, pos_side, entry_price, current_sl, tp1, tp2, tp3, symbol
             )
             
+            mode_label = "PAPER" if paper_mode else "LIVE"
+            
             if result["should_update"]:
                 new_sl = result["new_sl"]
                 sl_side = "SELL" if pos_side == "LONG" else "BUY"
@@ -1962,7 +2063,6 @@ def check_and_update_trailing_sl():
 
                     except Exception as ce:
                         logger.error(f"Gagal cancel SL lama {symbol}: {ce}. Tetap pasang SL baru.")
-                        tp_orders = []
 
                     # 2. Pasang SL baru — guard: SL trailing BOLEH di atas entry (lock profit)
                     # Guard HANYA cegah SL == entry (instant fill due to spread)
@@ -1983,6 +2083,7 @@ def check_and_update_trailing_sl():
                         sl_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
                             "symbol": symbol, "side": sl_side, "positionSide": pos_side,
                             "type": "STOP_MARKET", "stopPrice": new_sl, "quantity": qty,
+                            "priceProtect": "true"
                         })
                         if sl_res.get("code", -1) == 0:
                             logger.info(f"✅ SL Berhasil digeser: {current_sl} -> {new_sl}")
@@ -2027,6 +2128,7 @@ def check_and_update_trailing_sl():
                             _gsc = _be_trail.get_symbol_config
                             _min_qty_re = _gsc(symbol).get("min_qty", 0.001)
                             current_tp_qty_placed = 0
+                            _last_tp_idx = _get_last_tp_idx(tp_prices_re, pos_side)
                             for _i, _tp_val in enumerate(tp_prices_re):
                                 if _tp_val <= 0:
                                     continue
@@ -2039,7 +2141,7 @@ def check_and_update_trailing_sl():
                                     _tp_qty = min(round(qty * weights[_i], 4), _remaining)
                                 if _tp_qty > 0:
                                     # Cek apakah ini TP terakhir yang valid
-                                    _is_last_tp = all(tp_prices_re[j] <= 0 for j in range(_i+1, len(tp_prices_re)))
+                                    _is_last_tp = (_i == _last_tp_idx)
                                     if _is_last_tp:
                                         # TP terakhir → FULL CLOSE
                                         _tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
