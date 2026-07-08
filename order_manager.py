@@ -1699,7 +1699,7 @@ def check_tp_hits():
                 
                 # Cek apakah TP price match dengan order yang benar-benar FILLED
                 tp_rounded = round(tp_price, 2)
-                is_filled = any(abs(fp - tp_rounded) < max(tp_rounded * 0.001, 0.5) for fp in filled_tp)
+                is_filled = any(abs(fp - tp_rounded) < (tp_rounded * 0.005) for fp in filled_tp)
                 
                 if is_filled:
                     notify_tp_hit(symbol, level, tp_price, trade)
