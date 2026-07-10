@@ -951,6 +951,7 @@ def execute_signal(data: dict) -> dict:
     
     # ── NOTIONAL CHECK: Pastikan notional memenuhi minimum BingX ──
     notional = qty * entry_price
+    min_notional = 5.0  # default, will be updated from API
     try:
         min_notional = bx.get_min_notional(symbol)
         if min_notional > 0 and notional < min_notional:
@@ -1155,12 +1156,25 @@ def execute_signal(data: dict) -> dict:
         last_tp_idx = _get_last_tp_idx(tp_prices, pos_side)
 
         placed_tp = []
+        remaining_for_tp = qty  # track sisa qty untuk distribusi
         for i, tp_price in enumerate(tp_prices):
             tp_qty = qtys[i]
             is_last_tp = (i == last_tp_idx)
             if tp_price > 0 and tp_qty > 0:
+                # Min notional check: bump qty jika di bawah minimum
+                _tp_notional = tp_qty * tp_price
+                if _tp_notional < min_notional and not is_last_tp:
+                    _min_qty_needed = math.ceil(min_notional / tp_price * 10**_prec["qty"]) / 10**_prec["qty"]
+                    tp_qty = max(tp_qty, _min_qty_needed)
+                    logger.info(f"🎯 TP{i+1} NOTIONAL BUMP: {_tp_notional:.2f} < {min_notional} → qty {tp_qty}")
+
+                # Pastikan total qty tidak melebihi posisi
+                tp_qty = min(tp_qty, remaining_for_tp)
+                if tp_qty <= 0:
+                    continue
+
                 if is_last_tp:
-                    # TP terakhir → qty penuh (BingX butuh qty walaupun closePosition)
+                    # TP terakhir → qty sisa (BingX butuh qty walaupun closePosition)
                     tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
                         "symbol": symbol, "side": sl_side, "positionSide": pos_side,
                         "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price,
@@ -1177,6 +1191,7 @@ def execute_signal(data: dict) -> dict:
                     })
                 if tp_res.get("code") == 0:
                     placed_tp.append((tp_price, tp_qty if not is_last_tp else "FULL"))
+                    remaining_for_tp -= tp_qty
                 else:
                     logger.warning(f"🎯 Gagal pasang TP{i+1} untuk {symbol}: {tp_res.get('msg')}")
                 time.sleep(2)  # Rate limit: 2s gap (CLAUDE.md)
