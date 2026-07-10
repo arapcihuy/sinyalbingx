@@ -82,14 +82,30 @@ def _round_price(price, symbol):
     return round(float(price), prec["price"])
 
 def _recalc_tp_sl_for_entry(tv_sl, tv_tps, signal_price, actual_entry, side, symbol):
-    """Return TV TP/SL as-is (they are absolute prices, not relative).
-    Only apply direction validation as safety net."""
+    """Recalculate TV TP/SL relative to actual entry using % distance from TV signal price.
+    If TV entry differs significantly from actual entry, TP/SL prices shift accordingly."""
     if tv_sl <= 0 and all(t <= 0 for t in tv_tps):
         return tv_sl, tv_tps
-    
+
+    # Recalculate SL: shift by delta between actual and TV entry
     result_sl = tv_sl
+    if result_sl > 0 and signal_price > 0:
+        sl_pct = (result_sl - signal_price) / signal_price
+        result_sl = round(actual_entry * (1 + sl_pct), 2)
+        if abs(result_sl - tv_sl) > 0.01:
+            logger.info(f"🔄 {symbol} SL recalculated: TV={tv_sl} → actual={result_sl} (entry {signal_price}→{actual_entry})")
+
+    # Recalculate TPs: shift by delta between actual and TV entry
     result_tps = list(tv_tps)
-    
+    if signal_price > 0:
+        for i in range(len(result_tps)):
+            if result_tps[i] > 0:
+                tp_pct = (result_tps[i] - signal_price) / signal_price
+                old_tp = result_tps[i]
+                result_tps[i] = round(actual_entry * (1 + tp_pct), 2)
+                if abs(result_tps[i] - old_tp) > 0.01:
+                    logger.info(f"🔄 {symbol} TP{i+1} recalculated: TV={old_tp} → actual={result_tps[i]} (entry {signal_price}→{actual_entry})")
+
     # Direction validation: ensure SL/TP direction is correct vs entry
     if result_sl > 0:
         if side == "LONG" and result_sl >= actual_entry:
@@ -98,7 +114,7 @@ def _recalc_tp_sl_for_entry(tv_sl, tv_tps, signal_price, actual_entry, side, sym
         elif side == "SHORT" and result_sl <= actual_entry:
             logger.warning(f"🛡️ {symbol} SHORT SL {result_sl} <= entry {actual_entry} → auto-adjust ke {round(actual_entry * 1.01, 2)}")
             result_sl = round(actual_entry * 1.01, 2)
-    
+
     # TP direction validation: skip TPs on wrong side of entry
     if side == "LONG":
         for i in range(len(result_tps)):
@@ -110,7 +126,7 @@ def _recalc_tp_sl_for_entry(tv_sl, tv_tps, signal_price, actual_entry, side, sym
             if result_tps[i] > 0 and result_tps[i] >= actual_entry:
                 logger.warning(f"🎯 {symbol} SHORT TP{i+1}={result_tps[i]} >= entry {actual_entry} → skip")
                 result_tps[i] = 0
-    
+
     return result_sl, result_tps
 
 PAPER_TRADES_FILE = "paper_trades.json"
