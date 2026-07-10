@@ -928,39 +928,6 @@ def execute_signal(data: dict) -> dict:
     tp1_price, tp2_price, tp3_price, tp4_price = tp_prices
     logger.info(f"🎯 FINAL TP SET: TP1={tp1_price} TP2={tp2_price} TP3={tp3_price} TP4={tp4_price}")
 
-    # ── TP REDUCTION: Kurangi jumlah TP kalau qty tidak muat untuk min notional ──
-    if min_notional > 0:
-        _valid_tps = [(i, p) for i, p in enumerate(tp_prices) if p > 0]
-        if _valid_tps:
-            # Cek berapa TPs yang muat: coba dari full sampai 1
-            _best_count = 0
-            for _try_count in range(len(_valid_tps), 0, -1):
-                _try_q = qty / _try_count
-                _all_fit = all(_try_q * _tp >= min_notional for _, _tp in _valid_tps[:_try_count])
-                if _all_fit:
-                    _best_count = _try_count
-                    break
-            if _best_count == 0:
-                _best_count = 1  # minimal 1 TP
-
-            if _best_count < len(_valid_tps):
-                logger.warning(f"🎯 TP REDUCTION: {symbol} qty={qty} tidak muat untuk {len(_valid_tps)} TPs → reduksi ke {_best_count} TP")
-                for _ti, _tp in _valid_tps[_best_count:]:
-                    tp_prices[_ti] = 0
-                    qtys[_ti] = 0
-                tp1_price, tp2_price, tp3_price, tp4_price = tp_prices[:4]
-                # Re-assign weights
-                _remaining_valid = [i for i, p in enumerate(tp_prices) if p > 0]
-                _new_weights = {4: [0.35, 0.30, 0.20, 0.15], 3: [0.50, 0.30, 0.20], 2: [0.60, 0.40], 1: [1.0]}
-                _nw = _new_weights.get(len(_remaining_valid), [1.0])
-                for _wi, _widx in enumerate(_remaining_valid):
-                    if _wi < len(_nw):
-                        qtys[_widx] = round(qty * _nw[_wi], _tp_prec)
-                if _remaining_valid:
-                    _last = _remaining_valid[-1]
-                    qtys[_last] = round(qty - sum(qtys[j] for j in _remaining_valid[:-1]), _tp_prec)
-                logger.info(f"🎯 TP AFTER REDUCTION: TP1={tp_prices[0]} TP2={tp_prices[1]} TP3={tp_prices[2]} TP4={tp_prices[3]}")
-    
     if qty <= 0:
         reason = f"Saldo tersedia ${balance:.2f} terlalu kecil untuk qty minimum {symbol}."
         logger.warning(f"🚫 {reason} Mengabaikan sinyal.")
@@ -1003,7 +970,41 @@ def execute_signal(data: dict) -> dict:
         logger.info(f"📐 NOTIONAL: {symbol} qty={qty} × entry={entry_price} = ${notional:.2f} (min=${min_notional})")
     except Exception as n_err:
         logger.warning(f"⚠️ Gagal cek min_notional {symbol}: {n_err}")
-    
+
+    # Ensure _tp_prec is always defined
+    _tp_prec = max(cfg.get("qty_precision", 2) + 1, 4)
+
+    # ── TP REDUCTION: Kurangi jumlah TP kalau qty tidak muat untuk min notional ──
+    if min_notional > 0:
+        _valid_tps = [(i, p) for i, p in enumerate(tp_prices) if p > 0]
+        if _valid_tps:
+            _best_count = 0
+            for _try_count in range(len(_valid_tps), 0, -1):
+                _try_q = qty / _try_count
+                _all_fit = all(_try_q * _tp >= min_notional for _, _tp in _valid_tps[:_try_count])
+                if _all_fit:
+                    _best_count = _try_count
+                    break
+            if _best_count == 0:
+                _best_count = 1
+
+            if _best_count < len(_valid_tps):
+                logger.warning(f"🎯 TP REDUCTION: {symbol} qty={qty} tidak muat untuk {len(_valid_tps)} TPs → reduksi ke {_best_count} TP")
+                for _ti, _tp in _valid_tps[_best_count:]:
+                    tp_prices[_ti] = 0
+                    qtys[_ti] = 0
+                tp1_price, tp2_price, tp3_price, tp4_price = tp_prices[:4]
+                _remaining_valid = [i for i, p in enumerate(tp_prices) if p > 0]
+                _new_weights = {4: [0.35, 0.30, 0.20, 0.15], 3: [0.50, 0.30, 0.20], 2: [0.60, 0.40], 1: [1.0]}
+                _nw = _new_weights.get(len(_remaining_valid), [1.0])
+                for _wi, _widx in enumerate(_remaining_valid):
+                    if _wi < len(_nw):
+                        qtys[_widx] = round(qty * _nw[_wi], _tp_prec)
+                if _remaining_valid:
+                    _last = _remaining_valid[-1]
+                    qtys[_last] = round(qty - sum(qtys[j] for j in _remaining_valid[:-1]), _tp_prec)
+                logger.info(f"🎯 TP AFTER REDUCTION: TP1={tp_prices[0]} TP2={tp_prices[1]} TP3={tp_prices[2]} TP4={tp_prices[3]}")
+
     # ── MAX LEVERAGE CAP — respect LIQ GUARD cap ──
     try:
         max_lev = bx.get_max_leverage(symbol)
@@ -1677,20 +1678,13 @@ def sync_missing_tpsl():
                             
                             if tp_qty > 0:
                                 logger.info(f"⚠️ {symbol} missing TP{i+1}. Memasang TP {tp_val} (qty: {tp_qty})...")
-                                if is_last_tp:
-                                    # TP terakhir → qty penuh (BingX butuh qty walaupun closePosition)
-                                    bx._request("POST", "/openApi/swap/v2/trade/order", {
-                                        "symbol": symbol, "side": sl_side, "positionSide": side,
-                                        "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_val,
-                                        "quantity": tp_qty,
-                                        "priceProtect": "true"
-                                    })
-                                else:
-                                    bx._request("POST", "/openApi/swap/v2/trade/order", {
-                                        "symbol": symbol, "side": sl_side, "positionSide": side,
-                                        "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_val, "quantity": tp_qty,
-                                        "priceProtect": "true"
-                                    })
+                                _tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
+                                    "symbol": symbol, "side": sl_side, "positionSide": side,
+                                    "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_val, "quantity": tp_qty,
+                                    "priceProtect": "true"
+                                })
+                                if _tp_res.get("code") != 0:
+                                    logger.warning(f"🎯 Sync TP{i+1} GAGAL {symbol}: {_tp_res.get('msg')}")
                                 current_tp_qty += tp_qty
                                 tp_count += 1
                                 time.sleep(2)  # Rate limit: 2s gap (CLAUDE.md)
@@ -1743,7 +1737,8 @@ def apply_manual_tpsl(symbol, tp_price, sl_price):
             "type": "STOP_MARKET", "stopPrice": sl_price, "quantity": qty,
             "priceProtect": "true"
         })
-        
+        time.sleep(2)  # Rate limit: 2s gap (CLAUDE.md)
+
         # Place TP with quantity (BingX butuh qty walaupun closePosition)
         tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": symbol, "side": sl_side, "positionSide": pos_side,
@@ -2103,27 +2098,41 @@ def check_and_update_trailing_sl():
                             bx.cancel_all_orders(symbol)
                             time.sleep(2)
                             sl_side_cal = "SELL" if pos_side == "LONG" else "BUY"
-                            # Pasang SL baru
-                            if trade.get("sl", 0) > 0:
-                                bx._request("POST", "/openApi/swap/v2/trade/order", {
+                            # Direction validation sebelum pasang
+                            _sl_val = trade.get("sl", 0)
+                            if _sl_val > 0:
+                                if pos_side == "LONG" and _sl_val >= avg_price:
+                                    _sl_val = round(avg_price * 0.99, 2)
+                                elif pos_side == "SHORT" and _sl_val <= avg_price:
+                                    _sl_val = round(avg_price * 1.01, 2)
+                                _sl_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
                                     "symbol": symbol, "side": sl_side_cal, "positionSide": pos_side,
-                                    "type": "STOP_MARKET", "stopPrice": trade["sl"], "quantity": qty,
+                                    "type": "STOP_MARKET", "stopPrice": _sl_val, "quantity": qty,
                                     "priceProtect": "true"
                                 })
+                                if _sl_res.get("code") != 0:
+                                    logger.error(f"🛑 Calibration SL GAGAL {symbol}: {_sl_res.get('msg')}")
                                 time.sleep(2)
-                            # Pasang TP baru
+                            # Pasang TP baru dengan direction validation
                             new_tps = [trade.get("tp1", 0), trade.get("tp2", 0), trade.get("tp3", 0), trade.get("tp4", 0)]
-                            _cal_last_tp_idx = _get_last_tp_idx(new_tps, pos_side)
                             for _ci, _cp in enumerate(new_tps):
                                 if _cp > 0:
+                                    if pos_side == "LONG" and _cp <= avg_price:
+                                        logger.warning(f"🎯 Calibration: LONG TP{_ci+1} {_cp} <= entry → skip")
+                                        continue
+                                    elif pos_side == "SHORT" and _cp >= avg_price:
+                                        logger.warning(f"🎯 Calibration: SHORT TP{_ci+1} {_cp} >= entry → skip")
+                                        continue
                                     _cq = round(qty * [0.35, 0.30, 0.20, 0.15][_ci], 4) if _ci < 4 else round(qty * 0.1, 4)
-                                    bx._request("POST", "/openApi/swap/v2/trade/order", {
+                                    _tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
                                         "symbol": symbol, "side": sl_side_cal, "positionSide": pos_side,
                                         "type": "TAKE_PROFIT_MARKET", "stopPrice": _cp, "quantity": _cq,
                                         "priceProtect": "true"
                                     })
+                                    if _tp_res.get("code") != 0:
+                                        logger.error(f"🛑 Calibration TP{_ci+1} GAGAL {symbol}: {_tp_res.get('msg')}")
                                     time.sleep(2)
-                            logger.info(f"🔄 Kalibrasi exchange orders {symbol}: SL={trade['sl']} TPs={new_tps}")
+                            logger.info(f"🔄 Kalibrasi exchange orders {symbol}: SL={_sl_val} TPs={new_tps}")
                         except Exception as cal_ord_err:
                             logger.error(f"⚠️ Gagal update exchange orders setelah kalibrasi {symbol}: {cal_ord_err}")
 
@@ -2329,6 +2338,7 @@ def check_and_update_trailing_sl():
                                         logger.info(f"🎯 Re-TP{_i+1} terpasang di {_tp_val} (qty: {'FULL' if _is_last_tp else _tp_qty})")
                                     else:
                                         logger.warning(f"⚠️ Re-TP{_i+1} gagal: {_tp_res.get('msg')}")
+                                    time.sleep(2)  # Rate limit: 2s gap (CLAUDE.md)
                         else:
                             logger.info(f"✔️ TP masih ada di exchange untuk {symbol} ({len(tp_orders)} order), tidak perlu re-TP")
                     except Exception as _tp_err:
