@@ -927,6 +927,39 @@ def execute_signal(data: dict) -> dict:
     tp_prices = tp_prices[:4]
     tp1_price, tp2_price, tp3_price, tp4_price = tp_prices
     logger.info(f"🎯 FINAL TP SET: TP1={tp1_price} TP2={tp2_price} TP3={tp3_price} TP4={tp4_price}")
+
+    # ── TP REDUCTION: Kurangi jumlah TP kalau qty tidak muat untuk min notional ──
+    if min_notional > 0:
+        _valid_tps = [(i, p) for i, p in enumerate(tp_prices) if p > 0]
+        if _valid_tps:
+            # Cek berapa TPs yang muat: coba dari full sampai 1
+            _best_count = 0
+            for _try_count in range(len(_valid_tps), 0, -1):
+                _try_q = qty / _try_count
+                _all_fit = all(_try_q * _tp >= min_notional for _, _tp in _valid_tps[:_try_count])
+                if _all_fit:
+                    _best_count = _try_count
+                    break
+            if _best_count == 0:
+                _best_count = 1  # minimal 1 TP
+
+            if _best_count < len(_valid_tps):
+                logger.warning(f"🎯 TP REDUCTION: {symbol} qty={qty} tidak muat untuk {len(_valid_tps)} TPs → reduksi ke {_best_count} TP")
+                for _ti, _tp in _valid_tps[_best_count:]:
+                    tp_prices[_ti] = 0
+                    qtys[_ti] = 0
+                tp1_price, tp2_price, tp3_price, tp4_price = tp_prices[:4]
+                # Re-assign weights
+                _remaining_valid = [i for i, p in enumerate(tp_prices) if p > 0]
+                _new_weights = {4: [0.35, 0.30, 0.20, 0.15], 3: [0.50, 0.30, 0.20], 2: [0.60, 0.40], 1: [1.0]}
+                _nw = _new_weights.get(len(_remaining_valid), [1.0])
+                for _wi, _widx in enumerate(_remaining_valid):
+                    if _wi < len(_nw):
+                        qtys[_widx] = round(qty * _nw[_wi], _tp_prec)
+                if _remaining_valid:
+                    _last = _remaining_valid[-1]
+                    qtys[_last] = round(qty - sum(qtys[j] for j in _remaining_valid[:-1]), _tp_prec)
+                logger.info(f"🎯 TP AFTER REDUCTION: TP1={tp_prices[0]} TP2={tp_prices[1]} TP3={tp_prices[2]} TP4={tp_prices[3]}")
     
     if qty <= 0:
         reason = f"Saldo tersedia ${balance:.2f} terlalu kecil untuk qty minimum {symbol}."
@@ -1156,45 +1189,65 @@ def execute_signal(data: dict) -> dict:
         last_tp_idx = _get_last_tp_idx(tp_prices, pos_side)
 
         placed_tp = []
-        remaining_for_tp = qty  # track sisa qty untuk distribusi
+
+        # ── TWO-PASS: Hitung qtys dulu dengan min notional check, baru pasang ──
+        # Pass 1: Hitung qty per TP, skip jika tidak muat, last TP ambil sisa
+        _tp_final_qtys = [0.0] * len(tp_prices)
+        _qty_remaining = qty
+        _skipped_small = []
         for i, tp_price in enumerate(tp_prices):
-            tp_qty = qtys[i]
+            if tp_price <= 0:
+                continue
             is_last_tp = (i == last_tp_idx)
-            if tp_price > 0 and tp_qty > 0:
-                # Min notional check: bump qty jika di bawah minimum
-                _tp_notional = tp_qty * tp_price
-                if _tp_notional < min_notional and not is_last_tp:
-                    _min_qty_needed = math.ceil(min_notional / tp_price * 10**_prec["qty"]) / 10**_prec["qty"]
-                    tp_qty = max(tp_qty, _min_qty_needed)
-                    logger.info(f"🎯 TP{i+1} NOTIONAL BUMP: {_tp_notional:.2f} < {min_notional} → qty {tp_qty}")
-
-                # Pastikan total qty tidak melebihi posisi
-                tp_qty = min(tp_qty, remaining_for_tp)
-                if tp_qty <= 0:
+            if is_last_tp:
+                # Last TP → ambil sisa (pastikan cukup min notional)
+                if _qty_remaining * tp_price < min_notional and min_notional > 0 and len(placed_tp) > 0:
+                    logger.warning(f"🎯 TP{i+1} SKIP: remaining qty {_qty_remaining} × {tp_price} = ${_qty_remaining * tp_price:.2f} < min ${min_notional}")
+                    _skipped_small.append(i)
+                else:
+                    _tp_final_qtys[i] = _qty_remaining
+            else:
+                q = qtys[i]
+                notional = q * tp_price
+                if notional < min_notional and min_notional > 0:
+                    q = math.ceil(min_notional / tp_price * 10**_prec["qty"]) / 10**_prec["qty"]
+                    logger.info(f"🎯 TP{i+1} NOTIONAL BUMP: ${notional:.2f} < ${min_notional} → qty {q}")
+                # Cek apakah masih muat di sisa qty
+                if q > _qty_remaining:
+                    logger.warning(f"🎯 TP{i+1} SKIP: qty {q} > remaining {_qty_remaining}")
+                    _skipped_small.append(i)
                     continue
+                _tp_final_qtys[i] = q
+                _qty_remaining -= q
+                if _qty_remaining <= 0:
+                    break
 
-                if is_last_tp:
-                    # TP terakhir → qty sisa (BingX butuh qty walaupun closePosition)
-                    tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
-                        "symbol": symbol, "side": sl_side, "positionSide": pos_side,
-                        "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price,
-                        "quantity": tp_qty,
-                        "priceProtect": "true"
-                    })
-                    logger.info(f"🎯 TP{i+1} FULL CLOSE @ {tp_price} (qty: {tp_qty})")
-                else:
-                    # TP partial → qty specifik
-                    tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
-                        "symbol": symbol, "side": sl_side, "positionSide": pos_side,
-                        "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price, "quantity": tp_qty,
-                        "priceProtect": "true"
-                    })
-                if tp_res.get("code") == 0:
-                    placed_tp.append((tp_price, tp_qty if not is_last_tp else "FULL"))
-                    remaining_for_tp -= tp_qty
-                else:
-                    logger.warning(f"🎯 Gagal pasang TP{i+1} untuk {symbol}: {tp_res.get('msg')}")
-                time.sleep(2)  # Rate limit: 2s gap (CLAUDE.md)
+        # Pass 2: Pasang orders
+        for i, tp_price in enumerate(tp_prices):
+            if tp_price <= 0 or _tp_final_qtys[i] <= 0:
+                continue
+            tp_qty = _tp_final_qtys[i]
+            is_last_tp = (i == last_tp_idx)
+
+            if is_last_tp:
+                tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
+                    "symbol": symbol, "side": sl_side, "positionSide": pos_side,
+                    "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price,
+                    "quantity": tp_qty,
+                    "priceProtect": "true"
+                })
+                logger.info(f"🎯 TP{i+1} FULL CLOSE @ {tp_price} (qty: {tp_qty})")
+            else:
+                tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
+                    "symbol": symbol, "side": sl_side, "positionSide": pos_side,
+                    "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price, "quantity": tp_qty,
+                    "priceProtect": "true"
+                })
+            if tp_res.get("code") == 0:
+                placed_tp.append((tp_price, tp_qty if not is_last_tp else "FULL"))
+            else:
+                logger.warning(f"🎯 Gagal pasang TP{i+1} untuk {symbol}: {tp_res.get('msg')}")
+            time.sleep(2)  # Rate limit: 2s gap (CLAUDE.md)
 
         # ── 3. Simpan state SETELAH orders berhasil dipasang ──
         _live_margin = (qty * entry_price) / leverage if leverage > 0 else 0
