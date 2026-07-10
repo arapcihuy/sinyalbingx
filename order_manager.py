@@ -974,36 +974,57 @@ def execute_signal(data: dict) -> dict:
     # Ensure _tp_prec is always defined
     _tp_prec = max(cfg.get("qty_precision", 2) + 1, 4)
 
-    # ── TP REDUCTION: Kurangi jumlah TP kalau qty tidak muat untuk min notional ──
+    # ── TP NOTIONAL GUARD: Bump qty per TP biar muat min notional, bukan drop TP ──
     if min_notional > 0:
         _valid_tps = [(i, p) for i, p in enumerate(tp_prices) if p > 0]
-        if _valid_tps:
-            _best_count = 0
-            for _try_count in range(len(_valid_tps), 0, -1):
-                _try_q = qty / _try_count
-                _all_fit = all(_try_q * _tp >= min_notional for _, _tp in _valid_tps[:_try_count])
-                if _all_fit:
-                    _best_count = _try_count
-                    break
-            if _best_count == 0:
-                _best_count = 1
+        _bumped_any = False
+        for _vi, (_ti, _tp) in enumerate(_valid_tps):
+            _tp_notional = qtys[_ti] * _tp
+            if _tp > 0 and _tp_notional < min_notional:
+                _min_q = math.ceil(min_notional / _tp * 10**_tp_prec) / 10**_tp_prec
+                logger.info(f"🎯 TP{_ti+1} BUMP: qty {qtys[_ti]} → {_min_q} (notional ${_tp_notional:.2f} < ${min_notional})")
+                qtys[_ti] = _min_q
+                _bumped_any = True
 
-            if _best_count < len(_valid_tps):
-                logger.warning(f"🎯 TP REDUCTION: {symbol} qty={qty} tidak muat untuk {len(_valid_tps)} TPs → reduksi ke {_best_count} TP")
-                for _ti, _tp in _valid_tps[_best_count:]:
-                    tp_prices[_ti] = 0
-                    qtys[_ti] = 0
-                tp1_price, tp2_price, tp3_price, tp4_price = tp_prices[:4]
-                _remaining_valid = [i for i, p in enumerate(tp_prices) if p > 0]
-                _new_weights = {4: [0.35, 0.30, 0.20, 0.15], 3: [0.50, 0.30, 0.20], 2: [0.60, 0.40], 1: [1.0]}
-                _nw = _new_weights.get(len(_remaining_valid), [1.0])
-                for _wi, _widx in enumerate(_remaining_valid):
-                    if _wi < len(_nw):
-                        qtys[_widx] = round(qty * _nw[_wi], _tp_prec)
-                if _remaining_valid:
-                    _last = _remaining_valid[-1]
-                    qtys[_last] = round(qty - sum(qtys[j] for j in _remaining_valid[:-1]), _tp_prec)
-                logger.info(f"🎯 TP AFTER REDUCTION: TP1={tp_prices[0]} TP2={tp_prices[1]} TP3={tp_prices[2]} TP4={tp_prices[3]}")
+        # Kalau total bumped qty melebihi original qty, ambil dari TP terakhir
+        if _bumped_any:
+            _total_after_bump = sum(qtys[_ti] for _ti, _ in _valid_tps)
+            if _total_after_bump > qty:
+                _last_ti = _valid_tps[-1][0]
+                _deficit = _total_after_bump - qty
+                qtys[_last_ti] = round(max(qtys[_last_ti] - _deficit, 0), _tp_prec)
+                logger.warning(f"🎯 TP BUMP OVERFLOW: total {_total_after_bump} > qty {qty} → kurangi TP{_last_ti+1} ke {qtys[_last_ti]}")
+                # Kalau TP terakhir jadi 0, barulah drop (sangat jarang)
+                if qtys[_last_ti] <= 0:
+                    tp_prices[_last_ti] = 0
+                    logger.warning(f"🎯 TP{_last_ti+1} di-drop (qty habis setelah bump)")
+                    # Redistribute ke TP lainnya
+                    _remaining = [i for i, p in enumerate(tp_prices) if p > 0]
+                    if _remaining:
+                        _nw = {3: [0.50, 0.30, 0.20], 2: [0.60, 0.40], 1: [1.0]}
+                        _weights = _nw.get(len(_remaining), [1.0])
+                        for _wi, _widx in enumerate(_remaining):
+                            if _wi < len(_weights):
+                                qtys[_widx] = round(qty * _weights[_wi], _tp_prec)
+                        _last = _remaining[-1]
+                        qtys[_last] = round(qty - sum(qtys[j] for j in _remaining[:-1]), _tp_prec)
+
+                # Notif Telegram kalau ada adjustment signifikan
+                _adj_msg = f"⚠️ *TP NOTIONAL BUMP* — `{symbol}`\n"
+                _adj_msg += f"━━━━━━━━━━━━━━━━━━━━━\n"
+                _adj_msg += f"💰 Qty asli: `{qty}` | Min notional: `${min_notional}`\n"
+                for _ti, _ in _valid_tps:
+                    if tp_prices[_ti] > 0:
+                        _adj_msg += f"🎯 TP{_ti+1}: `{tp_prices[_ti]}` qty=`{qtys[_ti]}` (${qtys[_ti]*tp_prices[_ti]:.2f})\n"
+                _adj_msg += f"━━━━━━━━━━━━━━━━━━━━━"
+                try:
+                    import requests as _r
+                    _r.post(f"https://api.telegram.org/bot{os.getenv('TELEGRAM_BOT_TOKEN')}/sendMessage",
+                            json={"chat_id": os.getenv('TELEGRAM_CHAT_ID'), "text": _adj_msg, "parse_mode": "Markdown"}, timeout=5)
+                except Exception:
+                    pass
+
+        tp1_price, tp2_price, tp3_price, tp4_price = tp_prices[:4]
 
     # ── MAX LEVERAGE CAP — respect LIQ GUARD cap ──
     try:
