@@ -1214,35 +1214,47 @@ def execute_signal(data: dict) -> dict:
 
         # ── TWO-PASS: Hitung qtys dulu dengan min notional check, baru pasang ──
         # Pass 1: Hitung qty per TP, skip jika tidak muat, last TP ambil sisa
+        # ponytail: last_tp_idx diproses TERAKHIR (setelah loop), bukan dalam loop.
+        # Ini mencegah break skip last TP saat non-last TP konsumsi semua remaining qty.
         _tp_final_qtys = [0.0] * len(tp_prices)
         _qty_remaining = qty
         _skipped_small = []
         for i, tp_price in enumerate(tp_prices):
-            if tp_price <= 0:
+            if tp_price <= 0 or i == last_tp_idx:
                 continue
-            is_last_tp = (i == last_tp_idx)
-            if is_last_tp:
-                # Last TP → ambil sisa (pastikan cukup min notional)
-                if _qty_remaining * tp_price < min_notional and min_notional > 0 and len(placed_tp) > 0:
-                    logger.warning(f"🎯 TP{i+1} SKIP: remaining qty {_qty_remaining} × {tp_price} = ${_qty_remaining * tp_price:.2f} < min ${min_notional}")
-                    _skipped_small.append(i)
+            q = qtys[i]
+            notional = q * tp_price
+            if notional < min_notional and min_notional > 0:
+                q = math.ceil(min_notional / tp_price * 10**_prec["qty"]) / 10**_prec["qty"]
+                logger.info(f"🎯 TP{i+1} NOTIONAL BUMP: ${notional:.2f} < ${min_notional} → qty {q}")
+            # Cek apakah masih muat di sisa qty
+            if q > _qty_remaining:
+                logger.warning(f"🎯 TP{i+1} SKIP: qty {q} > remaining {_qty_remaining}")
+                _skipped_small.append(i)
+                continue
+            _tp_final_qtys[i] = q
+            _qty_remaining -= q
+
+        # Last TP SELALU diproses — ambil sisa qty apapun kondisinya
+        if last_tp_idx < len(tp_prices) and tp_prices[last_tp_idx] > 0:
+            _lt_price = tp_prices[last_tp_idx]
+            if _qty_remaining * _lt_price < min_notional and min_notional > 0 and len(_skipped_small) == 0:
+                # Semua TP non-last sudah ditempatkan dan sisa terlalu kecil — gabungkan ke TP sebelumnya
+                _prev_ti = None
+                for j in range(last_tp_idx - 1, -1, -1):
+                    if tp_prices[j] > 0 and _tp_final_qtys[j] > 0:
+                        _prev_ti = j
+                        break
+                if _prev_ti is not None:
+                    _tp_final_qtys[_prev_ti] = round(_tp_final_qtys[_prev_ti] + _qty_remaining, _prec["qty"])
+                    logger.info(f"🎯 TP{last_tp_idx+1} GABUNG ke TP{_prev_ti+1}: remaining qty {_qty_remaining} (notional ${_qty_remaining * _lt_price:.2f} < min ${min_notional})")
                 else:
-                    _tp_final_qtys[i] = _qty_remaining
+                    _tp_final_qtys[last_tp_idx] = _qty_remaining
+                    logger.info(f"🎯 TP{last_tp_idx+1} LAST RESORT: qty {_qty_remaining} (sisa)")
             else:
-                q = qtys[i]
-                notional = q * tp_price
-                if notional < min_notional and min_notional > 0:
-                    q = math.ceil(min_notional / tp_price * 10**_prec["qty"]) / 10**_prec["qty"]
-                    logger.info(f"🎯 TP{i+1} NOTIONAL BUMP: ${notional:.2f} < ${min_notional} → qty {q}")
-                # Cek apakah masih muat di sisa qty
-                if q > _qty_remaining:
-                    logger.warning(f"🎯 TP{i+1} SKIP: qty {q} > remaining {_qty_remaining}")
-                    _skipped_small.append(i)
-                    continue
-                _tp_final_qtys[i] = q
-                _qty_remaining -= q
-                if _qty_remaining <= 0:
-                    break
+                _tp_final_qtys[last_tp_idx] = _qty_remaining
+                if _qty_remaining > 0:
+                    logger.info(f"🎯 TP{last_tp_idx+1} LAST: qty {_qty_remaining} (sisa dari {qty})")
 
         # Pass 2: Pasang orders
         for i, tp_price in enumerate(tp_prices):
@@ -1652,7 +1664,6 @@ def sync_missing_tpsl():
 
             # Pasang Take Profit yang belum ada
             tp_count = 0
-            weights = [0.35, 0.30, 0.20, 0.15]  # Distribusi qty: TP1=35%, TP2=30%, TP3=20%, TP4=15%
 
             # Determine which TP is "last to hit" based on side
             last_tp_idx = _get_last_tp_idx(tp_prices, side)
@@ -1668,49 +1679,63 @@ def sync_missing_tpsl():
             trade_state_for_sync = active_trade_data.get(symbol, {})
             tp_notified = trade_state_for_sync.get("tp_notified", {})
 
-            for i, tp_val in enumerate(tp_prices):
-                if tp_val > 0:
-                    # Skip TP yang sudah ter-fill (notified = True)
-                    if tp_notified.get(f"tp{i+1}", False):
-                        logger.info(f"⏭️ Sync skip TP{i+1} ({tp_val}) — sudah ter-fill & notified.")
-                        continue
+            # ponytail: Hitung weights DYNAMIC berdasarkan jumlah valid TP, bukan absolute index.
+            # Sebelumnya pakai weights[i] → kalau TP2/TP3/TP4=0, weights tidak sum to 1.0.
+            _valid_tp_indices = [i for i, tp in enumerate(tp_prices) if tp > 0]
+            _n_valid = len(_valid_tp_indices)
+            if _n_valid == 1:
+                _sync_weights = {0: 1.0}
+            elif _n_valid == 2:
+                _sync_weights = {0: 0.60, 1: 0.40}
+            elif _n_valid == 3:
+                _sync_weights = {0: 0.50, 1: 0.30, 2: 0.20}
+            else:
+                _sync_weights = {0: 0.35, 1: 0.30, 2: 0.20, 3: 0.15}
 
-                    # Cek apakah harga TP ini sudah ada di open orders (toleransi 0.5%)
-                    already_has_this_tp = any(abs(float(o.get("stopPrice", 0)) - tp_val) < (tp_val * 0.005) for o in open_orders if "TAKE_PROFIT" in o.get("type", ""))
-                    if not already_has_this_tp:
-                        # Gunakan try/except untuk mencegah kegagalan satu TP membatalkan yang lain
-                        try:
-                            # Split sisa qty yang belum ada TP nya
-                            remaining_qty_to_cover = amt - current_tp_qty
-                            if remaining_qty_to_cover <= 0:
-                                break # Stop jika qty sudah fully covered
-                                
-                            from brain_engine import get_symbol_config
-                            cfg = get_symbol_config(symbol)
-                            min_qty = cfg.get("min_qty", 0.001)
-                            _tp_prec = max(cfg.get("qty_precision", 2) + 1, 4)
+            for _vi, i in enumerate(_valid_tp_indices):
+                tp_val = tp_prices[i]
+                # Skip TP yang sudah ter-fill (notified = True)
+                if tp_notified.get(f"tp{i+1}", False):
+                    logger.info(f"⏭️ Sync skip TP{i+1} ({tp_val}) — sudah ter-fill & notified.")
+                    continue
 
-                            # ponytail: no min_qty floor — BingX accepts sub-min qty for TP split
-                            tp_qty = round(amt * weights[i], _tp_prec) if i < len(weights) else round(amt * 0.1, _tp_prec)
-                            tp_qty = min(remaining_qty_to_cover, tp_qty)
+                # Cek apakah harga TP ini sudah ada di open orders (toleransi 0.5%)
+                already_has_this_tp = any(abs(float(o.get("stopPrice", 0)) - tp_val) < (tp_val * 0.005) for o in open_orders if "TAKE_PROFIT" in o.get("type", ""))
+                if not already_has_this_tp:
+                    # Gunakan try/except untuk mencegah kegagalan satu TP membatalkan yang lain
+                    try:
+                        # Split sisa qty yang belum ada TP nya
+                        remaining_qty_to_cover = amt - current_tp_qty
+                        if remaining_qty_to_cover <= 0:
+                            break # Stop jika qty sudah fully covered
                             
-                            # Cek apakah ini TP terakhir yang valid
-                            is_last_tp = (i == last_tp_idx)
-                            
-                            if tp_qty > 0:
-                                logger.info(f"⚠️ {symbol} missing TP{i+1}. Memasang TP {tp_val} (qty: {tp_qty})...")
-                                _tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
-                                    "symbol": symbol, "side": sl_side, "positionSide": side,
-                                    "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_val, "quantity": tp_qty,
-                                    "priceProtect": "true"
-                                })
-                                if _tp_res.get("code") != 0:
-                                    logger.warning(f"🎯 Sync TP{i+1} GAGAL {symbol}: {_tp_res.get('msg')}")
-                                current_tp_qty += tp_qty
-                                tp_count += 1
-                                time.sleep(2)  # Rate limit: 2s gap (CLAUDE.md)
-                        except Exception as e:
-                            logger.error(f"Gagal pasang TP{i+1} untuk {symbol}: {e}")
+                        from brain_engine import get_symbol_config
+                        cfg = get_symbol_config(symbol)
+                        min_qty = cfg.get("min_qty", 0.001)
+                        _tp_prec = max(cfg.get("qty_precision", 2) + 1, 4)
+
+                        # ponytail: no min_qty floor — BingX accepts sub-min qty for TP split
+                        _w = _sync_weights.get(_vi, 0.1)
+                        tp_qty = round(amt * _w, _tp_prec)
+                        tp_qty = min(remaining_qty_to_cover, tp_qty)
+                        
+                        # Cek apakah ini TP terakhir yang valid
+                        is_last_tp = (i == last_tp_idx)
+                        
+                        if tp_qty > 0:
+                            logger.info(f"⚠️ {symbol} missing TP{i+1}. Memasang TP {tp_val} (qty: {tp_qty}, weight: {_w})...")
+                            _tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
+                                "symbol": symbol, "side": sl_side, "positionSide": side,
+                                "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_val, "quantity": tp_qty,
+                                "priceProtect": "true"
+                            })
+                            if _tp_res.get("code") != 0:
+                                logger.warning(f"🎯 Sync TP{i+1} GAGAL {symbol}: {_tp_res.get('msg')}")
+                            current_tp_qty += tp_qty
+                            tp_count += 1
+                            time.sleep(2)  # Rate limit: 2s gap (CLAUDE.md)
+                    except Exception as e:
+                        logger.error(f"Gagal pasang TP{i+1} untuk {symbol}: {e}")
             if tp_count > 0:
                 results.append(f"✅ {symbol}: {tp_count} TP baru dipasang")
             else:
