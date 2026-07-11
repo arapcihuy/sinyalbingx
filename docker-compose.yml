@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  sinyalbingx:
+    build: .
+    container_name: sinyalbingx
+    restart: always
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    volumes:
+      - signals_data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  signals_data:
