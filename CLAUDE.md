@@ -18,11 +18,14 @@
 4. **Risk Pakai Equity**: Risk calculation selalu pakai `balance` (equity total), BUKAN `available` (sisa setelah posisi lain). Ini memastikan coin kecil ga "makan" jatah coin besar.
 5. **Min Qty BingX**: BingX min order 0.001 (BTC) / 0.01 (lainnya). TAPI min notional per trigger order (TP/SL) ≈ $17.84 (ETH) — qty split harus cukup besar supaya setiap TP muat.
 
-## ⚠️ CRITICAL: Jangan Close-Reopen!
-**DILARANG** close-reopen position cuma gara-gara TP kurang atau qty kecil. Close-reopen = double fee + slippage. Kalau posisi sudah ada tapi TP < 4:
-1. Tambahin TP lewat `sync_missing_tpsl` (sudah ada logic-nya)
-2. Kalau qty terlalu kecil untuk split (BingX min notional), naikkan leverage DI POSISI YANG SUDAH ADA atau terima 1 TP dulu
-3. **Sebelum buka posisi baru**, hitung: `qty_needed = min_notional / (0.15 * tp_price)` — pastikan qty >= qty_needed supaya 4 TP split muat dari awal
+## ⚠️ CRITICAL: TP/SL dari TV, Leverage dari SL Distance!
+**DILARANG** close-reopen. **DILARANG** generate TP/SL sendiri dari brain_engine kalau TV sudah kirim.
+1. **TP/SL = persis dari TV signal** (recalculate % relatif ke actual entry)
+2. **Leverage = hitung dari SL distance** — LIQ price WAJIB lebih jauh dari SL
+   - Flow: `sl_distance → max_safe_leverage → qty`
+   - Kalau 4 TP ga muat di leverage aman → terima < 4 TP, JANGAN force leverage tinggi
+3. **Sebelum entry**: hitung `liq_distance = 1/leverage - mmr`. Pastikan `sl_distance < liq_distance`
+4. **Min qty untuk 4 TP**: `qty_needed = min_notional / (0.15 * tp_price)`. Kalau ga muat → kurangi TP, bukan naikkan leverage
 
 ## Margin Allocation Philosophy
 - Equity $35 → 6 coin → ~$5.8/coin

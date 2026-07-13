@@ -1099,6 +1099,23 @@ def execute_signal(data: dict) -> dict:
         return {"status": "success_paper", "symbol": symbol, "qty": qty}
  
     # Live Execution
+
+    # ── FINAL LIQ VERIFY: Pastikan SL < LIQ untuk SHORT, SL > LIQ untuk LONG ──
+    _est_liq = brain_engine.estimate_liquidation_price(entry_price, leverage, pos_side, mmr)
+    if pos_side == "SHORT" and sl_price > 0 and _est_liq > 0:
+        if sl_price >= _est_liq:
+            # SL lebih jauh dari LIQ → turunkan leverage sampai LIQ > SL
+            while leverage > 1 and sl_price >= _est_liq:
+                leverage -= 1
+                _est_liq = brain_engine.estimate_liquidation_price(entry_price, leverage, pos_side, mmr)
+            logger.warning(f"🛡️ FINAL LIQ FIX: {symbol} lev diturunkan ke {leverage}x — LIQ={_est_liq:.2f} > SL={sl_price:.2f}")
+    elif pos_side == "LONG" and sl_price > 0 and _est_liq > 0:
+        if sl_price <= _est_liq:
+            while leverage > 1 and sl_price <= _est_liq:
+                leverage -= 1
+                _est_liq = brain_engine.estimate_liquidation_price(entry_price, leverage, pos_side, mmr)
+            logger.warning(f"🛡️ FINAL LIQ FIX: {symbol} lev diturunkan ke {leverage}x — LIQ={_est_liq:.2f} < SL={sl_price:.2f}")
+
     bx.set_leverage(symbol, leverage, pos_side)
 
     # ── MIN QTY CHECK: Pastikan qty cukup untuk 4 TP split (BingX min notional ~$17.84/trigger ETH) ──
