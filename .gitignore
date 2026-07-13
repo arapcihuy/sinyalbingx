@@ -34,5 +34,7 @@ logs/
 *.bak
 *.db
 signals.db
-\n.zcode/\nscratch/
 .zcode/
+scratch/
+autostart_bot.sh
+.gitignore
