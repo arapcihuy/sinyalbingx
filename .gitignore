@@ -35,3 +35,4 @@ logs/
 *.db
 signals.db
 \n.zcode/\nscratch/
+.zcode/
