@@ -1537,7 +1537,12 @@ def sync_missing_tpsl():
             state_tp4 = float(trade_state.get("tp4", 0))
             
             # TP/SL: sinyal TV (mutlak) > exchange orders (no TV) > state lama
-            if tv_sl > 0 or tv_tp1 > 0:
+            # Direction check: skip TV signal if action doesn't match position side
+            signal_action = last_signal.get("action", "").upper()
+            signal_side = "LONG" if signal_action in ("BUY", "LONG") else "SHORT"
+            signal_matches = (signal_side == side)
+
+            if (tv_sl > 0 or tv_tp1 > 0) and signal_matches:
                 # TV signal ada → recalc relatif ke actual entry
                 tv_signal_price = float(last_signal.get("price", 0)) or float(last_signal.get("entry_price", 0))
                 tv_tps_raw = [tv_tp1, tv_tp2, tv_tp3, tv_tp4]
@@ -1587,8 +1592,9 @@ def sync_missing_tpsl():
                             tp4_price = 0
             tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
             
-            # Jika semua TP/SL masih 0, fallback ke brain_engine
-            if sl_price == 0 and tp1_price == 0:
+            # Jika semua TP masih 0, fallback ke brain_engine (SL boleh ada dari state)
+            all_tp_zero = all(tp <= 0 for tp in tp_prices)
+            if all_tp_zero:
                 import brain_engine
                 logger.warning(f"⚠️ {symbol} tidak punya TP/SL dari sinyal TV maupun state. Fallback ke brain_engine.")
                 try:
@@ -1669,10 +1675,14 @@ def sync_missing_tpsl():
             last_tp_idx = _get_last_tp_idx(tp_prices, side)
             time.sleep(2)  # Rate limit: gap antara SL placement dan TP loop
 
-            # CEK: Berapa total TP qty yang sudah ada?
-            current_tp_qty = sum(float(o.get("origQty", 0)) for o in open_orders if "TAKE_PROFIT" in o.get("type", ""))
-            if current_tp_qty >= amt * 0.99:
-                results.append(f"✔️ {symbol}: TP sudah lengkap (qty tertutup).")
+            # CEK: Jumlah TP orders yang ada (bukan total qty — 1 TP penuh ≠ 4 TP split)
+            _tp_orders = [o for o in open_orders if "TAKE_PROFIT" in o.get("type", "")]
+            _tp_order_count = len(_tp_orders)
+            current_tp_qty = sum(float(o.get("origQty", 0)) for o in _tp_orders)
+            _needed_tps = len([p for p in tp_prices if p > 0])
+            # Skip hanya jika jumlah TP orders >= jumlah valid TPs yang dibutuhkan
+            if _tp_order_count >= _needed_tps and current_tp_qty >= amt * 0.99:
+                results.append(f"✔️ {symbol}: TP sudah lengkap ({_tp_order_count} orders, qty {current_tp_qty:.4f}/{amt:.4f}).")
                 continue
 
             # Ambil notified state untuk avoid re-placing TP yang sudah ter-fill
@@ -1740,6 +1750,29 @@ def sync_missing_tpsl():
                 results.append(f"✅ {symbol}: {tp_count} TP baru dipasang")
             else:
                 results.append(f"✔️ {symbol}: TP sudah lengkap.")
+
+            # ── REMINDER: Cek jumlah TP orders, alert jika < 4 ──
+            try:
+                _recheck = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
+                _recheck_data = _recheck.get("data", [])
+                _recheck_orders = _recheck_data.get("orders", []) if isinstance(_recheck_data, dict) else (_recheck_data if isinstance(_recheck_data, list) else [])
+                _final_tp_count = len([o for o in _recheck_orders if "TAKE_PROFIT" in o.get("type", "")])
+                _needed = len([p for p in tp_prices if p > 0])
+                if _final_tp_count < _needed and _final_tp_count < 4:
+                    _alert = (
+                        f"⚠️ *TP KURANG!* {symbol} {_final_tp_count}/{_needed} TP\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📊 Posisi: {side} | Entry: {entry}\n"
+                        f"🎯 TP aktif: {_final_tp_count}/4\n"
+                        f"💡 *Solusi:* Naikkan leverage atau tambah margin supaya qty cukup untuk 4 TP split (min ~0.08 ETH)"
+                    )
+                    try:
+                        import requests as _tg
+                        _tg.post(f"https://api.telegram.org/bot{os.getenv('TELEGRAM_BOT_TOKEN')}/sendMessage",
+                                 json={"chat_id": os.getenv("TELEGRAM_CHAT_ID"), "text": _alert, "parse_mode": "Markdown"}, timeout=5)
+                    except: pass
+                    logger.warning(f"⚠️ REMINDER: {symbol} cuma {_final_tp_count} TP (butuh {_needed}). Naikkan leverage/margin!")
+            except: pass
 
         return "\n".join(results)
     except Exception as e:
