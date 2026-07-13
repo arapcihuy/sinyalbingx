@@ -250,14 +250,11 @@ def save_latest_signals():
                 )
             ''')
             for sym, data in latest_signals.items():
-                c.execute("SELECT id FROM tv_signals WHERE symbol=? AND action=? AND price=? AND sl=? AND tp1=?", 
-                          (sym, data.get("action"), data.get("price"), data.get("sl"), data.get("tp1")))
-                if not c.fetchone():
-                    c.execute('''
-                        INSERT INTO tv_signals (ts, symbol, action, price, sl, tp1, tp2, tp3, tp4)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (time.time(), sym, data.get("action"), data.get("price"), data.get("sl"), 
-                          data.get("tp1"), data.get("tp2"), data.get("tp3"), data.get("tp4")))
+                # Selalu INSERT — load_latest_signals ambil yang terbaru per symbol
+                c.execute('''INSERT INTO tv_signals (ts, symbol, action, price, sl, tp1, tp2, tp3, tp4)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                    (time.time(), sym, data.get("action"), data.get("price"), data.get("sl"),
+                     data.get("tp1"), data.get("tp2"), data.get("tp3"), data.get("tp4")))
             conn.commit()
             conn.close()
         except Exception as e:
