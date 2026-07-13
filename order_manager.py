@@ -1104,6 +1104,29 @@ def execute_signal(data: dict) -> dict:
     # Live Execution
     bx.set_leverage(symbol, leverage, pos_side)
 
+    # ── MIN QTY CHECK: Pastikan qty cukup untuk 4 TP split (BingX min notional ~$17.84/trigger ETH) ──
+    try:
+        _min_notional = bx.get_min_notional(symbol)
+        if _min_notional > 0 and len(tp_prices) >= 2:
+            # TP terkecil (15% dari qty) harus >= min notional
+            _min_pct = 0.15  # TP4 weight
+            _min_qty_needed = math.ceil(_min_notional / (_min_pct * entry_price) * 10**cfg.get("qty_precision", 3)) / 10**cfg.get("qty_precision", 3)
+            if qty < _min_qty_needed:
+                # Hitung leverage yang dibutuhkan supaya margin muat
+                _needed_margin = (_min_qty_needed * entry_price) / max(leverage, 1)
+                _avail = balance - used_margin if used_margin < balance else 0
+                _min_lev_needed = math.ceil((_min_qty_needed * entry_price) / max(_avail, 0.1))
+                _min_lev_needed = min(_min_lev_needed, cfg.get("max_lev", 100))
+                if _min_lev_needed > leverage and _avail > 0:
+                    leverage = _min_lev_needed
+                    qty = _min_qty_needed
+                    bx.set_leverage(symbol, leverage, pos_side)
+                    logger.warning(f"🎯 MIN QTY BUMP: {symbol} qty {qty} (need {_min_qty_needed} for 4 TP split) → lev {leverage}x")
+                else:
+                    logger.warning(f"⚠️ {symbol} qty {qty} < min {_min_qty_needed} untuk 4 TP, tapi leverage ga cukup. Tetap coba.")
+    except Exception as mq_err:
+        logger.warning(f"⚠️ Min qty check error: {mq_err}")
+
     order_res = bx.place_order(symbol, order_side, pos_side, qty, "MARKET")
 
     # ── RETRY ON INSUFFICIENT MARGIN: kurangi qty 50%, coba lagi ──

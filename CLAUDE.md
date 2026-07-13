@@ -16,7 +16,13 @@
 2. **Fair Share Margin**: `max_margin_per_pos = equity / jumlah_posisi`. Setiap coin dapat jatah adil dari total equity, bukan dari sisa available.
 3. **Leverage Auto-Adjust**: Leverage naik otomatis sampai margin muat dalam jatah. Kalau leverage mentok `max_lev` dan masih kelebihan → qty dikurangi (bukan block).
 4. **Risk Pakai Equity**: Risk calculation selalu pakai `balance` (equity total), BUKAN `available` (sisa setelah posisi lain). Ini memastikan coin kecil ga "makan" jatah coin besar.
-5. **Min Qty BingX**: BingX min order 0.001 (BTC) / 0.01 (lainnya). Qty boleh dibagi di bawah min untuk TP split — BingX terima.
+5. **Min Qty BingX**: BingX min order 0.001 (BTC) / 0.01 (lainnya). TAPI min notional per trigger order (TP/SL) ≈ $17.84 (ETH) — qty split harus cukup besar supaya setiap TP muat.
+
+## ⚠️ CRITICAL: Jangan Close-Reopen!
+**DILARANG** close-reopen position cuma gara-gara TP kurang atau qty kecil. Close-reopen = double fee + slippage. Kalau posisi sudah ada tapi TP < 4:
+1. Tambahin TP lewat `sync_missing_tpsl` (sudah ada logic-nya)
+2. Kalau qty terlalu kecil untuk split (BingX min notional), naikkan leverage DI POSISI YANG SUDAH ADA atau terima 1 TP dulu
+3. **Sebelum buka posisi baru**, hitung: `qty_needed = min_notional / (0.15 * tp_price)` — pastikan qty >= qty_needed supaya 4 TP split muat dari awal
 
 ## Margin Allocation Philosophy
 - Equity $35 → 6 coin → ~$5.8/coin
