@@ -2481,7 +2481,8 @@ def check_and_update_trailing_sl():
                                             "symbol": symbol, "side": sl_side, "positionSide": pos_side,
                                             "type": "TAKE_PROFIT_MARKET", "stopPrice": _tp_val,
                                             "quantity": _tp_qty,
-                                            "priceProtect": "true"
+                                            "priceProtect": "true",
+                                            "closePosition": "true"
                                         })
                                     else:
                                         _tp_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
