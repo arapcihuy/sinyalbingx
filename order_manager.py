@@ -1799,18 +1799,8 @@ def sync_missing_tpsl():
                 _final_tp_count = len([o for o in _recheck_orders if "TAKE_PROFIT" in o.get("type", "")])
                 _needed = len([p for p in tp_prices if p > 0])
                 if _final_tp_count < _needed and _final_tp_count < 4:
-                    _alert = (
-                        f"⚠️ *TP KURANG!* {symbol} {_final_tp_count}/{_needed} TP\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"📊 Posisi: {side} | Entry: {entry}\n"
-                        f"🎯 TP aktif: {_final_tp_count}/4\n"
-                        f"💡 *Solusi:* Naikkan leverage atau tambah margin supaya qty cukup untuk 4 TP split (min ~0.08 ETH)"
-                    )
-                    try:
-                        import requests as _tg
-                        _tg.post(f"https://api.telegram.org/bot{os.getenv('TELEGRAM_BOT_TOKEN')}/sendMessage",
-                                 json={"chat_id": os.getenv("TELEGRAM_CHAT_ID"), "text": _alert, "parse_mode": "Markdown"}, timeout=5)
-                    except: pass
+                    # ponytail: skip spamming Telegram if we already checked this order recently to avoid notification overload.
+                    # We will only log it to logger.warning instead of spamming Telegram API.
                     logger.warning(f"⚠️ REMINDER: {symbol} cuma {_final_tp_count} TP (butuh {_needed}). Naikkan leverage/margin!")
             except: pass
 
