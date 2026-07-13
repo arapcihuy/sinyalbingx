@@ -2143,12 +2143,15 @@ def check_and_update_trailing_sl():
                                         tp_qty = round(qty * weights[i], 4)
                                         is_last_tp = (i == _last_tp_idx)
                                         if tp_price > 0 and tp_qty > 0:
-                                            tp_adopt_res = bx._request("POST", "/openApi/swap/v2/trade/order", {
+                                            payload = {
                                                 "symbol": symbol, "side": "BUY" if pos_side == "SHORT" else "SELL",
                                                 "positionSide": pos_side, "type": "TAKE_PROFIT_MARKET",
                                                 "stopPrice": tp_price, "quantity": tp_qty,
                                                 "priceProtect": "true"
-                                            })
+                                            }
+                                            if is_last_tp:
+                                                payload["closePosition"] = "true"
+                                            tp_adopt_res = bx._request("POST", "/openApi/swap/v2/trade/order", payload)
                                             if tp_adopt_res.get("code") == 0:
                                                 _adopted_tp_count += 1
                                                 logger.info(f"✅ Adopt TP{i+1} dipasang {symbol} @ {tp_price} (qty: {tp_qty})")
