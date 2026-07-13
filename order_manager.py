@@ -135,6 +135,53 @@ LATEST_SIGNALS_FILE = "latest_signals.json"
 
 import settings_manager
 
+def _send_tp_kurang_notif(symbol: str, actual_tp: int, needed_tp: int):
+    """Kirim notifikasi ⚠️ TP KURANG! yang lebih informatif."""
+    key = (symbol, "TP_KURANG")
+    last = _notif_cooldown.get(key, 0)
+    # Cooldown 1 jam khusus untuk TP_KURANG agar tidak spam
+    if time.time() - last < 3600:
+        return
+    _notif_cooldown[key] = time.time()
+
+    try:
+        import brain_engine
+        cfg = brain_engine.get_symbol_config(symbol)
+        min_notional_map = {
+            "BTCUSDT": "ETH",
+            "ETHUSDT": "BTC",
+        }
+        # Default ke koin lain yang umum jika tidak ada di map
+        example_coin = min_notional_map.get(symbol, "ETH" if symbol != "ETHUSDT" else "BTC")
+        example_cfg = brain_engine.get_symbol_config(f"{example_coin}USDT")
+        example_min_qty = example_cfg.get("min_qty", 0.01)
+
+        pos_side = ""
+        entry_price = 0
+        with state_lock:
+            if symbol in active_trade_data:
+                pos_side = active_trade_data[symbol].get("side", "")
+                entry_price = active_trade_data[symbol].get("entry_price", 0)
+
+        TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", None)
+        if not TG_TOKEN or not TG_CHAT_ID: return
+
+        msg = (
+            f"⚠️ *TP KURANG!* {symbol} {actual_tp}/{needed_tp} TP\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 *Posisi:* `{pos_side}` | *Entry:* `{entry_price}`\n"
+            f"🎯 *TP aktif:* `{actual_tp}` dari `{needed_tp}` yang dibutuhkan.\n"
+            f"💡 *Solusi:* Naikkan leverage atau tambah margin supaya qty cukup untuk {needed_tp} TP split (min order ~{example_min_qty} {example_coin})."
+        )
+        
+        url_notif = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+        requests.post(url_notif, json={"chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=5)
+        logger.warning(f"Sent 'TP KURANG' notification for {symbol}")
+
+    except Exception as e:
+        logger.error(f"Gagal kirim notif 'TP KURANG' untuk {symbol}: {e}")
+
 def _atomic_write_json(file_path, data):
     """Securely write JSON using a temporary file to prevent corruption."""
     try:
@@ -1798,10 +1845,10 @@ def sync_missing_tpsl():
                 _recheck_orders = _recheck_data.get("orders", []) if isinstance(_recheck_data, dict) else (_recheck_data if isinstance(_recheck_data, list) else [])
                 _final_tp_count = len([o for o in _recheck_orders if "TAKE_PROFIT" in o.get("type", "")])
                 _needed = len([p for p in tp_prices if p > 0])
-                if _final_tp_count < _needed and _final_tp_count < 4:
-                    # ponytail: skip spamming Telegram if we already checked this order recently to avoid notification overload.
-                    # We will only log it to logger.warning instead of spamming Telegram API.
-                    logger.warning(f"⚠️ REMINDER: {symbol} cuma {_final_tp_count} TP (butuh {_needed}). Naikkan leverage/margin!")
+                # ONLY notify if we are actually missing TP orders compared to what we expect, 
+                # AND we don't already have at least 2 TPs set (which is often enough for safety)
+                if _final_tp_count < _needed and _final_tp_count < 2:
+                    _send_tp_kurang_notif(symbol, _final_tp_count, _needed)
             except: pass
 
         return "\n".join(results)
