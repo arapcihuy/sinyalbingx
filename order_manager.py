@@ -231,13 +231,9 @@ def update_paper_trades(trades):
 
 def load_latest_signals():
     global latest_signals
-    if os.path.exists(LATEST_SIGNALS_FILE):
-        try:
-            with open(LATEST_SIGNALS_FILE, "r") as f:
-                latest_signals = json.load(f)
-        except:
-            latest_signals = {}
-            
+    latest_signals = {}
+
+    # 1. Load DB dulu (data historical)
     db_path = "signals.db"
     try:
         conn = sqlite3.connect(db_path)
@@ -273,6 +269,19 @@ def load_latest_signals():
         conn.close()
     except Exception as e:
         logger.error(f"Gagal load latest_signals dari DB: {e}")
+
+    # 2. Overlay JSON (lebih baru dari session berjalan)
+    if os.path.exists(LATEST_SIGNALS_FILE):
+        try:
+            with open(LATEST_SIGNALS_FILE, "r") as f:
+                json_data = json.load(f)
+            # JSON merge: hanya update kalau JSON punya data
+            for sym, data in json_data.items():
+                if data:  # skip empty
+                    latest_signals[sym] = data
+        except:
+            pass
+
     return latest_signals
 
 def save_latest_signals():
@@ -739,7 +748,16 @@ def execute_signal(data: dict) -> dict:
 
     paper_mode = get_paper_mode()
     try:
-        entry_price = float(data.get("price", 0)) or bx.get_current_price(symbol)
+        tv_price = float(data.get("price", 0))
+        # For low-price coins (XRP, ADA, etc), TV may round to 1 decimal → useless.
+        # Always fetch real price from BingX; use TV price only as fallback.
+        real_price = bx.get_current_price(symbol)
+        if real_price > 0:
+            entry_price = real_price
+        else:
+            entry_price = tv_price if tv_price > 0 else 0
+        if entry_price == 0:
+            raise ValueError("No price available")
     except Exception as e:
         logger.error(f"❌ Gagal get entry price {symbol}: {e}")
         return {"status": "failed: cannot get price", "symbol": symbol}
@@ -797,6 +815,16 @@ def execute_signal(data: dict) -> dict:
     tp3_price = tv_tp3_price
     tp4_price = tv_tp4_price
     tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
+
+    # ── RECALC: Jika TV price beda jauh dari real entry, shift TP/SL proporsional ──
+    tv_signal_price = float(data.get("price", 0))
+    if tv_signal_price > 0 and entry_price > 0 and abs(tv_signal_price - entry_price) / entry_price > 0.005:
+        sl_price, recalc_tps = _recalc_tp_sl_for_entry(
+            sl_price, tp_prices, tv_signal_price, entry_price, pos_side, symbol
+        )
+        tp1_price, tp2_price, tp3_price, tp4_price = recalc_tps[:4]
+        tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
+        logger.info(f"🔄 TP/SL recalculated: TV entry {tv_signal_price} → real {entry_price}")
 
     # ── TV TP/SL MUTLAK: Tidak ada MIN SL GUARD, tidak ada auto-generate TP ──
     # TP/SL 100% dari TV. Brain engine HANYA untuk leverage + qty.
@@ -1018,15 +1046,21 @@ def execute_signal(data: dict) -> dict:
     # Ensure _tp_prec is always defined
     _tp_prec = max(cfg.get("qty_precision", 2) + 1, 4)
 
+    # Trigger order min notional — TP/SL orders have HIGHER min notional than entry
+    try:
+        trigger_min_notional = bx.get_trigger_min_notional(symbol)
+    except Exception:
+        trigger_min_notional = min_notional * 8 if min_notional > 0 else 20.0
+
     # ── TP NOTIONAL GUARD: Bump qty per TP biar muat min notional, bukan drop TP ──
-    if min_notional > 0:
+    if trigger_min_notional > 0:
         _valid_tps = [(i, p) for i, p in enumerate(tp_prices) if p > 0]
         _bumped_any = False
         for _vi, (_ti, _tp) in enumerate(_valid_tps):
             _tp_notional = qtys[_ti] * _tp
-            if _tp > 0 and _tp_notional < min_notional:
-                _min_q = math.ceil(min_notional / _tp * 10**_tp_prec) / 10**_tp_prec
-                logger.info(f"🎯 TP{_ti+1} BUMP: qty {qtys[_ti]} → {_min_q} (notional ${_tp_notional:.2f} < ${min_notional})")
+            if _tp > 0 and _tp_notional < trigger_min_notional:
+                _min_q = math.ceil(trigger_min_notional / _tp * 10**_tp_prec) / 10**_tp_prec
+                logger.info(f"🎯 TP{_ti+1} BUMP: qty {qtys[_ti]} → {_min_q} (notional ${_tp_notional:.2f} < ${trigger_min_notional})")
                 qtys[_ti] = _min_q
                 _bumped_any = True
 
@@ -1057,6 +1091,7 @@ def execute_signal(data: dict) -> dict:
                 _adj_msg = f"⚠️ *TP NOTIONAL BUMP* — `{symbol}`\n"
                 _adj_msg += f"━━━━━━━━━━━━━━━━━━━━━\n"
                 _adj_msg += f"💰 Qty asli: `{qty}` | Min notional: `${min_notional}`\n"
+                _adj_msg += f"💰 Trigger min: `${trigger_min_notional}`\n"
                 for _ti, _ in _valid_tps:
                     if tp_prices[_ti] > 0:
                         _adj_msg += f"🎯 TP{_ti+1}: `{tp_prices[_ti]}` qty=`{qtys[_ti]}` (${qtys[_ti]*tp_prices[_ti]:.2f})\n"
@@ -1168,7 +1203,7 @@ def execute_signal(data: dict) -> dict:
     # ── MIN QTY CHECK: Pastikan qty cukup untuk 4 TP split (BingX min notional ~$17.84/trigger ETH) ──
     # PENTING: leverage tidak boleh melebihi _liq_safe_lev (LIQ GUARD)
     try:
-        _min_notional = bx.get_min_notional(symbol)
+        _min_notional = trigger_min_notional  # use trigger min for TP/SL orders
         if _min_notional > 0 and len(tp_prices) >= 2:
             _min_pct = 0.15  # TP4 weight
             _min_qty_needed = math.ceil(_min_notional / (_min_pct * entry_price) * 10**cfg.get("qty_precision", 3)) / 10**cfg.get("qty_precision", 3)
@@ -1184,10 +1219,48 @@ def execute_signal(data: dict) -> dict:
                     bx.set_leverage(symbol, leverage, pos_side)
                     logger.warning(f"🎯 MIN QTY BUMP: {symbol} qty {qty} (need {_min_qty_needed} for 4 TP split) → lev {leverage}x (liq_safe={_max_safe_lev}x)")
                 elif _min_lev_needed <= leverage:
-                    logger.info(f"🎯 MIN QTY OK: {symbol} qty {qty} sudah cukup untuk 4 TP split")
+                    # Leverage cukup, tapi qty masih kurang → bump qty
+                    if qty < _min_qty_needed:
+                        qty = _min_qty_needed
+                        logger.warning(f"🎯 MIN QTY BUMP: {symbol} qty → {qty} (lev {leverage}x cukup, liq_safe={_max_safe_lev}x)")
+                    else:
+                        logger.info(f"🎯 MIN QTY OK: {symbol} qty {qty} sudah cukup untuk 4 TP split")
                 else:
-                    # Leverage terlalu tinggi untuk SL → qty dikurangi, terima < 4 TP
-                    logger.warning(f"⚠️ {symbol} qty {qty} < min {_min_qty_needed} untuk 4 TP, tapi liq_safe lev {_max_safe_lev}x. Kurangi qty, terima < 4 TP.")
+                    # Leverage terlalu tinggi untuk SL → kurangi jumlah TP supaya qty cukup
+                    # Hitung berapa TP yang muat: setiap TP butuh min_notional / tp_price qty
+                    _reduced = False
+                    for _trim_i in range(len(tp_prices) - 1, -1, -1):
+                        if tp_prices[_trim_i] <= 0:
+                            continue
+                        _min_q_for_tp = math.ceil(_min_notional / tp_prices[_trim_i] * 10**cfg.get("qty_precision", 3)) / 10**cfg.get("qty_precision", 3)
+                        # Estimasi qty needed untuk sisa TP ( pakai weight proporsional)
+                        _n_remaining = len([p for p in tp_prices if p > 0])
+                        if _n_remaining <= 1:
+                            break  # jangan drop semua
+                        _tp_pct = {4: 0.15, 3: 0.20, 2: 0.30, 1: 0.35}.get(_n_remaining, 0.15)
+                        _est_qty_for_tp = (_min_notional / _tp_pct) / entry_price if entry_price > 0 else 0
+                        if qty < _est_qty_for_tp * _n_remaining:
+                            # Qty ga cukup untuk semua TP → drop TP ini
+                            tp_prices[_trim_i] = 0
+                            qtys[_trim_i] = 0
+                            _reduced = True
+                            _n_new = len([p for p in tp_prices if p > 0])
+                            logger.warning(f"🎯 {symbol} TP{_trim_i+1} dropped (qty {qty} < needed for {_n_new+1} TP split). Sisa {_n_new} TP.")
+                    if _reduced:
+                        # Redistribute qtys ke sisa TP
+                        _remaining_idx = [i for i, p in enumerate(tp_prices) if p > 0]
+                        _n_rem = len(_remaining_idx)
+                        if _n_rem > 0:
+                            _nw = {1: [1.0], 2: [0.60, 0.40], 3: [0.50, 0.30, 0.20]}
+                            _weights = _nw.get(_n_rem, [1.0 / _n_rem] * _n_rem)
+                            for _wi, _widx in enumerate(_remaining_idx):
+                                if _wi < len(_weights):
+                                    qtys[_widx] = round(qty * _weights[_wi], _tp_prec)
+                            _last = _remaining_idx[-1]
+                            qtys[_last] = round(qty - sum(qtys[j] for j in _remaining_idx[:-1]), _tp_prec)
+                            logger.info(f"🎯 {symbol} Redistributed: {_n_rem} TP, qtys={[qtys[i] for i in _remaining_idx]}")
+                    else:
+                        logger.warning(f"⚠️ {symbol} qty {qty} < min {_min_qty_needed} untuk 4 TP, tapi liq_safe lev {_max_safe_lev}x.")
     except Exception as mq_err:
         logger.warning(f"⚠️ Min qty check error: {mq_err}")
 
@@ -1212,10 +1285,18 @@ def execute_signal(data: dict) -> dict:
     # Sekarang cancel HANYA jika entry berhasil → posisi lama tetap terlindungi sampai entry baru fill.
 
     if order_res.get("code") == 0:
-        # ── CANCEL ALL EXISTING ORDERS setelah entry SUKSES ──
+        # ── CANCEL HANYA ORDER LAMA (bukan SL/TP baru) ──
+        # Jangan cancel_all — SL/TP yang baru dipasang akan ikut terbuang
         try:
-            bx.cancel_all_orders(symbol)
-            logger.info(f"🧹 Semua order lama di-{symbol} dibuang setelah entry baru fill.")
+            existing = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
+            ex_data = existing.get("data", [])
+            if isinstance(ex_data, dict): ex_data = ex_data.get("orders", [])
+            old_orders = [o for o in (ex_data if isinstance(ex_data, list) else [])
+                         if o.get("status") == "NEW" and o.get("symbol") == symbol]
+            if old_orders:
+                for o in old_orders:
+                    bx.cancel_order(symbol, o["orderId"])
+                logger.info(f"🧹 {len(old_orders)} order lama di-{symbol} dibatalkan.")
         except Exception as cancel_err:
             logger.warning(f"⚠️ Gagal cancel orders {symbol}: {cancel_err}")
 
@@ -1311,9 +1392,9 @@ def execute_signal(data: dict) -> dict:
                 continue
             q = qtys[i]
             notional = q * tp_price
-            if notional < min_notional and min_notional > 0:
-                q = math.ceil(min_notional / tp_price * 10**_prec["qty"]) / 10**_prec["qty"]
-                logger.info(f"🎯 TP{i+1} NOTIONAL BUMP: ${notional:.2f} < ${min_notional} → qty {q}")
+            if notional < trigger_min_notional and trigger_min_notional > 0:
+                q = math.ceil(trigger_min_notional / tp_price * 10**_prec["qty"]) / 10**_prec["qty"]
+                logger.info(f"🎯 TP{i+1} NOTIONAL BUMP: ${notional:.2f} < ${trigger_min_notional} → qty {q}")
             # Cek apakah masih muat di sisa qty
             if q > _qty_remaining:
                 logger.warning(f"🎯 TP{i+1} SKIP: qty {q} > remaining {_qty_remaining}")
@@ -1325,7 +1406,7 @@ def execute_signal(data: dict) -> dict:
         # Last TP SELALU diproses — ambil sisa qty apapun kondisinya
         if last_tp_idx < len(tp_prices) and tp_prices[last_tp_idx] > 0:
             _lt_price = tp_prices[last_tp_idx]
-            if _qty_remaining * _lt_price < min_notional and min_notional > 0 and len(_skipped_small) == 0:
+            if _qty_remaining * _lt_price < trigger_min_notional and trigger_min_notional > 0 and len(_skipped_small) == 0:
                 # Semua TP non-last sudah ditempatkan dan sisa terlalu kecil — gabungkan ke TP sebelumnya
                 _prev_ti = None
                 for j in range(last_tp_idx - 1, -1, -1):
@@ -1334,7 +1415,7 @@ def execute_signal(data: dict) -> dict:
                         break
                 if _prev_ti is not None:
                     _tp_final_qtys[_prev_ti] = round(_tp_final_qtys[_prev_ti] + _qty_remaining, _prec["qty"])
-                    logger.info(f"🎯 TP{last_tp_idx+1} GABUNG ke TP{_prev_ti+1}: remaining qty {_qty_remaining} (notional ${_qty_remaining * _lt_price:.2f} < min ${min_notional})")
+                    logger.info(f"🎯 TP{last_tp_idx+1} GABUNG ke TP{_prev_ti+1}: remaining qty {_qty_remaining} (notional ${_qty_remaining * _lt_price:.2f} < min ${trigger_min_notional})")
                 else:
                     _tp_final_qtys[last_tp_idx] = _qty_remaining
                     logger.info(f"🎯 TP{last_tp_idx+1} LAST RESORT: qty {_qty_remaining} (sisa)")
@@ -2071,8 +2152,13 @@ def check_and_update_trailing_sl():
                         tv_tp2 = float(last_signal.get("tp2", 0))
                         tv_tp3 = float(last_signal.get("tp3", 0))
                         tv_tp4 = float(last_signal.get("tp4", 0))
-                        
-                        if tv_sl > 0 and tv_tp1 > 0:
+
+                        # Direction check: skip TV signal if action doesn't match position side
+                        signal_action = last_signal.get("action", "").upper()
+                        signal_side = "LONG" if signal_action in ("BUY", "LONG") else "SHORT"
+                        signal_matches_side = (signal_side == pos_side)
+
+                        if tv_sl > 0 and tv_tp1 > 0 and signal_matches_side:
                             # Recalc TP/SL dari sinyal TV relatif ke actual entry
                             tv_signal_price = float(last_signal.get("price", 0)) or float(last_signal.get("entry_price", 0))
                             tv_tps_raw = [tv_tp1, tv_tp2, tv_tp3, tv_tp4]
@@ -2187,7 +2273,20 @@ def check_and_update_trailing_sl():
                             "adopted": True
                         }
                         save_active_trades()
-                        
+
+                        # Update latest_signals supaya sync loop ga pakai sinyal lama
+                        latest_signals[symbol] = {
+                            "symbol": symbol,
+                            "action": pos_side,
+                            "price": avg_price,
+                            "sl": sl_val,
+                            "tp1": tp_prices[0],
+                            "tp2": tp_prices[1],
+                            "tp3": tp_prices[2],
+                            "tp4": tp_prices[3],
+                        }
+                        save_latest_signals()
+
                         # Kirim Telegram Notif Auto-Adopt (dengan cooldown anti-spam)
                         if _should_notify(symbol, "adopt"):
                             TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")

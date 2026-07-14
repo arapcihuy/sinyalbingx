@@ -32,3 +32,17 @@
 - BTC min 0.001 × $63k = $63 notional → butuh leverage cukup tinggi (15-20x) supaya margin ~$3-4
 - Coin kecil (SOL/ADA/XRP/BNB) notional $10-30 → leverage 15-20x → margin $0.5-2
 - Total margin ~$8-12 dari $35 equity = 23-34% utilization → aman
+
+## Cek Sinyal Terakhir
+- `active_trades.json` — posisi aktif, TP/SL, qty, leverage
+- `latest_signals.json` — sinyal terakhir per coin (action, price, TP1-4, SL)
+- `signals.db` (tabel `tv_signals`) — historical sinyal, tapi ga selalu lengkap
+
+## Bug Fixes (14 Jul 2026)
+1. **load_latest_signals**: DB overwrite JSON → balik urutan (DB dulu, JSON overlay di atas)
+2. **Entry price**: TV kirim price rounded (XRP 1.0) → selalu fetch `bx.get_current_price()`
+3. **TP/SL recalc**: Kalau TV price beda >0.5% dari real entry, recalc proporsional
+4. **Auto-adopt**: Update `latest_signals` + DB saat adopt posisi manual
+5. **Sync loop**: Cek direction match sebelum pakai TV signal
+6. **Qty min notional**: TP/SL orders pakai trigger min notional (lebih tinggi dari entry min)
+7. **JANGAN cancel_all_orders saat entry**: SL/TP aktif ikut terbuang. Pakai selective cancel per order ID. Hanya cancel_all saat close position.

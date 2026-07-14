@@ -482,9 +482,26 @@ def get_max_leverage(symbol: str) -> int:
 
 
 def get_min_notional(symbol: str) -> float:
-    """Return min_notional dari contract info."""
+    """Return min_notional dari contract info (untuk entry/market orders)."""
     info = get_contract_info(symbol)
     return info.get("min_notional", 0)
+
+
+# Trigger/conditional order min notional — BingX enforce HIGHER min notional for TP/SL
+# Source: BingX API error "The minimum size per order is X USDT" on TAKE_PROFIT_MARKET
+_TRIGGER_MIN_NOTIONAL = {
+    "ETH-USDT": 18.63,
+    "BTC-USDT": 100.0,
+}
+_TRIGGER_MIN_NOTIONAL_MULT = 8  # fallback: multiplier dari tradeMinUSDT
+
+
+def get_trigger_min_notional(symbol: str) -> float:
+    """Return min_notional untuk trigger orders (TP/SL). Lebih tinggi dari trade min."""
+    if symbol in _TRIGGER_MIN_NOTIONAL:
+        return _TRIGGER_MIN_NOTIONAL[symbol]
+    trade_min = get_min_notional(symbol)
+    return trade_min * _TRIGGER_MIN_NOTIONAL_MULT if trade_min > 0 else 20.0
 
 
 # ─────────────────────────────────────────────
