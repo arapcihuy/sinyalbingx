@@ -1300,6 +1300,24 @@ def execute_signal(data: dict) -> dict:
                 logger.info(f"✅ RETRY {retry+1} SUKSES: {symbol} qty={qty}")
                 break
 
+    # ── SYNC QTYS SETELAH RETRY: pastikan TP orders pakai qty aktual ──
+    if order_res.get("code") == 0 and _forced_4tp:
+        _tp_prec = max(cfg.get("qty_precision", 2) + 1, 4)
+        _n_active = len([p for p in tp_prices if p > 0]) or 1
+        _eq = round(qty / _n_active, _tp_prec)
+        qtys = []
+        for i in range(4):
+            if i < len(tp_prices) and tp_prices[i] > 0:
+                qtys.append(_eq)
+            else:
+                qtys.append(0.0)
+        _diff = qty - sum(qtys)
+        for i in range(len(qtys) - 1, -1, -1):
+            if qtys[i] > 0:
+                qtys[i] = round(qtys[i] + _diff, _tp_prec)
+                break
+        logger.info(f"🎯 SYNC QTYS: {symbol} → {[q for q in qtys if q > 0]} (actual qty={qty})")
+
     # ── CANCEL ALL EXISTING ORDERS setelah entry SUKSES ──
     # ponytail: dahulu cancel SEBELUM entry → re-sent signal hapus SL/TP lama walau entry gagal.
     # Sekarang cancel HANYA jika entry berhasil → posisi lama tetap terlindungi sampai entry baru fill.
