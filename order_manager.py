@@ -1008,19 +1008,6 @@ def execute_signal(data: dict) -> dict:
             calc_result["qtys"] = qtys
             calc_result["total_qty"] = qty
             calc_result["margin"] = (qty * entry_price) / leverage if leverage > 0 else 0
-            # Safety: gunakan fair share (balance / open_count) sebagai batas margin
-            _fair_share = balance / max(open_count, 1)
-            _forced_margin = calc_result["margin"]
-            if _forced_margin > _fair_share and _fair_share > 0:
-                _max_qty_by_margin = (_fair_share * leverage) / entry_price if entry_price > 0 and leverage > 0 else qty
-                if _max_qty_by_margin > 0:
-                    _ratio = _max_qty_by_margin / qty
-                    qtys = [round(q * _ratio, _tp_prec) if q > 0 else 0.0 for q in qtys]
-                    qty = round(_max_qty_by_margin, cfg.get("qty_precision", 3))
-                    calc_result["qtys"] = qtys
-                    calc_result["total_qty"] = qty
-                    calc_result["margin"] = (qty * entry_price) / leverage
-                    logger.warning(f"🎯 4-TP FAIR SHARE: {symbol} qty {qty} (margin ${_forced_margin:.2f} > fair ${_fair_share:.2f})")
     else:
         _forced_4tp = False
 
