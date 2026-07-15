@@ -338,9 +338,128 @@ def parse_plain_text_alert(text):
         data["price"] = data.get("price", 0.0)
         data["sl"] = data.get("sl", 0.0)
         data["tp1"] = data.get("tp1", 0.0)
+        
+        # ── POST-PROCESS: Fix truncated numbers & invalid symbols ──
+        data = _fix_signal_data(data, text)
+        
         return data
         
     return None
+
+
+def _fix_signal_data(data: dict, raw_text: str) -> dict:
+    """Fix sinyal TV yang bermasalah:
+    1. Angka truncated (581 → 581.xx) — pad dengan decimal dari real price
+    2. Symbol invalid ('-USDT') — match by price range
+    3. TP kurang dari 4 — extrapolate dari pattern yang ada
+    """
+    import re
+    
+    symbol = data.get("symbol", "")
+    
+    # ── FIX 1: Symbol invalid → match by price ──
+    if not symbol or symbol == "-USDT" or not symbol.endswith("-USDT"):
+        price = data.get("price", 0)
+        # Price range mapping (approximate)
+        PRICE_MAP = {
+            (60000, 100000): "BTC-USDT",
+            (1500, 3000): "ETH-USDT",
+            (50, 200): "SOL-USDT",
+            (400, 800): "BNB-USDT",
+            (0.8, 2.0): "XRP-USDT",
+            (0.1, 0.5): "ADA-USDT",
+            (0.05, 0.3): "TRX-USDT",
+        }
+        for (lo, hi), sym in PRICE_MAP.items():
+            if lo <= price <= hi:
+                data["symbol"] = sym
+                log.info(f"🔧 FIX SYMBOL: '{symbol}' → '{sym}' (matched by price ${price})")
+                symbol = sym
+                break
+    
+    # ── FIX 2: Angka truncated → pad dengan decimal ──
+    # Jika angka > 10 dan tidak ada decimal, kemungkinan truncated
+    def _pad_decimal(val, real_price, symbol):
+        if val <= 0 or val == real_price:
+            return val
+        # Cek apakah val integer (no decimal)
+        if val == int(val) and val > 10:
+            # Cek apakah real_price dekat (dalam 20%)
+            if real_price > 0 and abs(val - real_price) / real_price < 0.20:
+                # Pakai decimal dari real_price
+                real_str = f"{real_price:.6f}"
+                val_str = str(int(val))
+                real_parts = real_str.split('.')
+                if len(real_parts) == 2:
+                    decimals = real_parts[1].rstrip('0')
+                    if not decimals:
+                        # real_price juga integer → pakai default precision dari config
+                        try:
+                            import brain_engine
+                            cfg = brain_engine.get_symbol_config(symbol)
+                            prec = cfg.get("price_precision", 2)
+                            decimals = "0" * prec
+                        except:
+                            decimals = "00"
+                    padded = f"{val_str}.{decimals}"
+                    result = float(padded)
+                    # Bandingin string representation, bukan float
+                    if f"{result}" != f"{val}" and result != val:
+                        log.info(f"🔧 FIX DECIMAL: {val} → {result} (padded from real {real_price})")
+                        return result
+                    elif padded != f"{val}":
+                        # Float sama tapi string beda → tetap return padded
+                        log.info(f"🔧 FIX DECIMAL: {val} → {padded} (string match)")
+                        return result
+        return val
+    
+    try:
+        import bingx_client as bx
+        real_price = bx.get_current_price(symbol) if symbol else 0
+    except:
+        real_price = 0
+    
+    # Untuk SHORT, pakai entry price (bukan current market) sbg reference
+    ref_price = real_price
+    if data.get("action", "").upper() in ("SELL", "SHORT") and data.get("price", 0) > 0:
+        ref_price = data["price"]
+    
+    if ref_price > 0:
+        for key in ["price", "sl", "tp1", "tp2", "tp3", "tp4"]:
+            if key in data and data[key] > 0:
+                data[key] = _pad_decimal(data[key], ref_price, symbol)
+    
+    # ── FIX 3: TP kurang dari 4 → extrapolate ──
+    tp_vals = [data.get(f"tp{i}", 0) or 0 for i in range(1, 5)]
+    active_tps = [(i, v) for i, v in enumerate(tp_vals) if v > 0]
+    
+    if 1 <= len(active_tps) <= 3 and ref_price > 0:
+        # Hitung spacing dari TP yang ada
+        if len(active_tps) >= 2:
+            spacings = []
+            for j in range(1, len(active_tps)):
+                diff = active_tps[j][1] - active_tps[j-1][1]
+                spacings.append(diff)
+            avg_spacing = sum(spacings) / len(spacings)
+        else:
+            # Cuma 1 TP → spacing = 1% dari harga
+            avg_spacing = real_price * 0.01
+        
+        # Tentukan direction (LONG/SHORT)
+        is_long = data.get("action", "").upper() in ("BUY", "LONG")
+        
+        # Extrapolate ke 4 TP
+        last_tp_idx = active_tps[-1][0]
+        last_tp_val = active_tps[-1][1]
+        
+        for i in range(last_tp_idx + 1, 4):
+            if tp_vals[i] == 0:
+                direction = 1 if is_long else -1
+                tp_vals[i] = round(last_tp_val + (avg_spacing * direction * (i - last_tp_idx)), 6)
+                log.info(f"🔧 FIX EXTRAPOLATE: TP{i+1} = {tp_vals[i]} (spacing {avg_spacing:.4f})")
+                data[f"tp{i+1}"] = tp_vals[i]
+    
+    return data
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):

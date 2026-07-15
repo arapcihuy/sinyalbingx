@@ -136,52 +136,54 @@ LATEST_SIGNALS_FILE = "latest_signals.json"
 import settings_manager
 
 def _send_tp_kurang_notif(symbol: str, actual_tp: int, needed_tp: int):
-    """Kirim notifikasi ⚠️ TP KURANG! yang lebih informatif."""
+    """Kirim notifikasi TP kurang yang lebih ringkas dan fokus pada masalah: 0 TP orders vs needed_notional_TP"""
     key = (symbol, "TP_KURANG")
     last = _notif_cooldown.get(key, 0)
-    # Cooldown 1 jam khusus untuk TP_KURANG agar tidak spam
+    # Hanya kirim notif kalau betul-betul tidak ada TP orders
     if time.time() - last < 3600:
         return
     _notif_cooldown[key] = time.time()
 
     try:
         import brain_engine
+        # Ambil TTari actual PER TP (bukan total qty) — periksa setiap TP price
         cfg = brain_engine.get_symbol_config(symbol)
-        min_notional_map = {
-            "BTCUSDT": "ETH",
-            "ETHUSDT": "BTC",
-        }
-        # Default ke koin lain yang umum jika tidak ada di map
-        example_coin = min_notional_map.get(symbol, "ETH" if symbol != "ETHUSDT" else "BTC")
-        example_cfg = brain_engine.get_symbol_config(f"{example_coin}USDT")
-        example_min_qty = example_cfg.get("min_qty", 0.01)
-
+        
         pos_side = ""
         entry_price = 0
+        tp_active = 0
+        tp_prices = []
         with state_lock:
             if symbol in active_trade_data:
                 pos_side = active_trade_data[symbol].get("side", "")
                 entry_price = active_trade_data[symbol].get("entry_price", 0)
-
+                # Ambil jumlah TP yang aktif dari order_manager_data (kunci TP price >0)
+                tp_active = len([p for p in active_trade_data[symbol].get("tp", []) if p > 0])
+                tp_prices = active_trade_data[symbol].get("tp", [])
+        
         TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
         TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", None)
-        if not TG_TOKEN or not TG_CHAT_ID: return
+        if not TG_TOKEN or not TG_CHAT_ID:
+            return
+
+        # Hitung TP yang UDAH ke-trigger > 0 dari tp_notified
+        _tp_triggered = sum(1 for k, v in active_trade_data.get(symbol, {}).get("tp_notified", {}).items() 
+                           if v and k.startswith("tp"))
+        needed_active = len([p for p in tp_prices if p > 0]) - _tp_triggered
 
         msg = (
-            f"⚠️ *TP KURANG!* {symbol} {actual_tp}/{needed_tp} TP\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📊 *Posisi:* `{pos_side}` | *Entry:* `{entry_price}`\n"
-            f"🎯 *TP aktif:* `{actual_tp}` dari `{needed_tp}` yang dibutuhkan.\n"
-            f"💡 *Solusi:* Naikkan leverage atau tambah margin supaya qty cukup untuk {needed_tp} TP split (min order ~{example_min_qty} {example_coin})."
+            f"⚠️ TP KURANG! {symbol}\n"
+            f"📊 {pos_side} | Entry: {entry_price}\n"
+            f"🎯 TP tersisa: {needed_active} (bergantung jumlah TP orders yang ada)\n"
+            f"💡 Kurangi TP atau naikkan leverage"
         )
         
         url_notif = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-        requests.post(url_notif, json={"chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=5)
+        requests.post(url_notif, json={"chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=5)
         logger.warning(f"Sent 'TP KURANG' notification for {symbol}")
 
     except Exception as e:
         logger.error(f"Gagal kirim notif 'TP KURANG' untuk {symbol}: {e}")
-
 def _atomic_write_json(file_path, data):
     """Securely write JSON using a temporary file to prevent corruption."""
     try:
@@ -914,7 +916,7 @@ def execute_signal(data: dict) -> dict:
     # ── LIQUIDATION GUARD: Pastikan SL trigger SEBELUM liquidation ──
     # ponytail: iterate -2 per step terlalu lambat (150x→130x). Hitung langsung.
     mmr = float(cfg.get("mmr", 0.005))
-    buffer_pct = settings.get("liquidation_buffer_pct", 0.10)
+    buffer_pct = settings.get("liquidation_buffer_pct", 0.005)
     _liq_safe_lev = leverage  # default: no cap
 
     if sl_price > 0 and entry_price > 0 and leverage > 1:
@@ -1010,26 +1012,25 @@ def execute_signal(data: dict) -> dict:
     else:
         _forced_4tp = False
 
-    # ── MARGIN CAP: Max 40% available per posisi, biar sisa muat koin lain ──
-    # Skip jika 4-TP FORCE aktif (user wajib 4 TP, rela margin lebih tinggi)
-    if brain_enabled and available > 0 and not _forced_4tp:
-        # Fair share: equity dibagi rata semua posisi (termasuk yang baru)
-        max_margin_per_pos = balance / max(open_count, 1)
+    # ── MARGIN CAP: Allocasi berdasarkan minimum-viable, bukan fair-share ──
+    if brain_enabled and available > 0:
+        # Hitung min margin per coin utk 4 TP
+        _min_margin_for_4tp = brain_engine.calculate_min_margin_for_tps(
+            _trigger_min, tp_prices, entry_price, leverage, cfg)
+        # Batas margin: max(40% balance, min_margin_for_4tp)
+        max_margin_per_pos = max(balance * 0.40, _min_margin_for_4tp)
         actual_margin = calc_result["margin"]
         if actual_margin > max_margin_per_pos and actual_margin > 0:
-            # Cap qty supaya margin muat, lev tetap aman dari LIQ GUARD
             max_qty = (max_margin_per_pos * leverage) / entry_price if entry_price > 0 and leverage > 0 else qty
             if max_qty < qty:
-                # Distribusi ulang ke TP levels proporsional
-                # ponytail: TP qtys pakai tp_prec (max(qty_prec+1, 4)) supaya partial qty BTC tidak round ke 0
                 _tp_prec = max(cfg.get("qty_precision", 2) + 1, 4)
                 ratio = max_qty / qty
                 qtys = [round(q * ratio, _tp_prec) if q > 0 else 0.0 for q in qtys]
-                qty = round(max(qty * ratio, cfg.get("min_qty", 0.001)), cfg.get("qty_precision", 3))
+                qty = round(max(max_qty, cfg.get("min_qty", 0.001)), cfg.get("qty_precision", 3))
                 calc_result["qtys"] = qtys
                 calc_result["total_qty"] = qty
-                calc_result["margin"] = (qty * entry_price) / leverage
-                logger.info(f"🎯 MARGIN CAP: {symbol} qty {qty} | margin ${calc_result['margin']:.2f} ≤ ${max_margin_per_pos:.2f} (fair share of ${balance:.2f} / {open_count} positions)")
+                calc_result["margin"] = (qty * entry_price) / leverage if leverage > 0 else 0
+                logger.info(f"🎯 MARGIN CAP: {symbol} qty {qty} | margin ${calc_result['margin']:.2f} ≤ ${max_margin_per_pos:.2f} (min_4tp ${_min_margin_for_4tp:.2f})")
 
     # ── POST-QTY DEDUP: brain_engine hard limiter bisa menyamakan harga TP → dedup lagi ──
     seen_prices = set()
@@ -1958,16 +1959,18 @@ def sync_missing_tpsl():
             else:
                 results.append(f"✔️ {symbol}: TP sudah lengkap.")
 
-            # ── REMINDER: Cek jumlah TP orders, alert jika < 4 ──
+            # ── REMINDER: Cek jumlah TP orders, alert jika kurang ──
             try:
                 _recheck = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
                 _recheck_data = _recheck.get("data", [])
                 _recheck_orders = _recheck_data.get("orders", []) if isinstance(_recheck_data, dict) else (_recheck_data if isinstance(_recheck_data, list) else [])
                 _final_tp_count = len([o for o in _recheck_orders if "TAKE_PROFIT" in o.get("type", "")])
                 _needed = len([p for p in tp_prices if p > 0])
-                # ONLY notify if we are actually missing TP orders compared to what we expect, 
-                # AND we don't already have at least 2 TPs set (which is often enough for safety)
-                if _final_tp_count < _needed:
+                # 🔧 FIX: Jangan hitung TP yang sudah notified = sudah ke-trigger, bukan "hilang"
+                _tp_triggered = sum(1 for k, v in tp_notified.items() if v and k.startswith("tp"))
+                _needed_active = _needed - _tp_triggered
+                # Only alert if open TP orders < needed_active (yang belum ke-trigger) DAN < 2
+                if _final_tp_count < 2 and _final_tp_count < _needed_active:
                     _send_tp_kurang_notif(symbol, _final_tp_count, _needed)
             except: pass
 

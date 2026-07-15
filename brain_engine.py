@@ -319,7 +319,7 @@ def get_safe_leverage(balance: float, entry_price: float, sl_price: float, side:
         l_max = 1.0 / denominator
 
         # Hitung leverage aman dengan buffer 15% (dulu 10%)
-        safe_leverage = int(math.floor(l_max * 0.85))
+        safe_leverage = int(math.floor(l_max * 0.995))
         final_leverage = max(1, min(base_leverage, safe_leverage))
         logger.info(f"🛡️ AUDIT LEVERAGE: {symbol} | Base {base_leverage}x | L_max {l_max:.1f}x | Safe {safe_leverage}x | Final {final_leverage}x")
         return final_leverage
@@ -513,57 +513,88 @@ def calculate_position_size(balance: float, entry_price: float, sl_price: float,
     return qty
 
 
+def calculate_min_margin_for_tps(trigger_min: float, tp_prices: list, entry_price: float, leverage: int, cfg: dict) -> float:
+    """Hitung minimum margin yang dibutuhkan agar semua TP muat trigger_min_notional.
+    Semua TP butuh qty (termasuk TP4 closePosition, BingX tetep butuh qty).
+    Returns minimum margin dalam USDT."""
+    import math
+    if trigger_min <= 0 or entry_price <= 0 or leverage <= 0:
+        return 0.0
+    
+    qty_prec = cfg.get("qty_precision", 3)
+    tp_prec = max(qty_prec + 1, 4)  # Sama kayak calculate_smart_multi_tp_qty
+    active_tps = [p for p in tp_prices if p > 0]
+    if not active_tps:
+        return 0.0
+    
+    # Semua TP butuh qty (BingX wajibkan walau closePosition)
+    min_qty_total = sum(
+        math.ceil(trigger_min / tp * 10**tp_prec) / 10**tp_prec
+        for tp in active_tps
+    )
+    
+    return (min_qty_total * entry_price) / leverage
+
+
 def calculate_smart_multi_tp_qty(balance: float, entry_price: float, sl_price: float, tp_prices: list, leverage: int, risk_percent: float, symbol: str) -> dict:
     """
     Menghitung kuantitas parsial untuk setiap level TP.
-    Total kuantitas tetap mengikuti budget risk (Stop Loss based).
+    Qty = max(risk_based, min_qty_per_tp) supaya trigger_min_notional terpenuhi.
     """
+    import math
     cfg = get_symbol_config(symbol)
     qty_prec = cfg.get("qty_precision", 2)
-    # ponytail: TP split perlu presisi lebih tinggi dari entry qty
-    # BingX terima sub-min qty untuk TP orders (CLAUDE.md §Min Qty)
     tp_prec = max(qty_prec + 1, 4)
     
     # 1. Hitung total qty berdasarkan budget risk
     total_qty = calculate_position_size(balance, entry_price, sl_price, risk_percent, symbol, leverage)
     
-    # 2. Bagi qty ke TP levels
+    # 2. Ambil trigger_min_notional
+    try:
+        import bingx_client as bx
+        trigger_min = bx.get_trigger_min_notional(symbol)
+    except Exception:
+        trigger_min = 16.0
+    
+    # 3. Hitung min qty per TP supaya notional >= trigger_min
+    # TP4 = closePosition → ga perlu hitung
     valid_tps = [p for p in tp_prices if p > 0]
     if not valid_tps:
         return {"qtys": [total_qty], "total_qty": total_qty, "margin": (total_qty * entry_price) / leverage}
     
-    # Pembagian: TP1 (35%), TP2 (30%), TP3 (20%), TP4 (15%) jika semua ada
-    # Jika cuma 2 TP: TP1 (60%), TP2 (40%)
-    weights = [0.35, 0.30, 0.20, 0.15]
-    if len(valid_tps) == 1: weights = [1.0]
-    elif len(valid_tps) == 2: weights = [0.6, 0.4]
-    elif len(valid_tps) == 3: weights = [0.50, 0.30, 0.20]
-    
-    final_qtys = [0.0] * 4
-    tp_idx = 0
-    assigned_qty = 0.0
-    
+    min_qty_per_tp = {}
     for i, price in enumerate(tp_prices):
-        if price > 0 and tp_idx < len(weights):
-            # TP terakhir ambil sisa agar presisi
-            if tp_idx == len(valid_tps) - 1:
-                q = total_qty - assigned_qty
-            else:
-                q = total_qty * weights[tp_idx]
-            
-            # ponytail: no min_qty floor for TP split — BingX accepts sub-min qty per TP order (CLAUDE.md §Min Qty)
-            q = round(q, tp_prec)
-            final_qtys[i] = q
-            assigned_qty += q
-            tp_idx += 1
-            
-    # 3. Recalculate total qty after rounding
-    actual_total = round(sum(final_qtys), tp_prec)
+        if price <= 0:
+            continue
+        min_q = math.ceil(trigger_min / price * 10**tp_prec) / 10**tp_prec
+        min_qty_per_tp[i] = min_q
     
-    # [REMOVED] Dynamic TP Consolidation — TP/SL fully from TV, bot tidak modify
-            
-    # [REMOVED] Hard Limiter — TP/SL fully from TV, bot tidak clamp
-            
+    # 4. Hitung total qty minimum = sum min_qty_per_tp (SEMUA TP butuh qty)
+    total_min_qty = sum(min_qty_per_tp.values())
+    
+    # 5. Qty final = max(risk_based, min_needed)
+    total_qty = max(total_qty, total_min_qty)
+    
+    # 6. Bagi qty ke TP levels — minimum-viable
+    # Semua TP (termasuk TP4) butuh qty karena BingX wajibkan qty walau closePosition
+    final_qtys = [0.0] * 4
+    total_assigned = 0.0
+    
+    trigger_indices = [i for i in range(len(tp_prices)) if tp_prices[i] > 0]
+    min_total = sum(min_qty_per_tp.get(i, 0) for i in trigger_indices)
+    
+    for i in trigger_indices:
+        final_qtys[i] = min_qty_per_tp.get(i, 0)
+        total_assigned += final_qtys[i]
+    
+    # Sisa ke TP1 (closest to entry = paling mungkin kena duluan)
+    remaining = total_qty - total_assigned
+    if remaining > 0 and trigger_indices:
+        final_qtys[trigger_indices[0]] += remaining
+    
+    # Round
+    final_qtys = [round(q, tp_prec) for q in final_qtys]
+    
     return {
         "qtys": final_qtys,
         "total_qty": round(sum(final_qtys), qty_prec),
