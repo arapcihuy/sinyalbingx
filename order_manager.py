@@ -949,16 +949,84 @@ def execute_signal(data: dict) -> dict:
     est_liq_final = brain_engine.estimate_liquidation_price(entry_price, leverage, pos_side, mmr)
     logger.info(f"🛡️ LIQ CHECK: {symbol} {pos_side} | Entry={entry_price:.4f} SL={sl_price:.4f} Liq={est_liq_final:.4f} Lev={leverage}x")
 
+    # ── 4-TP LEVERAGE BOOST: Naikkan leverage supaya 4 TP wajib muat ──
+    # Hitung min qty untuk 4 TP berdasarkan trigger_min_notional
+    try:
+        _trigger_min = bx.get_trigger_min_notional(symbol)
+    except Exception:
+        _trigger_min = 16.0
+    _active_tps = [p for p in tp_prices if p > 0]
+    _min_qty_4tp = 0
+    if _active_tps and _trigger_min > 0:
+        _min_avg_tp = min(_active_tps)
+        _min_qty_4tp = math.ceil(len(_active_tps) * _trigger_min / _min_avg_tp * 10**cfg.get("qty_precision", 3)) / 10**cfg.get("qty_precision", 3)
+
     # Hitung kuantitas cerdas multi-TP — pakai available (bukan balance) supaya margin ga meledak
     _qty_balance = balance  # ponytail: always use equity for fair allocation across all coins
     calc_result = brain_engine.calculate_smart_multi_tp_qty(_qty_balance, entry_price, sl_price, tp_prices, leverage, risk_pct, symbol)
     qtys = calc_result["qtys"]
     qty = calc_result["total_qty"]
 
+    # ── 4-TP ENFORCE: Jika qty kurang untuk 4 TP, naikkan lev + qty ──
+    if _min_qty_4tp > 0 and qty < _min_qty_4tp:
+        # Hitung leverage butuh: margin = qty × entry / lev → lev = qty × entry / margin
+        _risk_amount = balance * risk_pct / 100
+        _target_margin = max(_risk_amount * 2, cfg.get("min_margin", 1.0))
+        _lev_needed = int(math.ceil((_min_qty_4tp * entry_price) / _target_margin))
+        _lev_needed = max(1, min(_lev_needed, _liq_safe_lev if _liq_safe_lev > 0 else 100))
+        _lev_needed = min(_lev_needed, cfg.get("max_lev", 50))
+        if _lev_needed > leverage:
+            leverage = _lev_needed
+            # Recalc qty dengan leverage baru
+            calc_result = brain_engine.calculate_smart_multi_tp_qty(_qty_balance, entry_price, sl_price, tp_prices, leverage, risk_pct, symbol)
+            qtys = calc_result["qtys"]
+            qty = calc_result["total_qty"]
+            logger.info(f"🎯 4-TP BOOST: {symbol} lev → {leverage}x, qty → {qty} (need {_min_qty_4tp} for 4 TPs)")
+        # Kalau lev udah max tapi qty masih kurang, paksa qty ke min
+        _forced_4tp = False
+        if qty < _min_qty_4tp:
+            qty = _min_qty_4tp
+            _forced_4tp = True
+            logger.warning(f"🎯 4-TP FORCE: {symbol} qty → {qty} (lev {leverage}x, butuh {_min_qty_4tp})")
+            # Redistribusi qtys proporsional
+            _tp_prec = max(cfg.get("qty_precision", 2) + 1, 4)
+            _n_tps = len(_active_tps) if _active_tps else 4
+            _eq = round(qty / _n_tps, _tp_prec)
+            qtys = []
+            for i in range(4):
+                if i < len(tp_prices) and tp_prices[i] > 0:
+                    qtys.append(_eq)
+                else:
+                    qtys.append(0.0)
+            # Absorb rounding ke TP terakhir
+            _diff = qty - sum(qtys)
+            for i in range(len(qtys) - 1, -1, -1):
+                if qtys[i] > 0:
+                    qtys[i] = round(qtys[i] + _diff, _tp_prec)
+                    break
+            # Update calc_result supaya margin konsisten
+            calc_result["qtys"] = qtys
+            calc_result["total_qty"] = qty
+            calc_result["margin"] = (qty * entry_price) / leverage if leverage > 0 else 0
+            # Safety: gunakan fair share (balance / open_count) sebagai batas margin
+            _fair_share = balance / max(open_count, 1)
+            _forced_margin = calc_result["margin"]
+            if _forced_margin > _fair_share and _fair_share > 0:
+                _max_qty_by_margin = (_fair_share * leverage) / entry_price if entry_price > 0 and leverage > 0 else qty
+                if _max_qty_by_margin > 0:
+                    _ratio = _max_qty_by_margin / qty
+                    qtys = [round(q * _ratio, _tp_prec) if q > 0 else 0.0 for q in qtys]
+                    qty = round(_max_qty_by_margin, cfg.get("qty_precision", 3))
+                    calc_result["qtys"] = qtys
+                    calc_result["total_qty"] = qty
+                    calc_result["margin"] = (qty * entry_price) / leverage
+                    logger.warning(f"🎯 4-TP FAIR SHARE: {symbol} qty {qty} (margin ${_forced_margin:.2f} > fair ${_fair_share:.2f})")
+    else:
+        _forced_4tp = False
+
     # ── MARGIN CAP: Max 40% available per posisi, biar sisa muat koin lain ──
-    # ponytail: menurunkan lev menambah margin (karena qty independen lev).
-    # Fix: cap qty, bukan lev.
-    if brain_enabled and available > 0:
+    # Skip jika 4-TP FORCE aktif (user wajib 4 TP, rela margin lebih tinggi)
+    if brain_enabled and available > 0 and not _forced_4tp:
         # Fair share: equity dibagi rata semua posisi (termasuk yang baru)
         max_margin_per_pos = balance / max(open_count, 1)
         actual_margin = calc_result["margin"]
@@ -1226,41 +1294,7 @@ def execute_signal(data: dict) -> dict:
                     else:
                         logger.info(f"🎯 MIN QTY OK: {symbol} qty {qty} sudah cukup untuk 4 TP split")
                 else:
-                    # Leverage terlalu tinggi untuk SL → kurangi jumlah TP supaya qty cukup
-                    # Hitung berapa TP yang muat: setiap TP butuh min_notional / tp_price qty
-                    _reduced = False
-                    for _trim_i in range(len(tp_prices) - 1, -1, -1):
-                        if tp_prices[_trim_i] <= 0:
-                            continue
-                        _min_q_for_tp = math.ceil(_min_notional / tp_prices[_trim_i] * 10**cfg.get("qty_precision", 3)) / 10**cfg.get("qty_precision", 3)
-                        # Estimasi qty needed untuk sisa TP ( pakai weight proporsional)
-                        _n_remaining = len([p for p in tp_prices if p > 0])
-                        if _n_remaining <= 1:
-                            break  # jangan drop semua
-                        _tp_pct = {4: 0.15, 3: 0.20, 2: 0.30, 1: 0.35}.get(_n_remaining, 0.15)
-                        _est_qty_for_tp = (_min_notional / _tp_pct) / entry_price if entry_price > 0 else 0
-                        if qty < _est_qty_for_tp * _n_remaining:
-                            # Qty ga cukup untuk semua TP → drop TP ini
-                            tp_prices[_trim_i] = 0
-                            qtys[_trim_i] = 0
-                            _reduced = True
-                            _n_new = len([p for p in tp_prices if p > 0])
-                            logger.warning(f"🎯 {symbol} TP{_trim_i+1} dropped (qty {qty} < needed for {_n_new+1} TP split). Sisa {_n_new} TP.")
-                    if _reduced:
-                        # Redistribute qtys ke sisa TP
-                        _remaining_idx = [i for i, p in enumerate(tp_prices) if p > 0]
-                        _n_rem = len(_remaining_idx)
-                        if _n_rem > 0:
-                            _nw = {1: [1.0], 2: [0.60, 0.40], 3: [0.50, 0.30, 0.20]}
-                            _weights = _nw.get(_n_rem, [1.0 / _n_rem] * _n_rem)
-                            for _wi, _widx in enumerate(_remaining_idx):
-                                if _wi < len(_weights):
-                                    qtys[_widx] = round(qty * _weights[_wi], _tp_prec)
-                            _last = _remaining_idx[-1]
-                            qtys[_last] = round(qty - sum(qtys[j] for j in _remaining_idx[:-1]), _tp_prec)
-                            logger.info(f"🎯 {symbol} Redistributed: {_n_rem} TP, qtys={[qtys[i] for i in _remaining_idx]}")
-                    else:
-                        logger.warning(f"⚠️ {symbol} qty {qty} < min {_min_qty_needed} untuk 4 TP, tapi liq_safe lev {_max_safe_lev}x.")
+                    pass
     except Exception as mq_err:
         logger.warning(f"⚠️ Min qty check error: {mq_err}")
 
@@ -1436,7 +1470,8 @@ def execute_signal(data: dict) -> dict:
                     "symbol": symbol, "side": sl_side, "positionSide": pos_side,
                     "type": "TAKE_PROFIT_MARKET", "stopPrice": tp_price,
                     "quantity": tp_qty,
-                    "priceProtect": "true"
+                    "priceProtect": "true",
+                    "closePosition": "true"
                 })
                 logger.info(f"🎯 TP{i+1} FULL CLOSE @ {tp_price} (qty: {tp_qty})")
             else:
@@ -1928,7 +1963,7 @@ def sync_missing_tpsl():
                 _needed = len([p for p in tp_prices if p > 0])
                 # ONLY notify if we are actually missing TP orders compared to what we expect, 
                 # AND we don't already have at least 2 TPs set (which is often enough for safety)
-                if _final_tp_count < _needed and _final_tp_count < 2:
+                if _final_tp_count < _needed:
                     _send_tp_kurang_notif(symbol, _final_tp_count, _needed)
             except: pass
 

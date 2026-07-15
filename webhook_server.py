@@ -165,26 +165,36 @@ def run_async_execution(data, pair, signal, price, sl, tp1, tp2, tp3, tp4, TG_TO
                 if extra_details:
                     msg_lines.append(extra_details.strip())
                 
+                # Pakai nilai TP/SL aktual dari active_trade_data (bukan raw TV)
+                _actual_sl = sl
+                _actual_tp1, _actual_tp2, _actual_tp3, _actual_tp4 = tp1, tp2, tp3, tp4
+                if trade_info:
+                    _actual_sl = trade_info.get("sl", sl) or sl
+                    _actual_tp1 = trade_info.get("tp1", tp1) or tp1
+                    _actual_tp2 = trade_info.get("tp2", tp2) or tp2
+                    _actual_tp3 = trade_info.get("tp3", tp3) or tp3
+                    _actual_tp4 = trade_info.get("tp4", tp4) or tp4
+
                 # Visualisasikan coretan jika disarankan oleh AI
-                sl_str = f"`{sl}`"
-                if suggested_params.get("suggested_sl") and float(suggested_params["suggested_sl"]) != float(sl):
-                    sl_str = f"~~`{sl}`~~ 🧠 `{suggested_params['suggested_sl']}`"
+                sl_str = f"`{_actual_sl}`"
+                if suggested_params.get("suggested_sl") and float(suggested_params["suggested_sl"]) != float(_actual_sl):
+                    sl_str = f"~~`{_actual_sl}`~~ 🧠 `{suggested_params['suggested_sl']}`"
                     
-                tp1_str = f"`{tp1}`"
-                if suggested_params.get("suggested_tp1") and float(suggested_params["suggested_tp1"]) != float(tp1):
-                    tp1_str = f"~~`{tp1}`~~ 🧠 `{suggested_params['suggested_tp1']}`"
+                tp1_str = f"`{_actual_tp1}`"
+                if suggested_params.get("suggested_tp1") and float(suggested_params["suggested_tp1"]) != float(_actual_tp1):
+                    tp1_str = f"~~`{_actual_tp1}`~~ 🧠 `{suggested_params['suggested_tp1']}`"
                     
-                tp2_str = f"`{tp2}`"
-                if suggested_params.get("suggested_tp2") and float(suggested_params["suggested_tp2"]) != float(tp2):
-                    tp2_str = f"~~`{tp2}`~~ 🧠 `{suggested_params['suggested_tp2']}`"
+                tp2_str = f"`{_actual_tp2}`"
+                if suggested_params.get("suggested_tp2") and float(suggested_params["suggested_tp2"]) != float(_actual_tp2):
+                    tp2_str = f"~~`{_actual_tp2}`~~ 🧠 `{suggested_params['suggested_tp2']}`"
                 
                 msg_lines.extend([
                     f"💵 *Entry Price:* `{price if price > 0 else 'MARKET'}`",
                     f"🛑 *Stop Loss:* {sl_str}",
                     f"🎯 *TP1:* {tp1_str} | *TP2:* {tp2_str}"
                 ])
-                if tp3 > 0 or tp4 > 0:
-                    msg_lines.append(f"🎯 *TP3:* `{tp3}` | *TP4:* `{tp4}`")
+                if _actual_tp3 > 0 or _actual_tp4 > 0:
+                    msg_lines.append(f"🎯 *TP3:* `{_actual_tp3}` | *TP4:* `{_actual_tp4}`")
             else:
                 msg_lines.append(f"⚠️ *Alasan:* {reason_text}")
                 if price > 0:
