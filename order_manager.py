@@ -881,9 +881,8 @@ def execute_signal(data: dict) -> dict:
         
         # Risk% disesuaikan jumlah posisi & sisa margin
         risk_pct = float(brain_engine.get_risk_for_positions(balance, open_count, active_symbols))
-        
-        # Leverage disesuaikan utk target margin (2x risk_amount, min = min_margin)
-        risk_amount = balance * risk_pct / 100
+        # Bagi risk per posisi — total risk = risk_pct, per coin = risk_pct / open_count
+        risk_amount = balance * risk_pct / 100 / max(open_count, 1)
         sl_delta = abs(entry_price - sl_price)
         min_margin = cfg.get("min_margin", 1.0)
         max_lev = cfg.get("max_lev", 50)
