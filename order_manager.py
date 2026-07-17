@@ -1666,6 +1666,49 @@ def audit_position_reconciliation():
                 
             if has_mismatch:
                 _RECONCILIATION_MISMATCH_COUNT[sym] = _RECONCILIATION_MISMATCH_COUNT.get(sym, 0) + 1
+                
+                # ── AUTO-ADOPT: Kalau posisi ada di bursa tapi ga di lokal → adopt otomatis ──
+                if sym in real_symbols and sym not in local_symbols and _RECONCILIATION_MISMATCH_COUNT[sym] <= 1:
+                    try:
+                        _adopt_pos = [p for p in real_positions if p["symbol"] == sym and float(p.get("positionAmt", 0)) != 0]
+                        if _adopt_pos:
+                            _ap = _adopt_pos[0]
+                            _adopt_side = _ap["positionSide"]
+                            _adopt_entry = float(_ap["avgPrice"])
+                            _adopt_amt = abs(float(_ap["positionAmt"]))
+                            _adopt_lev = int(_ap.get("leverage", 20))
+                            _adopt_margin = (_adopt_amt * _adopt_entry) / _adopt_lev
+                            
+                            # Ambil TP/SL dari exchange orders
+                            _adopt_orders = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": sym})
+                            _adopt_ex = _adopt_orders.get("data", [])
+                            if isinstance(_adopt_ex, dict): _adopt_ex = _adopt_ex.get("orders", [])
+                            _adopt_sl = 0
+                            _adopt_tps = [0, 0, 0, 0]
+                            for _o in (_adopt_ex if isinstance(_adopt_ex, list) else []):
+                                if "STOP" in _o.get("type", "") and "TAKE_PROFIT" not in _o.get("type", ""):
+                                    _adopt_sl = float(_o.get("stopPrice", 0))
+                                elif "TAKE_PROFIT" in _o.get("type", ""):
+                                    for _ti in range(4):
+                                        if _adopt_tps[_ti] == 0:
+                                            _adopt_tps[_ti] = float(_o.get("stopPrice", 0))
+                                            break
+                            
+                            with state_lock:
+                                active_trade_data[sym] = {
+                                    "symbol": sym, "side": _adopt_side,
+                                    "entry_price": _adopt_entry, "qty": _adopt_amt,
+                                    "leverage": _adopt_lev, "margin": round(_adopt_margin, 2),
+                                    "status": "OPEN_SYNCED", "sl": _adopt_sl,
+                                    "tp1": _adopt_tps[0], "tp2": _adopt_tps[1],
+                                    "tp3": _adopt_tps[2], "tp4": _adopt_tps[3],
+                                    "tp_notified": {}, "created_at": time.time()
+                                }
+                            save_active_trades()
+                            logger.info(f"📥 AUTO-ADOPT (reconcile): {sym} {_adopt_side} entry={_adopt_entry} qty={_adopt_amt}")
+                    except Exception as adopt_err:
+                        logger.error(f"Gagal auto-adopt {sym} dari reconcile: {adopt_err}")
+                
                 if _RECONCILIATION_MISMATCH_COUNT[sym] == 3: # 3x berturut-turut (~45 detik)
                     # Kirim notifikasi peringatan ke Telegram
                     TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -1924,9 +1967,24 @@ def sync_missing_tpsl():
             _tp_order_count = len(_tp_orders)
             current_tp_qty = sum(float(o.get("origQty", 0)) for o in _tp_orders)
             _needed_tps = len([p for p in tp_prices if p > 0])
-            # Skip hanya jika jumlah TP orders >= jumlah valid TPs yang dibutuhkan
-            if _tp_order_count >= _needed_tps and current_tp_qty >= amt * 0.99:
-                results.append(f"✔️ {symbol}: TP sudah lengkap ({_tp_order_count} orders, qty {current_tp_qty:.4f}/{amt:.4f}).")
+            # Skip jika: (a) jumlah TP orders >= jumlah needed TPs ATAU (b) qty sudah ter-cover
+            # ponytail: exchange orders = source of truth. Jangan overwrite TPs yang udah ada.
+            if _tp_order_count >= _needed_tps or current_tp_qty >= amt * 0.99:
+                # Update active_trade_data dari exchange orders (bukan dari latest_signals)
+                if symbol in active_trade_data:
+                    _ex_tps = sorted([float(o.get("stopPrice", 0)) for o in _tp_orders], reverse=(side == "SHORT"))
+                    with state_lock:
+                        for i, tp_val in enumerate(_ex_tps[:4]):
+                            active_trade_data[symbol][f"tp{i+1}"] = tp_val
+                        # Also update SL from exchange
+                        _ex_sl = 0
+                        for o in open_orders:
+                            if "STOP" in o.get("type", "") and "TAKE_PROFIT" not in o.get("type", ""):
+                                _ex_sl = float(o.get("stopPrice", 0))
+                        if _ex_sl > 0:
+                            active_trade_data[symbol]["sl"] = _ex_sl
+                        save_active_trades()
+                logger.info(f"✔️ {symbol}: TP/SL sudah ada di exchange ({_tp_order_count} orders). Sync state dari exchange.")
                 continue
 
             # Ambil notified state untuk avoid re-placing TP yang sudah ter-fill
