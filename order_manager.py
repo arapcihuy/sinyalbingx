@@ -1124,56 +1124,24 @@ def execute_signal(data: dict) -> dict:
     except Exception:
         trigger_min_notional = min_notional * 8 if min_notional > 0 else 20.0
 
-    # ── TP NOTIONAL GUARD: Bump qty per TP biar muat min notional, bukan drop TP ──
-    if trigger_min_notional > 0:
+    # ── TP NOTIONAL GUARD: Redistribusi qty rata ke semua TP ──
+    # ponytail: Tidak bump ke min_notional — BingX actual limit lebih rendah dari
+    # _TRIGGER_MIN_NOTIONAL_MULT=8. Distribusi rata, let BingX reject kalau kekecilan.
+    if len(tp_prices) > 0:
         _valid_tps = [(i, p) for i, p in enumerate(tp_prices) if p > 0]
-        _bumped_any = False
-        for _vi, (_ti, _tp) in enumerate(_valid_tps):
-            _tp_notional = qtys[_ti] * _tp
-            if _tp > 0 and _tp_notional < trigger_min_notional:
-                _min_q = math.ceil(trigger_min_notional / _tp * 10**_tp_prec) / 10**_tp_prec
-                logger.info(f"🎯 TP{_ti+1} BUMP: qty {qtys[_ti]} → {_min_q} (notional ${_tp_notional:.2f} < ${trigger_min_notional})")
-                qtys[_ti] = _min_q
-                _bumped_any = True
-
-        # Kalau total bumped qty melebihi original qty, ambil dari TP terakhir
-        if _bumped_any:
-            _total_after_bump = sum(qtys[_ti] for _ti, _ in _valid_tps)
-            if _total_after_bump > qty:
-                _last_ti = _valid_tps[-1][0]
-                _deficit = _total_after_bump - qty
-                qtys[_last_ti] = round(max(qtys[_last_ti] - _deficit, 0), _tp_prec)
-                logger.warning(f"🎯 TP BUMP OVERFLOW: total {_total_after_bump} > qty {qty} → kurangi TP{_last_ti+1} ke {qtys[_last_ti]}")
-                # Kalau TP terakhir jadi 0, barulah drop (sangat jarang)
-                if qtys[_last_ti] <= 0:
-                    tp_prices[_last_ti] = 0
-                    logger.warning(f"🎯 TP{_last_ti+1} di-drop (qty habis setelah bump)")
-                    # Redistribute ke TP lainnya
-                    _remaining = [i for i, p in enumerate(tp_prices) if p > 0]
-                    if _remaining:
-                        _nw = {3: [0.50, 0.30, 0.20], 2: [0.60, 0.40], 1: [1.0]}
-                        _weights = _nw.get(len(_remaining), [1.0])
-                        for _wi, _widx in enumerate(_remaining):
-                            if _wi < len(_weights):
-                                qtys[_widx] = round(qty * _weights[_wi], _tp_prec)
-                        _last = _remaining[-1]
-                        qtys[_last] = round(qty - sum(qtys[j] for j in _remaining[:-1]), _tp_prec)
-
-                # Notif Telegram kalau ada adjustment signifikan
-                _adj_msg = f"⚠️ *TP NOTIONAL BUMP* — `{symbol}`\n"
-                _adj_msg += f"━━━━━━━━━━━━━━━━━━━━━\n"
-                _adj_msg += f"💰 Qty asli: `{qty}` | Min notional: `${min_notional}`\n"
-                _adj_msg += f"💰 Trigger min: `${trigger_min_notional}`\n"
-                for _ti, _ in _valid_tps:
-                    if tp_prices[_ti] > 0:
-                        _adj_msg += f"🎯 TP{_ti+1}: `{tp_prices[_ti]}` qty=`{qtys[_ti]}` (${qtys[_ti]*tp_prices[_ti]:.2f})\n"
-                _adj_msg += f"━━━━━━━━━━━━━━━━━━━━━"
-                try:
-                    import requests as _r
-                    _r.post(f"https://api.telegram.org/bot{os.getenv('TELEGRAM_BOT_TOKEN')}/sendMessage",
-                            json={"chat_id": os.getenv('TELEGRAM_CHAT_ID'), "text": _adj_msg, "parse_mode": "Markdown"}, timeout=5)
-                except Exception:
-                    pass
+        _n_tps = len(_valid_tps)
+        if _n_tps > 0:
+            _eq = round(qty / _n_tps, _tp_prec)
+            for _ti, _ in _valid_tps:
+                qtys[_ti] = _eq
+            # Absorb rounding ke TP terakhir
+            _last_ti = _valid_tps[-1][0]
+            qtys[_last_ti] = round(qty - sum(qtys[j] for j, _ in _valid_tps[:-1]), _tp_prec)
+            # Log warning kalau ada TP di bawah min notional
+            for _ti, _tp in _valid_tps:
+                _notional = qtys[_ti] * _tp
+                if _notional < trigger_min_notional:
+                    logger.warning(f"🎯 TP{_ti+1} NOTIONAL LOW: qty={qtys[_ti]} × {_tp} = ${_notional:.2f} < ${trigger_min_notional} (BingX mungkin reject)")
 
         tp1_price, tp2_price, tp3_price, tp4_price = tp_prices[:4]
 
@@ -1455,21 +1423,19 @@ def execute_signal(data: dict) -> dict:
 
         placed_tp = []
 
-        # ── TWO-PASS: Hitung qtys dulu dengan min notional check, baru pasang ──
-        # Pass 1: Hitung qty per TP, skip jika tidak muat, last TP ambil sisa
+        # ── TWO-PASS: Distribusi qtys (sudah di-adjust TP NOTIONAL GUARD), pasang ──
+        # Pass 1: Pakai qtys[] langsung, skip kalau ga muat di remaining.
         # ponytail: last_tp_idx diproses TERAKHIR (setelah loop), bukan dalam loop.
-        # Ini mencegah break skip last TP saat non-last TP konsumsi semua remaining qty.
+        # Tidak re-bump ke min notional — TP NOTIONAL GUARD (line 1128) sudah handle.
         _tp_final_qtys = [0.0] * len(tp_prices)
         _qty_remaining = qty
         _skipped_small = []
         for i, tp_price in enumerate(tp_prices):
             if tp_price <= 0 or i == last_tp_idx:
                 continue
-            q = qtys[i]
-            notional = q * tp_price
-            if notional < trigger_min_notional and trigger_min_notional > 0:
-                q = math.ceil(trigger_min_notional / tp_price * 10**_prec["qty"]) / 10**_prec["qty"]
-                logger.info(f"🎯 TP{i+1} NOTIONAL BUMP: ${notional:.2f} < ${trigger_min_notional} → qty {q}")
+            q = qtys[i] if i < len(qtys) else 0
+            if q <= 0:
+                continue
             # Cek apakah masih muat di sisa qty
             if q > _qty_remaining:
                 logger.warning(f"🎯 TP{i+1} SKIP: qty {q} > remaining {_qty_remaining}")
@@ -1480,24 +1446,9 @@ def execute_signal(data: dict) -> dict:
 
         # Last TP SELALU diproses — ambil sisa qty apapun kondisinya
         if last_tp_idx < len(tp_prices) and tp_prices[last_tp_idx] > 0:
-            _lt_price = tp_prices[last_tp_idx]
-            if _qty_remaining * _lt_price < trigger_min_notional and trigger_min_notional > 0 and len(_skipped_small) == 0:
-                # Semua TP non-last sudah ditempatkan dan sisa terlalu kecil — gabungkan ke TP sebelumnya
-                _prev_ti = None
-                for j in range(last_tp_idx - 1, -1, -1):
-                    if tp_prices[j] > 0 and _tp_final_qtys[j] > 0:
-                        _prev_ti = j
-                        break
-                if _prev_ti is not None:
-                    _tp_final_qtys[_prev_ti] = round(_tp_final_qtys[_prev_ti] + _qty_remaining, _prec["qty"])
-                    logger.info(f"🎯 TP{last_tp_idx+1} GABUNG ke TP{_prev_ti+1}: remaining qty {_qty_remaining} (notional ${_qty_remaining * _lt_price:.2f} < min ${trigger_min_notional})")
-                else:
-                    _tp_final_qtys[last_tp_idx] = _qty_remaining
-                    logger.info(f"🎯 TP{last_tp_idx+1} LAST RESORT: qty {_qty_remaining} (sisa)")
-            else:
-                _tp_final_qtys[last_tp_idx] = _qty_remaining
-                if _qty_remaining > 0:
-                    logger.info(f"🎯 TP{last_tp_idx+1} LAST: qty {_qty_remaining} (sisa dari {qty})")
+            _tp_final_qtys[last_tp_idx] = round(_qty_remaining, _prec["qty"])
+            if _qty_remaining > 0:
+                logger.info(f"🎯 TP{last_tp_idx+1} LAST: qty {_qty_remaining} (sisa dari {qty})")
 
         # Pass 2: Pasang orders
         for i, tp_price in enumerate(tp_prices):

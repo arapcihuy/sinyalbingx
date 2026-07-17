@@ -493,7 +493,7 @@ _TRIGGER_MIN_NOTIONAL = {
     "ETH-USDT": 18.63,
     "BTC-USDT": 100.0,
 }
-_TRIGGER_MIN_NOTIONAL_MULT = 8  # fallback: multiplier dari tradeMinUSDT
+_TRIGGER_MIN_NOTIONAL_MULT = 4  # fallback: multiplier dari tradeMinUSDT (was 8, too aggressive)
 
 
 def get_trigger_min_notional(symbol: str) -> float:
