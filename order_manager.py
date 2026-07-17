@@ -969,6 +969,8 @@ def execute_signal(data: dict) -> dict:
     qty = calc_result["total_qty"]
 
     # ── 4-TP ENFORCE: Jika qty kurang untuk 4 TP, naikkan lev + qty ──
+    # Hitung available margin DULU sebelum boost
+    _avail = balance - used_margin if used_margin < balance else 0
     if _min_qty_4tp > 0 and qty < _min_qty_4tp:
         # Hitung leverage butuh: margin = qty × entry / lev → lev = qty × entry / margin
         _risk_amount = balance * risk_pct / 100
@@ -976,6 +978,13 @@ def execute_signal(data: dict) -> dict:
         _lev_needed = int(math.ceil((_min_qty_4tp * entry_price) / _target_margin))
         _lev_needed = max(1, min(_lev_needed, _liq_safe_lev if _liq_safe_lev > 0 else 100))
         _lev_needed = min(_lev_needed, cfg.get("max_lev", 50))
+        # Pastikan margin hasil boost muat di available
+        _boost_margin = (_min_qty_4tp * entry_price) / _lev_needed if _lev_needed > 0 else 999
+        if _boost_margin > _avail and _avail > 0:
+            # Turunkan leverage supaya margin muat
+            _lev_needed = max(1, int(math.ceil((_min_qty_4tp * entry_price) / max(_avail * 0.9, 0.1))))
+            _lev_needed = min(_lev_needed, _liq_safe_lev if _liq_safe_lev > 0 else 100, cfg.get("max_lev", 50))
+            logger.info(f"🎯 4-TP BOOST CAP: {symbol} margin ${_boost_margin:.2f} > avail ${_avail:.2f} → lev {_lev_needed}x")
         if _lev_needed > leverage:
             leverage = _lev_needed
             # Recalc qty dengan leverage baru
@@ -1017,8 +1026,9 @@ def execute_signal(data: dict) -> dict:
         # Hitung min margin per coin utk 4 TP
         _min_margin_for_4tp = brain_engine.calculate_min_margin_for_tps(
             _trigger_min, tp_prices, entry_price, leverage, cfg)
-        # Batas margin: max(40% balance, min_margin_for_4tp)
+        # Batas margin: max(40% balance, min_margin_for_4tp) TAPI ga boleh melebihi available
         max_margin_per_pos = max(balance * 0.40, _min_margin_for_4tp)
+        max_margin_per_pos = min(max_margin_per_pos, available * 0.95)  # sisa 5% buffer
         actual_margin = calc_result["margin"]
         if actual_margin > max_margin_per_pos and actual_margin > 0:
             max_qty = (max_margin_per_pos * leverage) / entry_price if entry_price > 0 and leverage > 0 else qty
@@ -1287,15 +1297,34 @@ def execute_signal(data: dict) -> dict:
 
     order_res = bx.place_order(symbol, order_side, pos_side, qty, "MARKET")
 
-    # ── RETRY ON INSUFFICIENT MARGIN: kurangi qty 50%, coba lagi ──
+    # ── RETRY ON INSUFFICIENT MARGIN: kurangi qty + drop TP terkecil ──
     if order_res.get("code") != 0 and "insufficient" in str(order_res.get("msg", "")).lower() and qty > 0:
+        _tp_prec_retry = max(cfg.get("qty_precision", 2) + 1, 4)
         for retry in range(3):
             qty = round(qty * 0.5, cfg.get("qty_precision", 3))
             notional = qty * entry_price
             if notional < 2:  # BingX min notional $2
                 logger.warning(f"🚫 RETRY {retry+1}: {symbol} qty terlalu kecil {qty} (notional ${notional:.2f}) → stop")
                 break
-            logger.warning(f"🔄 RETRY {retry+1}: {symbol} insufficient margin → kurangi qty ke {qty} (notional ${notional:.2f})")
+            # Drop TP terkecil saat retry supaya sisa TP muat min notional
+            _active_tp_indices = [i for i, p in enumerate(tp_prices) if p > 0 and i != _get_last_tp_idx(tp_prices, pos_side)]
+            if _active_tp_indices and retry >= 1:
+                # Drop TP dengan qty terkecil
+                _drop_idx = min(_active_tp_indices, key=lambda i: qtys[i] if i < len(qtys) else 0)
+                tp_prices[_drop_idx] = 0
+                qtys[_drop_idx] = 0
+                logger.info(f"🎯 RETRY {retry+1} DROP: {symbol} TP{_drop_idx+1} di-drop (qty kurang)")
+            # Redistribusi qtys proporsional ke TP yang tersisa
+            _remaining_tps = [(i, tp_prices[i]) for i in range(len(tp_prices)) if tp_prices[i] > 0]
+            if _remaining_tps:
+                _eq = round(qty / len(_remaining_tps), _tp_prec_retry)
+                for _ti, _ in _remaining_tps:
+                    if _ti < len(qtys):
+                        qtys[_ti] = _eq
+                # Absorb rounding ke last TP
+                _last_i = _remaining_tps[-1][0]
+                qtys[_last_i] = round(qty - sum(qtys[i] for i, _ in _remaining_tps[:-1]), _tp_prec_retry)
+            logger.warning(f"🔄 RETRY {retry+1}: {symbol} insufficient margin → qty {qty}, TPs: {len(_remaining_tps)} (notional ${notional:.2f})")
             order_res = bx.place_order(symbol, order_side, pos_side, qty, "MARKET")
             if order_res.get("code") == 0:
                 logger.info(f"✅ RETRY {retry+1} SUKSES: {symbol} qty={qty}")
