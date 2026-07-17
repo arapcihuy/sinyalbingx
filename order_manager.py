@@ -883,31 +883,38 @@ def execute_signal(data: dict) -> dict:
         
         # Risk% disesuaikan jumlah posisi & sisa margin
         risk_pct = float(brain_engine.get_risk_for_positions(balance, open_count, active_symbols))
-        # Bagi risk per posisi — total risk = risk_pct, per coin = risk_pct / open_count
-        risk_amount = balance * risk_pct / 100 / max(open_count, 1)
         sl_delta = abs(entry_price - sl_price)
+        sl_pct = sl_delta / entry_price if entry_price > 0 else 0.02
         min_margin = cfg.get("min_margin", 1.0)
         max_lev = cfg.get("max_lev", 50)
+        mmr = float(cfg.get("mmr", 0.005))
         
-        # Target margin = 2x risk_amount (biar margin naik seiring balance)
-        target_margin = max(risk_amount * 2, min_margin)
+        # ── FAIR SHARE: Available margin dibagi rata semua posisi ──
+        fair_share = available / max(open_count, 1)
+        # Target margin = max(fair_share, min_margin * 0.5) — 50% min_margin because BingX notional is the real gate
+        target_margin = max(fair_share, min_margin * 0.5)
+        # Cap: jangan ambil lebih dari 40% available per posisi
+        if available > 0:
+            target_margin = min(target_margin, available * 0.40)
         
-        # lev = risk_amount × entry / (sl_delta × target_margin)
-        if sl_delta > 0 and target_margin > 0:
-            lev_for_target = int((risk_amount * entry_price) / (sl_delta * target_margin))
-            lev_for_target = max(1, min(lev_for_target, max_lev))
-        else:
-            lev_for_target = 20
+        # ── LEVERAGE: Hitung dari SL distance supaya LIQ ga dekat SL ──
+        # safe_lev = 1 / (sl_pct + mmr) — SL harus trigger SEBELUM liquidation
+        safe_lev = int(1.0 / (sl_pct + mmr)) if sl_pct > 0 else max_lev
+        safe_lev = max(1, min(safe_lev, max_lev))
         
-        # Cek margin
-        qty = risk_amount / sl_delta if sl_delta > 0 else 0
-        margin = (qty * entry_price) / lev_for_target if lev_for_target > 0 else 0
+        # ── QTY: Dari target_margin & leverage ──
+        # margin = qty × entry / lev → qty = margin × lev / entry
+        qty = (target_margin * safe_lev) / entry_price if entry_price > 0 else 0
+        leverage = safe_lev
+        margin = (qty * entry_price) / leverage if leverage > 0 else 0
         
-        # Kalau margin < min_margin, turunin lev
-        if margin < min_margin:
-            leverage = brain_engine.get_leverage_for_min_margin(balance, entry_price, sl_price, pos_side, symbol)
-        else:
-            leverage = lev_for_target
+        # ── MIN MARGIN CHECK: BingX butuh minimal margin ──
+        if margin < min_margin * 0.5:
+            # Naikkan leverage sampai margin cukup (tapi tetap di bawah safe_lev)
+            lev_needed = int(math.ceil((min_margin * 0.5 * safe_lev) / max(margin, 0.01)))
+            leverage = min(lev_needed, safe_lev, max_lev)
+            qty = (target_margin * leverage) / entry_price if entry_price > 0 else qty
+            margin = (qty * entry_price) / leverage if leverage > 0 else 0
         
         logger.info(f"🧠 BRAIN LEV: {leverage}x | Risk: {risk_pct}% | Open: {open_count} | Equity: ${balance:.2f} | Available: ${available:.2f}")
     else:
