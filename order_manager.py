@@ -857,6 +857,15 @@ def execute_signal(data: dict) -> dict:
 
     logger.info(f"🎯 TV MUTLAK → TP1={tp1_price} TP2={tp2_price} TP3={tp3_price} TP4={tp4_price} SL={sl_price}")
 
+    # ── TP1 ONLY MODE: Semua qty ke TP1, skip TP2-4 ──
+    _is_tp1_only = (tp_mode == "tp1_only")
+    if _is_tp1_only and tp1_price > 0:
+        logger.info(f"🎯 TP1 ONLY MODE → TP1={tp1_price}, TP2-4 di-skip (scalper mode)")
+        tp2_price = 0
+        tp3_price = 0
+        tp4_price = 0
+        tp_prices = [tp1_price, 0, 0, 0]
+
     # ── Symbol config (needed by brain block + liquidation guard) ──
     cfg = brain_engine.get_symbol_config(symbol)
 
@@ -959,13 +968,14 @@ def execute_signal(data: dict) -> dict:
 
     # ── 4-TP LEVERAGE BOOST: Naikkan leverage supaya 4 TP wajib muat ──
     # Hitung min qty untuk 4 TP berdasarkan trigger_min_notional
+    # SKIP untuk tp1_only mode — hanya 1 TP, ga perlu boost
     try:
         _trigger_min = bx.get_trigger_min_notional(symbol)
     except Exception:
         _trigger_min = 16.0
     _active_tps = [p for p in tp_prices if p > 0]
     _min_qty_4tp = 0
-    if _active_tps and _trigger_min > 0:
+    if _active_tps and _trigger_min > 0 and not _is_tp1_only:
         _min_avg_tp = min(_active_tps)
         _min_qty_4tp = math.ceil(len(_active_tps) * _trigger_min / _min_avg_tp * 10**cfg.get("qty_precision", 3)) / 10**cfg.get("qty_precision", 3)
 
@@ -1124,19 +1134,27 @@ def execute_signal(data: dict) -> dict:
     except Exception:
         trigger_min_notional = min_notional * 8 if min_notional > 0 else 20.0
 
-    # ── TP NOTIONAL GUARD: Redistribusi qty rata ke semua TP ──
-    # ponytail: Tidak bump ke min_notional — BingX actual limit lebih rendah dari
-    # _TRIGGER_MIN_NOTIONAL_MULT=8. Distribusi rata, let BingX reject kalau kekecilan.
+    # ── TP NOTIONAL GUARD: Redistribusi qty ──
+    # tp1_only: 100% qty ke TP1 (scalper mode)
+    # multiple: distribusi rata ke semua TP
     if len(tp_prices) > 0:
         _valid_tps = [(i, p) for i, p in enumerate(tp_prices) if p > 0]
         _n_tps = len(_valid_tps)
         if _n_tps > 0:
-            _eq = round(qty / _n_tps, _tp_prec)
-            for _ti, _ in _valid_tps:
-                qtys[_ti] = _eq
-            # Absorb rounding ke TP terakhir
-            _last_ti = _valid_tps[-1][0]
-            qtys[_last_ti] = round(qty - sum(qtys[j] for j, _ in _valid_tps[:-1]), _tp_prec)
+            if _is_tp1_only:
+                # TP1 ONLY: semua qty ke TP1
+                qtys[0] = round(qty, _tp_prec)
+                for _ti in range(1, len(qtys)):
+                    qtys[_ti] = 0.0
+                logger.info(f"🎯 TP1 ONLY: qty={qty} → TP1={tp1_price} (100%)")
+            else:
+                # MULTIPLE: distribusi rata
+                _eq = round(qty / _n_tps, _tp_prec)
+                for _ti, _ in _valid_tps:
+                    qtys[_ti] = _eq
+                # Absorb rounding ke TP terakhir
+                _last_ti = _valid_tps[-1][0]
+                qtys[_last_ti] = round(qty - sum(qtys[j] for j, _ in _valid_tps[:-1]), _tp_prec)
             # Log warning kalau ada TP di bawah min notional
             for _ti, _tp in _valid_tps:
                 _notional = qtys[_ti] * _tp
@@ -1240,35 +1258,47 @@ def execute_signal(data: dict) -> dict:
 
     bx.set_leverage(symbol, leverage, pos_side)
 
-    # ── MIN QTY CHECK: Pastikan qty cukup untuk 4 TP split (BingX min notional ~$17.84/trigger ETH) ──
-    # PENTING: leverage tidak boleh melebihi _liq_safe_lev (LIQ GUARD)
-    try:
-        _min_notional = trigger_min_notional  # use trigger min for TP/SL orders
-        if _min_notional > 0 and len(tp_prices) >= 2:
-            _min_pct = 0.15  # TP4 weight
-            _min_qty_needed = math.ceil(_min_notional / (_min_pct * entry_price) * 10**cfg.get("qty_precision", 3)) / 10**cfg.get("qty_precision", 3)
-            if qty < _min_qty_needed:
-                _avail = balance - used_margin if used_margin < balance else 0
-                _min_lev_needed = math.ceil((_min_qty_needed * entry_price) / max(_avail, 0.1))
-                # CRITICAL: cap di LIQ GUARD limit — SL harus trigger SEBELUM liquidation
-                _max_safe_lev = _liq_safe_lev if _liq_safe_lev > 0 else cfg.get("max_lev", 100)
-                _min_lev_needed = min(_min_lev_needed, _max_safe_lev, cfg.get("max_lev", 100))
-                if _min_lev_needed > leverage and _avail > 0:
-                    leverage = _min_lev_needed
-                    qty = _min_qty_needed
-                    bx.set_leverage(symbol, leverage, pos_side)
-                    logger.warning(f"🎯 MIN QTY BUMP: {symbol} qty {qty} (need {_min_qty_needed} for 4 TP split) → lev {leverage}x (liq_safe={_max_safe_lev}x)")
-                elif _min_lev_needed <= leverage:
-                    # Leverage cukup, tapi qty masih kurang → bump qty
-                    if qty < _min_qty_needed:
+    # ── MIN QTY CHECK: Pastikan qty cukup untuk TP split ──
+    # SKIP untuk tp1_only — cuma 1 TP, ga perlu split, qty cukup untuk 1 trigger order
+    if not _is_tp1_only:
+        try:
+            _min_notional = trigger_min_notional  # use trigger min for TP/SL orders
+            if _min_notional > 0 and len(tp_prices) >= 2:
+                _min_pct = 0.15  # TP4 weight
+                _min_qty_needed = math.ceil(_min_notional / (_min_pct * entry_price) * 10**cfg.get("qty_precision", 3)) / 10**cfg.get("qty_precision", 3)
+                if qty < _min_qty_needed:
+                    _avail = balance - used_margin if used_margin < balance else 0
+                    _min_lev_needed = math.ceil((_min_qty_needed * entry_price) / max(_avail, 0.1))
+                    # CRITICAL: cap di LIQ GUARD limit — SL harus trigger SEBELUM liquidation
+                    _max_safe_lev = _liq_safe_lev if _liq_safe_lev > 0 else cfg.get("max_lev", 100)
+                    _min_lev_needed = min(_min_lev_needed, _max_safe_lev, cfg.get("max_lev", 100))
+                    if _min_lev_needed > leverage and _avail > 0:
+                        leverage = _min_lev_needed
                         qty = _min_qty_needed
-                        logger.warning(f"🎯 MIN QTY BUMP: {symbol} qty → {qty} (lev {leverage}x cukup, liq_safe={_max_safe_lev}x)")
+                        bx.set_leverage(symbol, leverage, pos_side)
+                        logger.warning(f"🎯 MIN QTY BUMP: {symbol} qty {qty} (need {_min_qty_needed} for 4 TP split) → lev {leverage}x (liq_safe={_max_safe_lev}x)")
+                    elif _min_lev_needed <= leverage:
+                        # Leverage cukup, tapi qty masih kurang → bump qty
+                        if qty < _min_qty_needed:
+                            qty = _min_qty_needed
+                            logger.warning(f"🎯 MIN QTY BUMP: {symbol} qty → {qty} (lev {leverage}x cukup, liq_safe={_max_safe_lev}x)")
+                        else:
+                            logger.info(f"🎯 MIN QTY OK: {symbol} qty {qty} sudah cukup untuk 4 TP split")
                     else:
-                        logger.info(f"🎯 MIN QTY OK: {symbol} qty {qty} sudah cukup untuk 4 TP split")
-                else:
-                    pass
-    except Exception as mq_err:
-        logger.warning(f"⚠️ Min qty check error: {mq_err}")
+                        pass
+        except Exception as mq_err:
+            logger.warning(f"⚠️ Min qty check error: {mq_err}")
+    else:
+        # TP1 ONLY: cek min notional untuk 1 TP aja
+        try:
+            _min_notional = trigger_min_notional
+            if _min_notional > 0 and tp1_price > 0:
+                _min_qty_1tp = math.ceil(_min_notional / tp1_price * 10**cfg.get("qty_precision", 3)) / 10**cfg.get("qty_precision", 3)
+                if qty < _min_qty_1tp:
+                    logger.info(f"🎯 TP1 ONLY MIN QTY: {symbol} qty {qty} → {_min_qty_1tp} (min notional ${_min_notional})")
+                    qty = _min_qty_1tp
+        except Exception as mq_err:
+            logger.warning(f"⚠️ TP1 only min qty check error: {mq_err}")
 
     order_res = bx.place_order(symbol, order_side, pos_side, qty, "MARKET")
 
@@ -1512,9 +1542,11 @@ def execute_signal(data: dict) -> dict:
         
         # Kirim Telegram Notif Entry Sukses
         try:
+            _mode_tag = "🎯 *Mode:* `SCALPER (1TP)`\n" if _is_tp1_only else ""
             msg_entry = (
                 f"🚀 *ENTRY {pos_side}* | `{symbol}`\n"
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{_mode_tag}"
                 f"📈 *Entry:* `{entry_price}`\n"
                 f"⚖️ *Leverage:* `{leverage}x`\n"
                 f"💰 *Margin/Qty:* `{qty}`\n"
