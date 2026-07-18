@@ -857,14 +857,19 @@ def execute_signal(data: dict) -> dict:
 
     logger.info(f"🎯 TV MUTLAK → TP1={tp1_price} TP2={tp2_price} TP3={tp3_price} TP4={tp4_price} SL={sl_price}")
 
-    # ── TP1 ONLY MODE: Semua qty ke TP1, skip TP2-4 ──
+    # ── TP1 ONLY MODE: Brain hitung TP1/SL, skip TP2-4 ──
     _is_tp1_only = (tp_mode == "tp1_only")
-    if _is_tp1_only and tp1_price > 0:
-        logger.info(f"🎯 TP1 ONLY MODE → TP1={tp1_price}, TP2-4 di-skip (scalper mode)")
+    if _is_tp1_only:
+        logger.info(f"🎯 TP1 ONLY SCALPER MODE → Brain hitung TP1 & SL (TV TP/SL di-skip)")
+        scalper = brain_engine.get_scalper_tp_sl(entry_price, pos_side, symbol, balance)
+        tp1_price = scalper["tp1"]
+        sl_price = scalper["sl"]
         tp2_price = 0
         tp3_price = 0
         tp4_price = 0
         tp_prices = [tp1_price, 0, 0, 0]
+        leverage = scalper["leverage"]
+        logger.info(f"🧠 SCALPER → TP1={tp1_price} ({scalper['tp_dist_pct']:.2f}%) SL={sl_price} ({scalper['sl_dist_pct']:.2f}%) RR={scalper['rr_ratio']} Lev={leverage}x")
 
     # ── Symbol config (needed by brain block + liquidation guard) ──
     cfg = brain_engine.get_symbol_config(symbol)

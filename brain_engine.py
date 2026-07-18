@@ -859,3 +859,165 @@ def get_max_position_value(symbol: str, available_balance: float, leverage: int)
     max_val = min(notional_by_lev, bx_max_notional)
     logger.info(f"📊 MAX_POS_VALUE: {symbol} | Lev {leverage}x → {notional_by_lev:.2f} | BX cap → {bx_max_notional:.2f} | Final {max_val:.2f}")
     return max_val
+
+
+# ─────────────────────────────────────────────────────────────────────
+# SCALPER BRAIN: Auto TP1/SL calculation untuk 1-TP scalper mode
+# ─────────────────────────────────────────────────────────────────────
+
+# Scalper minimum thresholds (harus lewati BingX fee 0.10% round trip)
+SCALPER_MIN_TP_PCT = 0.005   # 0.5% minimum TP distance
+SCALPER_MIN_SL_PCT = 0.004   # 0.4% minimum SL distance
+SCALPER_TARGET_RR = 1.25     # Risk:Reward ratio minimum
+
+def get_scalper_tp_sl(entry_price: float, side: str, symbol: str, balance: float) -> dict:
+    """
+    Hitung TP1 & SL otomatis untuk scalper mode (1-TP).
+    
+    Logic:
+    1. Ambil ATR dari 5m candle (lebih sensitif untuk scalper)
+    2. TP1 = max(3x ATR_5m, 0.5% entry) — minimal lewati fee
+    3. SL = max(2x ATR_5m, 0.4% entry) — ketat
+    4. Leverage = hitung dari SL distance (LIQ wajib lebih jauh dari SL)
+    5. Qty = hitung dari risk management
+    
+    Returns: {tp1, sl, leverage, qty, atr_5m, margin}
+    """
+    cfg = get_symbol_config(symbol)
+    price_prec = cfg.get("price_precision", 2)
+    mmr = float(cfg.get("mmr", 0.005))
+    
+    # 1. Ambil ATR dari 5m candle
+    atr_5m = 0
+    try:
+        import bingx_client as bx
+        candles_5m = bx.get_candles(symbol, "5m", limit=50)
+        if candles_5m:
+            atr_5m = calculate_atr(candles_5m, 14)
+            logger.info(f"📊 SCALPER ATR 5m ({symbol}): {atr_5m:.6f} ({atr_5m/entry_price*100:.3f}%)")
+    except Exception as e:
+        logger.warning(f"⚠️ Gagal ambil ATR 5m {symbol}: {e}")
+    
+    # Fallback: 0.3% dari price (reasonable untuk 5m BTC/ETH)
+    if atr_5m <= 0:
+        atr_5m = entry_price * 0.003
+        logger.info(f"📊 SCALPER ATR fallback ({symbol}): {atr_5m:.6f} (0.3% dari price)")
+    
+    # 2. TP1: max(3x ATR, 0.5% entry)
+    atr_tp_dist = atr_5m * 3
+    min_tp_dist = entry_price * SCALPER_MIN_TP_PCT
+    tp_dist = max(atr_tp_dist, min_tp_dist)
+    
+    # 3. SL: max(2x ATR, 0.4% entry)
+    atr_sl_dist = atr_5m * 2
+    min_sl_dist = entry_price * SCALPER_MIN_SL_PCT
+    sl_dist = max(atr_sl_dist, min_sl_dist)
+    
+    # 4. Hitung prices berdasarkan side
+    if side == "LONG":
+        tp1_price = round(entry_price + tp_dist, price_prec)
+        sl_price = round(entry_price - sl_dist, price_prec)
+    else:  # SHORT
+        tp1_price = round(entry_price - tp_dist, price_prec)
+        sl_price = round(entry_price + sl_dist, price_prec)
+    
+    # Pastikan TP selalu > 0.5% dari entry (lewati fee)
+    tp_pct = abs(tp1_price - entry_price) / entry_price
+    if tp_pct < SCALPER_MIN_TP_PCT:
+        logger.warning(f"🎯 SCALPER TP ADJUST: {symbol} TP {tp_pct*100:.3f}% < min {SCALPER_MIN_TP_PCT*100}%")
+        if side == "LONG":
+            tp1_price = round(entry_price * (1 + SCALPER_MIN_TP_PCT), price_prec)
+        else:
+            tp1_price = round(entry_price * (1 - SCALPER_MIN_TP_PCT), price_prec)
+    
+    # Pastikan RR minimal 1.25:1
+    actual_tp_dist = abs(tp1_price - entry_price)
+    actual_sl_dist = abs(entry_price - sl_price)
+    if actual_sl_dist > 0:
+        rr = actual_tp_dist / actual_sl_dist
+        if rr < SCALPER_TARGET_RR:
+            # Perbesar TP atau perkecil SL supaya RR terpenuhi
+            new_sl_dist = actual_tp_dist / SCALPER_TARGET_RR
+            if side == "LONG":
+                sl_price = round(entry_price - new_sl_dist, price_prec)
+            else:
+                sl_price = round(entry_price + new_sl_dist, price_prec)
+            logger.info(f"🎯 SCALPER RR ADJUST: {symbol} RR {rr:.2f} → {SCALPER_TARGET_RR} (SL {sl_price})")
+    
+    # 5. Hitung leverage dari SL distance
+    sl_pct = abs(entry_price - sl_price) / entry_price
+    safe_lev = int(1.0 / (sl_pct + mmr)) if sl_pct > 0 else 50
+    safe_lev = max(1, min(safe_lev, cfg.get("max_lev", 100)))
+    leverage = safe_lev
+    
+    # 6. Hitung qty dari risk management
+    risk_pct = get_dynamic_risk_percent(balance)
+    risk_amount = balance * (risk_pct / 100)
+    sl_delta = abs(entry_price - sl_price)
+    qty = risk_amount / sl_delta if sl_delta > 0 else 0
+    
+    # Pastikan min qty BingX
+    min_qty = cfg.get("min_qty", 0.001)
+    qty = max(qty, min_qty)
+    
+    # Pastikan min notional untuk trigger order
+    trigger_min = 17.84  # fallback
+    try:
+        import bingx_client as bx
+        trigger_min = bx.get_trigger_min_notional(symbol)
+    except:
+        pass
+    min_qty_notional = trigger_min / entry_price * 1.05  # 5% buffer
+    qty = max(qty, min_qty_notional)
+    
+    # Qty precision
+    qty_prec = cfg.get("qty_precision", 3)
+    qty = round(qty, qty_prec)
+    
+    # Margin
+    margin = (qty * entry_price) / leverage if leverage > 0 else 0
+    
+    # Liquidation verify
+    est_liq = estimate_liquidation_price(entry_price, leverage, side, mmr)
+    buffer = 0.10
+    if side == "LONG" and sl_price > 0 and est_liq > 0:
+        safe_liq = est_liq * (1 + buffer)
+        if sl_price < safe_liq:
+            # SL terlalu dekat LIQ → turunkan leverage
+            while leverage > 1:
+                leverage -= 1
+                est_liq = estimate_liquidation_price(entry_price, leverage, side, mmr)
+                if est_liq * (1 + buffer) <= sl_price:
+                    break
+            margin = (qty * entry_price) / leverage if leverage > 0 else 0
+    elif side == "SHORT" and sl_price > 0 and est_liq > 0:
+        safe_liq = est_liq * (1 - buffer)
+        if sl_price > safe_liq:
+            while leverage > 1:
+                leverage -= 1
+                est_liq = estimate_liquidation_price(entry_price, leverage, side, mmr)
+                if est_liq * (1 - buffer) >= sl_price:
+                    break
+            margin = (qty * entry_price) / leverage if leverage > 0 else 0
+    
+    tp_dist_pct = abs(tp1_price - entry_price) / entry_price * 100
+    sl_dist_pct = abs(sl_price - entry_price) / entry_price * 100
+    rr_final = abs(tp1_price - entry_price) / abs(entry_price - sl_price) if abs(entry_price - sl_price) > 0 else 0
+    
+    logger.info(f"🧠 SCALPER BRAIN: {symbol} {side}")
+    logger.info(f"   Entry: {entry_price} | TP1: {tp1_price} ({tp_dist_pct:.2f}%) | SL: {sl_price} ({sl_dist_pct:.2f}%)")
+    logger.info(f"   RR: {rr_final:.2f} | Lev: {leverage}x | Qty: {qty} | Margin: ${margin:.2f}")
+    logger.info(f"   ATR 5m: {atr_5m:.6f} | Liq: {est_liq:.2f}")
+    
+    return {
+        "tp1": tp1_price,
+        "sl": sl_price,
+        "leverage": leverage,
+        "qty": qty,
+        "margin": margin,
+        "atr_5m": round(atr_5m, 6),
+        "risk_pct": risk_pct,
+        "rr_ratio": round(rr_final, 2),
+        "tp_dist_pct": round(tp_dist_pct, 3),
+        "sl_dist_pct": round(sl_dist_pct, 3),
+    }
