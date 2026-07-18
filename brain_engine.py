@@ -977,28 +977,32 @@ def get_scalper_tp_sl(entry_price: float, side: str, symbol: str, balance: float
     # Margin
     margin = (qty * entry_price) / leverage if leverage > 0 else 0
     
-    # Liquidation verify
+    # Liquidation verify — LIQ harus jauh dari SL
     est_liq = estimate_liquidation_price(entry_price, leverage, side, mmr)
-    buffer = 0.10
+    liq_buffer_pct = 0.10  # 10% buffer dari SL ke LIQ
     if side == "LONG" and sl_price > 0 and est_liq > 0:
-        safe_liq = est_liq * (1 + buffer)
-        if sl_price < safe_liq:
-            # SL terlalu dekat LIQ → turunkan leverage
+        # LIQ harus di BAWAH SL, jarak minimal 10% dari SL
+        min_liq = sl_price * (1.0 - liq_buffer_pct)
+        if est_liq > min_liq:
+            # LIQ terlalu dekat SL → turunkan leverage
             while leverage > 1:
                 leverage -= 1
                 est_liq = estimate_liquidation_price(entry_price, leverage, side, mmr)
-                if est_liq * (1 + buffer) <= sl_price:
+                if est_liq <= min_liq:
                     break
             margin = (qty * entry_price) / leverage if leverage > 0 else 0
+            logger.info(f"🛡️ SCALPER LIQ FIX: {symbol} lev → {leverage}x (LIQ={est_liq:.2f} SL={sl_price} gap OK)")
     elif side == "SHORT" and sl_price > 0 and est_liq > 0:
-        safe_liq = est_liq * (1 - buffer)
-        if sl_price > safe_liq:
+        # LIQ harus di ATAS SL, jarak minimal 10% dari SL
+        max_liq = sl_price * (1.0 + liq_buffer_pct)
+        if est_liq < max_liq:
             while leverage > 1:
                 leverage -= 1
                 est_liq = estimate_liquidation_price(entry_price, leverage, side, mmr)
-                if est_liq * (1 - buffer) >= sl_price:
+                if est_liq >= max_liq:
                     break
             margin = (qty * entry_price) / leverage if leverage > 0 else 0
+            logger.info(f"🛡️ SCALPER LIQ FIX: {symbol} lev → {leverage}x (LIQ={est_liq:.2f} SL={sl_price} gap OK)")
     
     tp_dist_pct = abs(tp1_price - entry_price) / entry_price * 100
     sl_dist_pct = abs(sl_price - entry_price) / entry_price * 100
