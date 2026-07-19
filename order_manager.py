@@ -349,8 +349,8 @@ def sync_from_exchange_on_startup():
     _logger = _log.getLogger(__name__)
     
     mode = state_manager.get_trading_mode()
-    if mode["paper_mode"] or mode["use_demo"]:
-        _logger.info("⏭️ Paper/Demo mode — skip exchange sync.")
+    if mode["paper_mode"]:
+        _logger.info("⏭️ Paper mode — skip exchange sync.")
         return
     
     try:
@@ -665,56 +665,41 @@ def execute_signal(data: dict) -> dict:
         return _close_position(symbol)
 
     # ── CHECK EXISTING POSITION & REVERSAL ──
-    # FORCE SYNC: Selalu update dari posisi asli di BingX sebelum cek sinyal
-    if not get_paper_mode():
-        try:
-            live_pos = bx.get_open_positions(symbol)
-            # Update state file dari kenyataan di bursa
-            if not live_pos and symbol in active_trade_data:
-                # Hapus posisi stale dari state
-                created_at = active_trade_data[symbol].get("created_at", 0)
-                age = time.time() - created_at if created_at > 0 else 999
-                if age > 10:
-                    logger.info(f"🗑️ SYNC: {symbol} tidak ada di BingX ({age:.0f}s old) → hapus dari state")
-                    with state_lock:
-                        del active_trade_data[symbol]
-                    save_active_trades()
-                else:
-                    logger.info(f"⏳ SYNC: {symbol} belum muncul di BingX ({age:.0f}s old) → biarkan")
-
-            # FULL SYNC: Hapus SEMUA posisi stale (ga cuma symbol ini) supaya margin calculation akurat
-            stale_syms = []
-            for _sym in list(active_trade_data.keys()):
-                if _sym == symbol:
-                    continue
-                try:
-                    _live = bx.get_open_positions(_sym)
-                    if not _live:
-                        _created = active_trade_data[_sym].get("created_at", 0)
-                        _age = time.time() - _created if _created > 0 else 999
-                        if _age > 10:
-                            stale_syms.append(_sym)
-                except Exception:
-                    pass
-            if stale_syms:
-                with state_lock:
-                    for _s in stale_syms:
-                        logger.info(f"🗑️ FULL SYNC: {_s} tidak ada di BingX → hapus dari state")
-                        del active_trade_data[_s]
-                save_active_trades()
-        except Exception as sync_err:
-            logger.warning(f"⚠️ SYNC gagal untuk {symbol}: {sync_err}")
-    
-    target_pos_side = "LONG" if action in ["BUY", "LONG"] else "SHORT"
-    opposite_pos_side = "SHORT" if target_pos_side == "LONG" else "LONG"
-    
+    # FORCE SYNC: 1 bulk call to get ALL live positions, clean all stale entries
     existing_positions = []
     if not get_paper_mode():
         try:
-            existing_positions = bx.get_open_positions(symbol)
-        except Exception as pe:
-            logger.error(f"Gagal get_open_positions untuk check reversal: {pe}")
-    else:
+            all_live = bx.get_open_positions()  # 1 call for everything
+            live_syms = {p["symbol"] for p in all_live}
+
+            # Clean ALL stale entries (local OPEN tapi ga ada di BingX)
+            stale = [s for s in list(active_trade_data.keys())
+                     if s not in live_syms and active_trade_data[s].get("status") in ("OPEN", "OPEN_SYNCED")]
+            for s in stale:
+                created = active_trade_data[s].get("created_at", 0)
+                if time.time() - (created if created > 0 else 0) > 10:
+                    logger.info(f"🗑️ SYNC: {s} stale → hapus dari state")
+                    with state_lock:
+                        if s in active_trade_data:
+                            del active_trade_data[s]
+            if stale:
+                save_active_trades()
+
+            # Get existing positions for THIS symbol (for reversal check)
+            existing_positions = [p for p in all_live if p["symbol"] == symbol]
+        except Exception as sync_err:
+            logger.warning(f"⚠️ SYNC gagal: {sync_err}")
+            # Fallback: try per-symbol
+            try:
+                existing_positions = bx.get_open_positions(symbol)
+            except Exception:
+                pass
+    
+    target_pos_side = "LONG" if action in ["BUY", "LONG"] else "SHORT"
+    opposite_pos_side = "SHORT" if target_pos_side == "LONG" else "LONG"
+
+    # Paper mode: existing positions from paper trades (live already set above in sync block)
+    if get_paper_mode():
         trades = load_paper_trades()
         existing_positions = [t for t in trades if t["symbol"] == symbol and t["status"] == "OPEN_PAPER"]
 
@@ -1641,103 +1626,105 @@ _RECONCILIATION_MISMATCH_COUNT = {}
 def audit_position_reconciliation():
     """
     Membandingkan posisi aktif di bursa BingX dengan database posisi lokal (active_trades.json).
-    Jika terdeteksi perbedaan status selama 3 putaran berturut-turut, kirimkan peringatan ke Telegram.
+    FIX: Auto-clean stale entries (local OPEN tapi ga ada di bursa) SETIAP round.
+    Kirim Telegram alert hanya 1x per symbol (bukan 3x).
     """
     global _RECONCILIATION_MISMATCH_COUNT
     import state_manager
     mode = state_manager.get_trading_mode()
-    
-    # Rekonsiliasi hanya berlaku di LIVE mode (uang asli), demo tidak wajib ketat
+
+    # Rekonsiliasi hanya berlaku di LIVE mode (uang asli)
     if mode["paper_mode"]:
         return
-        
+
     try:
         # Ambil posisi riil di bursa
         real_positions = bx.get_open_positions()
-        real_symbols = [p["symbol"] for p in real_positions]
-        
+        real_symbols = set(p["symbol"] for p in real_positions)
+
         # Ambil posisi di log lokal
-        local_trades = active_trade_data
-        local_symbols = [sym for sym, data in local_trades.items() if data.get("status") in ("OPEN", "OPEN_SYNCED")]
-        
-        # Cari ketidakcocokan (mismatch)
-        all_symbols = set(real_symbols + local_symbols)
-        for sym in all_symbols:
-            has_mismatch = False
-            mismatch_reason = ""
-            
-            if sym in real_symbols and sym not in local_symbols:
-                has_mismatch = True
-                mismatch_reason = "Posisi aktif di bursa, tetapi TIDAK terdaftar di log bot lokal."
-            elif sym in local_symbols and sym not in real_symbols:
-                has_mismatch = True
-                mismatch_reason = "Terdaftar OPEN di log bot lokal, tetapi TIDAK ada posisi di bursa."
-                
-            if has_mismatch:
-                _RECONCILIATION_MISMATCH_COUNT[sym] = _RECONCILIATION_MISMATCH_COUNT.get(sym, 0) + 1
-                
-                # ── AUTO-ADOPT: Kalau posisi ada di bursa tapi ga di lokal → adopt otomatis ──
-                if sym in real_symbols and sym not in local_symbols and _RECONCILIATION_MISMATCH_COUNT[sym] <= 1:
-                    try:
-                        _adopt_pos = [p for p in real_positions if p["symbol"] == sym and float(p.get("positionAmt", 0)) != 0]
-                        if _adopt_pos:
-                            _ap = _adopt_pos[0]
-                            _adopt_side = _ap["positionSide"]
-                            _adopt_entry = float(_ap["avgPrice"])
-                            _adopt_amt = abs(float(_ap["positionAmt"]))
-                            _adopt_lev = int(_ap.get("leverage", 20))
-                            _adopt_margin = (_adopt_amt * _adopt_entry) / _adopt_lev
-                            
-                            # Ambil TP/SL dari exchange orders
-                            _adopt_orders = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": sym})
-                            _adopt_ex = _adopt_orders.get("data", [])
-                            if isinstance(_adopt_ex, dict): _adopt_ex = _adopt_ex.get("orders", [])
-                            _adopt_sl = 0
-                            _adopt_tps = [0, 0, 0, 0]
-                            for _o in (_adopt_ex if isinstance(_adopt_ex, list) else []):
-                                if "STOP" in _o.get("type", "") and "TAKE_PROFIT" not in _o.get("type", ""):
-                                    _adopt_sl = float(_o.get("stopPrice", 0))
-                                elif "TAKE_PROFIT" in _o.get("type", ""):
-                                    for _ti in range(4):
-                                        if _adopt_tps[_ti] == 0:
-                                            _adopt_tps[_ti] = float(_o.get("stopPrice", 0))
-                                            break
-                            
-                            with state_lock:
-                                active_trade_data[sym] = {
-                                    "symbol": sym, "side": _adopt_side,
-                                    "entry_price": _adopt_entry, "qty": _adopt_amt,
-                                    "leverage": _adopt_lev, "margin": round(_adopt_margin, 2),
-                                    "status": "OPEN_SYNCED", "sl": _adopt_sl,
-                                    "tp1": _adopt_tps[0], "tp2": _adopt_tps[1],
-                                    "tp3": _adopt_tps[2], "tp4": _adopt_tps[3],
-                                    "tp_notified": {}, "created_at": time.time()
-                                }
-                            save_active_trades()
-                            logger.info(f"📥 AUTO-ADOPT (reconcile): {sym} {_adopt_side} entry={_adopt_entry} qty={_adopt_amt}")
-                    except Exception as adopt_err:
-                        logger.error(f"Gagal auto-adopt {sym} dari reconcile: {adopt_err}")
-                
-                if _RECONCILIATION_MISMATCH_COUNT[sym] == 3: # 3x berturut-turut (~45 detik)
-                    # Kirim notifikasi peringatan ke Telegram
-                    TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-                    TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", None)
+        local_trades = dict(active_trade_data)  # snapshot
+        local_open = {sym: data for sym, data in local_trades.items() if data.get("status") in ("OPEN", "OPEN_SYNCED")}
+
+        stale_to_clean = []
+        missing_to_adopt = []
+
+        for sym, data in local_open.items():
+            if sym not in real_symbols:
+                stale_to_clean.append(sym)
+
+        for p in real_positions:
+            sym = p["symbol"]
+            if sym not in local_open and float(p.get("positionAmt", 0)) != 0:
+                missing_to_adopt.append(p)
+
+        # ── AUTO-CLEAN STALE: langsung hapus dari state ──
+        if stale_to_clean:
+            with state_lock:
+                for sym in stale_to_clean:
+                    logger.warning(f"🗑️ RECONCILE: {sym} ada di state tapi TIDAK di BingX → auto-hapus")
+                    del active_trade_data[sym]
+                    _RECONCILIATION_MISMATCH_COUNT.pop(sym, None)
+            save_active_trades()
+
+            # Telegram alert (1x per symbol)
+            TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+            TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", None)
+            if TG_TOKEN and TG_CHAT_ID:
+                try:
+                    import requests
                     msg = (
-                        f"🚨 *ALARM REKONSILIASI POSISI*\n"
+                        f"🗑️ *AUTO-CLEAN STALE POSITIONS*\n"
                         f"━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🪙 *Pair:* `{sym}`\n"
-                        f"⚠️ *Anomali:* {mismatch_reason}\n"
-                        f"📝 *Solusi:* Periksa manual open positions di aplikasi BingX Anda!\n"
+                        f"🪙 *Removed:* `{'`, `'.join(stale_to_clean)}`\n"
+                        f"📝 *Reason:* Posisi sudah tidak ada di BingX\n"
                         f"━━━━━━━━━━━━━━━━━━━━━"
                     )
-                    try:
-                        import requests
-                        requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                                      json={"chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=5)
-                    except Exception as te:
-                        logger.error(f"Gagal kirim notif rekonsiliasi ke Telegram: {te}")
-            else:
-                _RECONCILIATION_MISMATCH_COUNT[sym] = 0
+                    requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                                  json={"chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=5)
+                except Exception as te:
+                    logger.error(f"Gagal kirim notif reconcile: {te}")
+
+        # ── AUTO-ADOPT: posisi ada di bursa tapi ga di lokal ──
+        for p in missing_to_adopt:
+            sym = p["symbol"]
+            try:
+                _adopt_side = p["positionSide"]
+                _adopt_entry = float(p["avgPrice"])
+                _adopt_amt = abs(float(p["positionAmt"]))
+                _adopt_lev = int(p.get("leverage", 20))
+                _adopt_margin = (_adopt_amt * _adopt_entry) / _adopt_lev
+
+                # Ambil TP/SL dari exchange orders
+                _adopt_orders = bx._request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": sym})
+                _adopt_ex = _adopt_orders.get("data", [])
+                if isinstance(_adopt_ex, dict): _adopt_ex = _adopt_ex.get("orders", [])
+                _adopt_sl = 0
+                _adopt_tps = [0, 0, 0, 0]
+                for _o in (_adopt_ex if isinstance(_adopt_ex, list) else []):
+                    if "STOP" in _o.get("type", "") and "TAKE_PROFIT" not in _o.get("type", ""):
+                        _adopt_sl = float(_o.get("stopPrice", 0))
+                    elif "TAKE_PROFIT" in _o.get("type", ""):
+                        for _ti in range(4):
+                            if _adopt_tps[_ti] == 0:
+                                _adopt_tps[_ti] = float(_o.get("stopPrice", 0))
+                                break
+
+                with state_lock:
+                    active_trade_data[sym] = {
+                        "symbol": sym, "side": _adopt_side,
+                        "entry_price": _adopt_entry, "qty": _adopt_amt,
+                        "leverage": _adopt_lev, "margin": round(_adopt_margin, 2),
+                        "status": "OPEN_SYNCED", "sl": _adopt_sl,
+                        "tp1": _adopt_tps[0], "tp2": _adopt_tps[1],
+                        "tp3": _adopt_tps[2], "tp4": _adopt_tps[3],
+                        "tp_notified": {}, "created_at": time.time()
+                    }
+                save_active_trades()
+                logger.info(f"📥 AUTO-ADOPT (reconcile): {sym} {_adopt_side} entry={_adopt_entry} qty={_adopt_amt}")
+            except Exception as adopt_err:
+                logger.error(f"Gagal auto-adopt {sym}: {adopt_err}")
+
     except Exception as e:
         logger.error(f"Gagal melakukan audit rekonsiliasi: {e}")
 
