@@ -681,6 +681,27 @@ def execute_signal(data: dict) -> dict:
                     save_active_trades()
                 else:
                     logger.info(f"⏳ SYNC: {symbol} belum muncul di BingX ({age:.0f}s old) → biarkan")
+
+            # FULL SYNC: Hapus SEMUA posisi stale (ga cuma symbol ini) supaya margin calculation akurat
+            stale_syms = []
+            for _sym in list(active_trade_data.keys()):
+                if _sym == symbol:
+                    continue
+                try:
+                    _live = bx.get_open_positions(_sym)
+                    if not _live:
+                        _created = active_trade_data[_sym].get("created_at", 0)
+                        _age = time.time() - _created if _created > 0 else 999
+                        if _age > 10:
+                            stale_syms.append(_sym)
+                except Exception:
+                    pass
+            if stale_syms:
+                with state_lock:
+                    for _s in stale_syms:
+                        logger.info(f"🗑️ FULL SYNC: {_s} tidak ada di BingX → hapus dari state")
+                        del active_trade_data[_s]
+                save_active_trades()
         except Exception as sync_err:
             logger.warning(f"⚠️ SYNC gagal untuk {symbol}: {sync_err}")
     
