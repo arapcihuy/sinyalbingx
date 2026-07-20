@@ -875,12 +875,19 @@ def execute_signal(data: dict) -> dict:
         scalper = brain_engine.get_scalper_tp_sl(entry_price, pos_side, symbol, balance)
         tp1_price = scalper["tp1"]
         sl_price = scalper["sl"]
-        tp2_price = 0
-        tp3_price = 0
-        tp4_price = 0
+        tp2_price, tp3_price, tp4_price = 0, 0, 0
         tp_prices = [tp1_price, 0, 0, 0]
         leverage = scalper["leverage"]
         logger.info(f"🧠 SCALPER → TP1={tp1_price} ({scalper['tp_dist_pct']:.2f}%) SL={sl_price} ({scalper['sl_dist_pct']:.2f}%) RR={scalper['rr_ratio']} Lev={leverage}x")
+
+    # ── REVERSAL ONLY MODE: No TP/SL at all ──
+    if tp_mode == "reversal_only":
+        logger.info(f"🔄 REVERSAL ONLY MODE → TP/SL di-disable (Posisi Naked)")
+        tp1_price, tp2_price, tp3_price, tp4_price, sl_price = 0, 0, 0, 0, 0
+        tp_prices = [0, 0, 0, 0]
+        # Leverage tetap dari brain agar margin tetap aman (optional, bisa di-nol-kan juga)
+        # leverage = 0 
+
 
     # ── Symbol config (needed by brain block + liquidation guard) ──
     cfg = brain_engine.get_symbol_config(symbol)
@@ -974,10 +981,17 @@ def execute_signal(data: dict) -> dict:
                     _liq_safe_lev = safe_lev
 
     # ── NO-SL FALLBACK: Tanpa SL, LIQ GUARD tidak bisa hitung → cap agresif ──
-    if sl_price <= 0 and leverage > 10:
-        logger.warning(f"🛡️ NO SL for {symbol} → cap leverage dari {leverage}x ke 10x (tanpa proteksi)")
-        leverage = 10
-        _liq_safe_lev = 10
+    # Rasyid request: "biar botku atur aja inget ya target ku ada 6coin besar kecil usahain cukup semua itu pikirin juga liquinya"
+    if sl_price <= 0:
+        # Jika balance dibagi 6 koin, margin per koin = balance / 6
+        # Supaya liquidation price jauh (misal > 10% movement), leverage tidak boleh terlalu besar.
+        # Cap di 20x memberikan buffer likuidasi sekitar ~4.5% - 5%. Cap di 10x memberikan buffer ~9%.
+        # Karena 6 coin harus masuk dan notional min BingX tinggi, kita set max lev 15x untuk koin tanpa SL.
+        _max_naked_lev = 15
+        if leverage > _max_naked_lev:
+            logger.warning(f"🛡️ NO SL for {symbol} → cap leverage dari {leverage}x ke {_max_naked_lev}x untuk cegah likuidasi cepat pada 6 koin")
+            leverage = _max_naked_lev
+            _liq_safe_lev = _max_naked_lev
 
     est_liq_final = brain_engine.estimate_liquidation_price(entry_price, leverage, pos_side, mmr)
     logger.info(f"🛡️ LIQ CHECK: {symbol} {pos_side} | Entry={entry_price:.4f} SL={sl_price:.4f} Liq={est_liq_final:.4f} Lev={leverage}x")
