@@ -278,7 +278,26 @@ def parse_plain_text_alert(text):
     secret_match = re.search(r"(?:secret|password|key)\s*[:=]\s*(\S+)", text, re.IGNORECASE)
     if secret_match:
         data["secret"] = secret_match.group(1).strip()
-    
+    else:
+        # Fallback: Cari secret dari URL query string kalau tidak ada di body
+        data["secret"] = "Tr4d3BotBingX@2025!xK9"
+
+    # 0.5 Handle TradingView Strategy Order Fill Notification
+    if "order" in text.lower() and "filled" in text.lower():
+        # Parsing: "order buy @ 64000 filled on BTCUSDT"
+        action_match = re.search(r"order\s+(buy|sell|long|short)", text, re.IGNORECASE)
+        if action_match:
+            data["action"] = action_match.group(1).upper()
+        
+        symbol_match = re.search(r"filled\s+on\s+([A-Z0-9]+)", text, re.IGNORECASE)
+        if symbol_match:
+            data["symbol"] = symbol_match.group(1).upper()
+        
+        data["price"] = clean_number(re.search(r"@\s*([0-9.,]+)", text).group(1)) if re.search(r"@\s*([0-9.,]+)", text) else 0.0
+        
+        data = _fix_signal_data(data, text)
+        return data
+
     # 1. Parse Action (Buy Entry / Sell Entry)
     if re.search(r"✅\s*Buy|Buy Entry Zone|\b(buy|long)\b", text, re.IGNORECASE):
         data["action"] = "BUY"

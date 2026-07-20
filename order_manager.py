@@ -650,6 +650,11 @@ def get_total_open_positions_count():
     return len(positions)
 
 def execute_signal(data: dict) -> dict:
+    # DRY RUN CHECK
+    if os.getenv("DRY_RUN", "true").lower() == "true":
+        log.info(f"DRY RUN: Order execution for {data.get('symbol')} skipped.")
+        return {"status": "success", "message": "Dry run mode enabled."}
+
     action = data.get("action", "").upper()
     symbol = data.get("symbol", "BTC-USDT")
 
