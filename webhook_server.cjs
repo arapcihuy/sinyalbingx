@@ -72,7 +72,7 @@ const server = http.createServer((req, res) => {
         return;
       }
 
-      if (!['BTC-USDT', 'ETH-USDT'].includes(pair)) {
+      if (!['BTC-USDT', 'ETH-USDT', 'SOL-USDT', 'BNB-USDT', 'XRP-USDT', 'ADA-USDT'].includes(pair)) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'ignored', reason: 'symbol not allowed' }));
         return;
