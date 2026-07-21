@@ -216,7 +216,7 @@ def run_async_execution(data, pair, signal, price, sl, tp1, tp2, tp3, tp4, TG_TO
 
 import re
 
-_TRADEABLE_SYMBOLS_CACHE = {"BTC-USDT", "ETH-USDT", "BNB-USDT"}
+_TRADEABLE_SYMBOLS_CACHE = {"BTC-USDT", "ETH-USDT", "BNB-USDT", "SOL-USDT", "XRP-USDT", "ADA-USDT"}
 
 def is_symbol_tradeable(symbol: str) -> bool:
     """Cek apakah symbol valid. Bypass API sinkron (agar webhook TV tidak timeout)."""
